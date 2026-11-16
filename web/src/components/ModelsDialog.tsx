@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { FieldErrors, createConnection, deleteConnection, testConnection, updateConnection, type ConnectionFields } from '../api'
+import { useMemo, useRef, useState } from 'react'
+import { FieldErrors, SignedOut, createConnection, deleteConnection, testConnection, updateConnection, type ConnectionFields } from '../api'
 import { useT, type MessageKey, type T } from '../i18n'
 import type { CheckResult, ConnectionsState, FieldError, LlmApi, ModelConnection, ProviderPreset } from '../types'
 import { ConfirmDialog, useEscape } from './ConfirmDialog'
@@ -49,11 +49,12 @@ export function CheckLine({ result, model }: { result: CheckResult | 'testing' |
   )
 }
 
-export function ModelsDialog({ state, providers, roster, onChange, onClose }: {
+export function ModelsDialog({ state, providers, roster, onChange, onSignedOut, onClose }: {
   state: ConnectionsState
   providers: ProviderPreset[]
   roster: Roster
   onChange: (next: ConnectionsState) => void
+  onSignedOut?: () => void
   onClose: () => void
 }) {
   const t = useT()
@@ -77,7 +78,8 @@ export function ModelsDialog({ state, providers, roster, onChange, onClose }: {
     try {
       const r = await testConnection({ connectionId: c.id })
       setChecks((s) => ({ ...s, [c.id]: r }))
-    } catch {
+    } catch (err) {
+      if (err instanceof SignedOut) { onSignedOut?.(); return }
       setChecks((s) => ({ ...s, [c.id]: { ok: false, code: 'unreachable' } }))
     }
   }
@@ -86,15 +88,21 @@ export function ModelsDialog({ state, providers, roster, onChange, onClose }: {
     try {
       onChange(await deleteConnection(c.id))
     } catch (err) {
+      if (err instanceof SignedOut) { onSignedOut?.(); return }
       setError(err instanceof FieldErrors && err.errors[0] ? fieldText(t, err.errors[0]) : String(err))
     }
   }
 
   const editingConnection = editing && editing !== 'new' ? state.connections.find((c) => c.id === editing.id) : undefined
+  const scrimDown = useRef(false)
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div className="modal modal-wide" role="dialog" aria-label={t('models.title')} onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-scrim"
+      onMouseDown={(e) => { scrimDown.current = e.target === e.currentTarget }}
+      onClick={(e) => { if (e.target === e.currentTarget && scrimDown.current) onClose(); scrimDown.current = false }}
+    >
+      <div className="modal modal-wide" role="dialog" aria-modal="true" aria-label={t('models.title')} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div className="modal-title">{t('models.title')}</div>
           <button type="button" className="modal-close" onClick={onClose} aria-label={t('models.close')} title={t('models.close')}>
@@ -107,6 +115,7 @@ export function ModelsDialog({ state, providers, roster, onChange, onClose }: {
             initial={editingConnection}
             providers={providers}
             onSaved={(next) => { onChange(next); setEditing(null) }}
+            onSignedOut={onSignedOut}
             onCancel={() => setEditing(null)}
           />
         ) : (
@@ -176,10 +185,11 @@ function draftFrom(c: ModelConnection | undefined, providers: ProviderPreset[]):
 }
 
 /** 新加或编辑一个连接。默认连接被环境变量锁住的字段只读。 */
-export function ConnectionForm({ initial, providers, onSaved, onCancel }: {
+export function ConnectionForm({ initial, providers, onSaved, onSignedOut, onCancel }: {
   initial?: ModelConnection
   providers: ProviderPreset[]
   onSaved: (next: ConnectionsState) => void
+  onSignedOut?: () => void
   onCancel: () => void
 }) {
   const t = useT()
@@ -241,6 +251,7 @@ export function ConnectionForm({ initial, providers, onSaved, onCancel }: {
       if (listed.length) setModels(listed)
       setErrors([])
     } catch (err) {
+      if (err instanceof SignedOut) { onSignedOut?.(); return }
       setCheck(undefined)
       setErrors(err instanceof FieldErrors ? err.errors : [{ key: '', code: 'invalid' }])
     }
@@ -251,6 +262,7 @@ export function ConnectionForm({ initial, providers, onSaved, onCancel }: {
     try {
       onSaved(initial ? await updateConnection(initial.id, fields()) : await createConnection(fields()))
     } catch (err) {
+      if (err instanceof SignedOut) { onSignedOut?.(); return }
       setErrors(err instanceof FieldErrors ? err.errors : [{ key: '', code: 'invalid' }])
     } finally {
       setSaving(false)

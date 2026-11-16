@@ -12,3 +12,5 @@ gateway/data-local-stub/
 *.tsbuildinfo
 desktop/stage/
 desktop/release/
+.claude/*
+!.claude/launch.json

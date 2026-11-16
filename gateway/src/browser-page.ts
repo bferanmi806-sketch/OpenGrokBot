@@ -54,12 +54,12 @@ export type BrowserLike = {
   isConnected?(): boolean
 }
 
-/** 在页面里跑：收集可见链接（去重、跳过 javascript:），给 bot 一张「能去哪」的清单。 */
+/** 在页面里跑：收集可见网页链接（只留 http/https、去重），给 bot 一张「能去哪」的清单。 */
 const LINKS_SCRIPT = `(() => {
   const seen = new Set(); const out = [];
   for (const a of document.querySelectorAll('a[href]')) {
     const href = a.href;
-    if (!href || href.startsWith('javascript:') || seen.has(href)) continue;
+    if (!href || !/^https?:\\/\\//i.test(href) || seen.has(href)) continue;
     const box = a.getBoundingClientRect();
     if (box.width === 0 && box.height === 0) continue;
     const text = (a.innerText || a.getAttribute('aria-label') || a.title || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
@@ -68,6 +68,24 @@ const LINKS_SCRIPT = `(() => {
   }
   return out;
 })()`
+
+/**
+ * 浏览器只许开真正的网页（http / https；测试与内部自检可显式允许无源的 data:）。
+ * 绝不放行 file:、chrome:、view-source:、javascript:：本机模式下 Chromium 跑在沙箱外，
+ * 放开 file: 等于让没开命令行、甚至只读 watch 的同事直接读宿主机上的密钥和网关令牌。
+ */
+export function checkBrowserUrl(raw: string, opts: { allowData?: boolean } = {}): string {
+  const trimmed = raw.trim()
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new Error(`Invalid URL: ${trimmed.slice(0, 120) || '(empty)'}. Use a full http:// or https:// URL.`)
+  }
+  const proto = parsed.protocol.toLowerCase()
+  if (proto === 'http:' || proto === 'https:' || (opts.allowData && proto === 'data:')) return trimmed
+  throw new Error(`Blocked URL scheme "${proto}" — only http:// and https:// pages are allowed.`)
+}
 
 /** 像 CSS selector 的先按 selector 找；像一句话的先按文字/标签找，免得白等 selector 超时。 */
 function looksLikeSelector(target: string): boolean {
@@ -107,6 +125,7 @@ export function createBrowserSession(open: () => Promise<BrowserLike>): BrowserS
   let browser: BrowserLike | null = null
   let pending: Promise<BrowserLike> | null = null
   let everOpened = false
+  let generation = 0
 
   function dropIfGone(): void {
     if (browser?.isConnected && !browser.isConnected()) {
@@ -118,11 +137,18 @@ export function createBrowserSession(open: () => Promise<BrowserLike>): BrowserS
   async function context(): Promise<ContextLike> {
     dropIfGone()
     if (!browser) {
-      pending ??= open().catch((err: unknown) => {
-        pending = null
+      const gen = generation
+      const opening = (pending ??= open().catch((err: unknown) => {
+        if (pending === opening) pending = null
         throw err
-      })
-      browser = await pending
+      }))
+      const opened = await opening
+      // 启动途中被 dispose() 了：刚拉起来的这台立刻关掉，绝不留下孤儿浏览器占着配置锁
+      if (gen !== generation) {
+        await opened.close().catch(() => {})
+        throw new Error('bot browser session was closed while starting')
+      }
+      browser = opened
       everOpened = true
     }
     const ctx = browser.contexts()[0]
@@ -143,11 +169,14 @@ export function createBrowserSession(open: () => Promise<BrowserLike>): BrowserS
       return browser ? 'open' : everOpened ? 'gone' : 'idle'
     },
     async dispose() {
+      generation += 1
       const b = browser
+      const p = pending
       browser = null
       pending = null
       everOpened = false
-      await b?.close().catch(() => {}) // 断开失败不该拖垮调用方
+      if (b) await b.close().catch(() => {}) // 断开失败不该拖垮调用方
+      else if (p) await p.then((opened) => opened.close()).catch(() => {})
     },
   }
 }
@@ -160,8 +189,9 @@ export type PageOperations = Pick<
 export function pageOperations(page: () => Promise<PageLike>): PageOperations {
   return {
     async goto(url) {
+      const safe = checkBrowserUrl(url, { allowData: true })
       const p = await page()
-      await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+      await p.goto(safe, { waitUntil: 'domcontentloaded', timeout: 45_000 })
       return { url: p.url(), title: await p.title() }
     },
     async extract(maxChars) {

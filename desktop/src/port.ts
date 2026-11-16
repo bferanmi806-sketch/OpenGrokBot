@@ -18,11 +18,12 @@ export type Probe = (port: number) => Promise<boolean>
  * 能用 = 本机没有谁在这个端口上应答，而且我们绑得上 127.0.0.1。只试绑不够：别人绑在 0.0.0.0 或 :: 上时，
  * macOS 照样让你绑 127.0.0.1，结果本机的请求被我们截走、那边的服务无声无息地失灵。
  */
-export const probePort: Probe = async (port) => !(await answers(port)) && (await canBind(port))
+export const probePort: Probe = async (port) =>
+  !(await answers(port, '127.0.0.1')) && !(await answers(port, '::1')) && (await canBind(port))
 
-function answers(port: number): Promise<boolean> {
+function answers(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = net.connect({ port, host: '127.0.0.1' })
+    const socket = net.connect({ port, host })
     const done = (v: boolean) => { clearTimeout(timer); socket.destroy(); resolve(v) }
     const timer = setTimeout(() => done(false), 500)
     socket.once('connect', () => done(true))

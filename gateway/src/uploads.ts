@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Db } from './db.js'
@@ -261,6 +262,13 @@ export function createUploads(opts: { db: Db; dataDir: string; maxTotalBytes?: n
 
   const stored = (): number =>
     (db.prepare('SELECT COALESCE(SUM(size), 0) AS total FROM uploads WHERE deleted_at IS NULL').get() as { total: number }).total
+  /** 还在写盘/抽 PDF 文字、尚未 INSERT 进库的上传：算进容量上限，且清扫时不把它的文件当孤儿删掉 */
+  const inFlight = new Map<string, number>()
+  const inFlightBytes = (): number => {
+    let sum = 0
+    for (const n of inFlight.values()) sum += n
+    return sum
+  }
 
   async function save(input: unknown): Promise<{ ok: true; upload: UploadRow } | { ok: false; code: UploadErrorCode; status: 400 | 413 | 415 | 507 }> {
     const refuse = (code: UploadErrorCode, status: 400 | 413 | 415 | 507) => ({ ok: false as const, code, status })
@@ -283,33 +291,39 @@ export function createUploads(opts: { db: Db; dataDir: string; maxTotalBytes?: n
         return refuse('image_too_big', 413)
       }
     }
-    if (maxTotal > 0 && stored() + bytes.length > maxTotal) return refuse('uploads_full', 507)
-    // PDF：字抽不出来（扫描件、坏文件、超时）也收下，如实记着；同事会被告知没有可读的文字
-    const pdf = mime === PDF ? await readPdf(bytes) : null
+    if (maxTotal > 0 && stored() + inFlightBytes() + bytes.length > maxTotal) return refuse('uploads_full', 507)
+    const id = randomBytes(16).toString('hex')
+    inFlight.set(id, bytes.length)
+    try {
+      // PDF：字抽不出来（扫描件、坏文件、超时）也收下，如实记着；同事会被告知没有可读的文字
+      const pdf = mime === PDF ? await readPdf(bytes) : null
 
-    const row: UploadRow = {
-      id: randomBytes(16).toString('hex'),
-      name: cleanName(body.name),
-      mime,
-      size: bytes.length,
-      sha256: createHash('sha256').update(bytes).digest('hex'),
-      width: found.width ?? null,
-      height: found.height ?? null,
-      pages: pdf?.pages ?? null,
-      text_state: pdf?.state ?? null,
-      thread_id: null,
-      message_id: null,
-      created_at: now(),
-      deleted_at: null,
+      const row: UploadRow = {
+        id,
+        name: cleanName(body.name),
+        mime,
+        size: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        width: found.width ?? null,
+        height: found.height ?? null,
+        pages: pdf?.pages ?? null,
+        text_state: pdf?.state ?? null,
+        thread_id: null,
+        message_id: null,
+        created_at: now(),
+        deleted_at: null,
+      }
+      await mkdir(dir, { recursive: true })
+      await writeFile(file(row.id), bytes, { flag: 'wx', mode: 0o600 })
+      if (pdf?.text) await writeFile(textFile(row.id), pdf.text, { flag: 'wx', mode: 0o600 })
+      db.prepare(
+        `INSERT INTO uploads (id, name, mime, size, sha256, width, height, pages, text_state, created_at)
+         VALUES (@id, @name, @mime, @size, @sha256, @width, @height, @pages, @text_state, @created_at)`,
+      ).run(row)
+      return { ok: true, upload: row }
+    } finally {
+      inFlight.delete(id)
     }
-    await mkdir(dir, { recursive: true })
-    await writeFile(file(row.id), bytes, { flag: 'wx', mode: 0o600 })
-    if (pdf?.text) await writeFile(textFile(row.id), pdf.text, { flag: 'wx', mode: 0o600 })
-    db.prepare(
-      `INSERT INTO uploads (id, name, mime, size, sha256, width, height, pages, text_state, created_at)
-       VALUES (@id, @name, @mime, @size, @sha256, @width, @height, @pages, @text_state, @created_at)`,
-    ).run(row)
-    return { ok: true, upload: row }
   }
 
   async function bytes(id: unknown): Promise<Buffer | null> {
@@ -399,14 +413,22 @@ export function createUploads(opts: { db: Db; dataDir: string; maxTotalBytes?: n
     let missing = 0
     for (const row of live) {
       onDisk.delete(`${row.id}.txt`)
-      if (onDisk.delete(row.id)) continue
+      // readdir 飞着的时候可能刚写好一份新的：再核一眼文件真不在才标移除
+      if (onDisk.delete(row.id) || inFlight.has(row.id) || existsSync(file(row.id))) continue
       const at = now()
       db.prepare('UPDATE uploads SET deleted_at = ? WHERE id = ?').run(at, row.id)
       onMissing?.({ ...row, deleted_at: at })
       missing++
     }
-    for (const name of onDisk) await rm(join(dir, name), { force: true })
-    return { orphans: orphans.length, strays: onDisk.size, missing }
+    let strays = 0
+    for (const name of onDisk) {
+      const baseId = name.endsWith('.txt') ? name.slice(0, -4) : name
+      // 正在落盘但还没 INSERT、或者刚刚 INSERT 完的那份绝不能删
+      if (inFlight.has(baseId) || get(baseId)?.deleted_at === null) continue
+      await rm(join(dir, name), { force: true })
+      strays++
+    }
+    return { orphans: orphans.length, strays, missing }
   }
 
   return { save, get, bytes, text, view, claim, attach, remove, seen, markPlaced, markShown, sweep, stored }

@@ -46,6 +46,7 @@ function run() {
   let port = ENV_PORT ?? readState(layout.root).port ?? DEFAULT_PORT
   /** 起不来是因为端口刚被抢：自动换端口重来，最多这么多次，再不行就出错误页 */
   let portRetries = 0
+  let failedPorts: number[] = []
   let showing: 'starting' | 'gateway' | 'error' = 'starting'
   /** 退出走到哪一步：running → asking（在问要不要退）→ stopping（在收摊，窗口可以关了） */
   let quitPhase: 'running' | 'asking' | 'stopping' = 'running'
@@ -85,6 +86,7 @@ function run() {
     ready: (p) => {
       port = p
       portRetries = 0
+      failedPorts = []
       say(`gateway ready on ${base(p)}`)
       void openGateway()
       watch()
@@ -95,10 +97,11 @@ function run() {
     },
     restarting: (attempt, delayMs) => say(`gateway crashed; restart #${attempt} in ${delayMs / 1000}s`),
     failed: (reason) => {
-      // 探测时空着、拉起时被抢了：换下一个端口自己重来，不劳人点
-      if (reason === 'exited' && !ENV_PORT && portInUse(supervisor.lastRun()) && portRetries < 3) {
+      // 探测时空着、拉起时（或运行中途重启时）被抢了：换下一个端口自己重来，不劳人点
+      if ((reason === 'exited' || reason === 'crashed') && !ENV_PORT && portInUse(supervisor.lastRun()) && portRetries < 3) {
         portRetries++
-        void pickPort([port]).then((ok) => (ok ? supervisor.retry() : showError(reason)))
+        failedPorts.push(port)
+        void pickPort(failedPorts).then((ok) => (ok ? supervisor.retry() : showError(reason)))
         return
       }
       showError(reason)
@@ -124,20 +127,30 @@ function run() {
     return true
   }
 
-  /** 种上会话 cookie 再打开界面：不用登录链接。令牌每次现读（网关第一次启动时才生成） */
+  const token = (): string => {
+    const fromEnv = process.env.OPENSUPERBOT_TOKEN?.trim() || process.env.OPENGROKBOT_TOKEN?.trim()
+    if (fromEnv) return fromEnv
+    try {
+      return readFileSync(join(layout.data, 'auth-token'), 'utf8').trim()
+    } catch {
+      return ''
+    }
+  }
+
+  /** 种上会话 cookie 再打开界面：不用登录链接。令牌优先读环境变量，否则现读 auth-token（网关首次启动时才生成） */
   async function openGateway() {
     if (!win) return
-    const token = readFileSync(join(layout.data, 'auth-token'), 'utf8').trim()
-    await session.defaultSession.cookies.set({
-      url: base(port), name: SESSION_COOKIE, value: token, httpOnly: true, sameSite: 'strict',
-    })
+    const tok = token()
+    if (tok) {
+      await session.defaultSession.cookies.set({
+        url: base(port), name: SESSION_COOKIE, value: tok, httpOnly: true, sameSite: 'strict',
+      })
+    }
     // 重启后网关还在原来的端口：界面自己会重连，不用重新加载
     if (showing === 'gateway' && win.webContents.getURL().startsWith(base(port))) return
     showing = 'gateway'
     await win.loadURL(`${base(port)}/`)
   }
-
-  const token = () => readFileSync(join(layout.data, 'auth-token'), 'utf8').trim()
 
   /** 主进程自己听网关的 /ws：状态变了刷新托盘和角标；等你的事、窗口又不在前台，就发通知 */
   function watch() {
@@ -253,11 +266,16 @@ function run() {
   async function userQuit() {
     if (quitPhase !== 'running') return
     quitPhase = 'asking'
-    const ok = await confirmQuit()
-    if (quitPhase !== 'asking') return // 问的时候系统先发起了退出，已经在收摊了
-    if (ok) return stopAndExit()
-    quitPhase = 'running'
-    say('quit cancelled; still running')
+    try {
+      const ok = await confirmQuit()
+      if (quitPhase !== 'asking') return // 问的时候系统先发起了退出，已经在收摊了
+      if (ok) return stopAndExit()
+      quitPhase = 'running'
+      say('quit cancelled; still running')
+    } catch (err) {
+      say(`confirmQuit failed (${err instanceof Error ? err.message : String(err)}); quitting`)
+      return stopAndExit()
+    }
   }
 
   async function confirmQuit(): Promise<boolean> {
@@ -275,6 +293,11 @@ function run() {
   function showError(reason: FailReason) {
     showing = 'error'
     lastFailure = reason
+    stopWatching?.()
+    stopWatching = null
+    clearTimeout(refreshTimer)
+    summary = null
+    updateTray()
     const tail = supervisor.tail()
     const text = diagnosticsText({
       appVersion: app.getVersion(), electron: process.versions.electron ?? '', platform: process.platform, arch: process.arch,
@@ -308,14 +331,18 @@ function run() {
     }
   }
 
-  /** 错误页上的按钮：osb:retry、osb:logs */
-  function onAction(url: string) {
+  /** 错误页上的按钮：osb:retry、osb:logs（只认主窗口在错误页时点的） */
+  function onAction(url: string, contents?: Electron.WebContents) {
+    if (contents && contents !== win?.webContents) return
     if (url === 'osb:retry') {
+      if (showing !== 'error' || supervisor.state() !== 'failed') return
       showing = 'starting'
       void win?.loadURL(dataUrl(startingPage(lang())))
       portRetries = 0
+      failedPorts = []
       void pickPort().finally(() => supervisor.retry())
     } else if (url === 'osb:logs') {
+      if (showing !== 'error') return
       void shell.openPath(layout.logs)
     }
   }
@@ -338,7 +365,8 @@ function run() {
       gatewayOrigin: () => base(port),
       openExternal,
       openInApp,
-      onAction,
+      navigateInApp: (url) => { void contents.loadURL(url) },
+      onAction: (url) => onAction(url, contents),
       log: (line) => say(line),
     })
   })

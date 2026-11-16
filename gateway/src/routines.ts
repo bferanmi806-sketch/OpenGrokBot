@@ -25,9 +25,11 @@ export function normalizeMode(value: unknown): RoutineMode {
 }
 
 export function isValidCron(expr: string): boolean {
-  if (!expr.trim()) return false
+  const trimmed = expr.trim()
+  // 只收标准 5 段表达式（分 时 日 月 周）：croner 也认 6 段秒级，模型一旦多写一段就会每秒跑一轮
+  if (!trimmed || trimmed.split(/\s+/).length !== 5) return false
   try {
-    new Cron(expr, { paused: true })
+    new Cron(trimmed, { paused: true })
     return true
   } catch {
     return false

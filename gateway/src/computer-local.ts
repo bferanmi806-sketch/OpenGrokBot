@@ -110,15 +110,18 @@ export function browserLaunchError(err: unknown): Error {
   return e
 }
 
-const defaultLaunch: LocalLaunch = async ({ profileDir, executablePath, headless }) => {
+const makeDefaultLaunch = (workspaceDir: string): LocalLaunch => async ({ profileDir, executablePath, headless }) => {
   const context = await chromium.launchPersistentContext(profileDir, {
     executablePath,
     headless,
+    downloadsPath: join(workspaceDir, 'downloads'),
     env: outsideAppEnv(process.env),
     viewport: { width: 1280, height: 800 },
     // 上次没正常退出时 Chrome 会弹「恢复页面？」挡住屏幕
     args: ['--hide-crash-restore-bubble'],
   }).catch((err: unknown) => { throw browserLaunchError(err) })
+  // 哪怕页面或点击尝试跳去 file://，也在网络层直接掐断
+  await context.route(/^file:/i, (route) => route.abort()).catch(() => {})
   let open = true
   context.on('close', () => { open = false })
   return {
@@ -129,10 +132,11 @@ const defaultLaunch: LocalLaunch = async ({ profileDir, executablePath, headless
 }
 
 export function createLocalComputer(opts: LocalComputerOptions): BotComputer {
-  const launch = opts.launch ?? defaultLaunch
+  const launch = opts.launch ?? makeDefaultLaunch(opts.workspaceDir)
   let headless = opts.headless ?? true
   const session = createBrowserSession(() => launch({ profileDir: opts.profileDir, executablePath: opts.executablePath, headless }))
   let activeWorkflowRecording: WorkflowRecording | null = null
+  let relaunchChain: Promise<void> = Promise.resolve()
 
   /**
    * Chromium 不能在运行中切换有没有窗口：关掉再以另一种方式开同一个配置。
@@ -145,22 +149,27 @@ export function createLocalComputer(opts: LocalComputerOptions): BotComputer {
     watchers.clear()
   }
 
-  async function relaunch(nextHeadless: boolean): Promise<void> {
-    let url: string | undefined
-    if (session.state() === 'open') url = await session.page().then((p) => p.url()).catch(() => undefined)
-    try {
-      await activeWorkflowRecording?.detach?.()
-    } catch {
-      activeWorkflowRecording?.markIncomplete?.()
-    }
-    await session.dispose()
-    endStreams()
-    headless = nextHeadless
-    const p = await session.page()
-    let reattachError: unknown
-    try { await activeWorkflowRecording?.reattach(p) } catch (error) { reattachError = error }
-    if (url && url !== 'about:blank') await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {})
-    if (reattachError) throw reattachError
+  function relaunch(nextHeadless: boolean): Promise<void> {
+    const job = relaunchChain.catch(() => {}).then(async () => {
+      if (headless === nextHeadless && (nextHeadless || session.state() === 'open')) return
+      let url: string | undefined
+      if (session.state() === 'open') url = await session.page().then((p) => p.url()).catch(() => undefined)
+      try {
+        await activeWorkflowRecording?.detach?.()
+      } catch {
+        activeWorkflowRecording?.markIncomplete?.()
+      }
+      await session.dispose()
+      endStreams()
+      headless = nextHeadless
+      const p = await session.page()
+      let reattachError: unknown
+      try { await activeWorkflowRecording?.reattach(p) } catch (error) { reattachError = error }
+      if (url && url !== 'about:blank') await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {})
+      if (reattachError) throw reattachError
+    })
+    relaunchChain = job
+    return job
   }
 
   return {
@@ -177,18 +186,25 @@ export function createLocalComputer(opts: LocalComputerOptions): BotComputer {
       let stopped = false
       const end = () => { stopped = true; hooks.onEnd?.() }
       watchers.add(end)
-      cdp.on('Page.screencastFrame', (value) => {
-        if (stopped || !isScreencastFrame(value)) return
-        const frame = value
-        onFrame({ data: frame.data, width: frame.metadata.deviceWidth, height: frame.metadata.deviceHeight })
-        // 不确认上一帧，Chromium 就不发下一帧——借这一点把帧率压在 10 帧/秒上下，面板和网关都轻松
-        setTimeout(() => { void cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId }).catch(() => {}) }, 100)
-      })
-      // 无头浏览器只在画面变化时出帧；静止的页面要先给面板一张现状，别让人对着黑屏等
-      const size = page.viewportSize() ?? { width: 1280, height: 800 }
-      const first = await page.screenshot({ type: 'jpeg', quality: 60 }).catch(() => null)
-      if (first) onFrame({ data: first.toString('base64'), width: size.width, height: size.height })
-      await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800, everyNthFrame: 1 })
+      try {
+        cdp.on('Page.screencastFrame', (value) => {
+          if (stopped || !isScreencastFrame(value)) return
+          const frame = value
+          onFrame({ data: frame.data, width: frame.metadata.deviceWidth, height: frame.metadata.deviceHeight })
+          // 不确认上一帧，Chromium 就不发下一帧——借这一点把帧率压在 10 帧/秒上下，面板和网关都轻松
+          setTimeout(() => { void cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId }).catch(() => {}) }, 100)
+        })
+        // 无头浏览器只在画面变化时出帧；静止的页面要先给面板一张现状，别让人对着黑屏等
+        const size = page.viewportSize() ?? { width: 1280, height: 800 }
+        const first = await page.screenshot({ type: 'jpeg', quality: 60 }).catch(() => null)
+        if (first) onFrame({ data: first.toString('base64'), width: size.width, height: size.height })
+        await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800, everyNthFrame: 1 })
+      } catch (err) {
+        stopped = true
+        watchers.delete(end)
+        await cdp.detach().catch(() => {})
+        throw err
+      }
       return async () => {
         stopped = true
         watchers.delete(end)

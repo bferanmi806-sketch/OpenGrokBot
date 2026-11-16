@@ -37,10 +37,10 @@ const MAX_OUTPUT = 8 * 1024 * 1024
 
 /**
  * 家目录里放运行时的目录：沙箱里只读可见。只收版本管理器和它们装的二进制，
- * 不收会藏令牌的配置目录（~/.cargo 整个不行——credentials.toml 在里面，只给 ~/.cargo/bin）。
+ * 不收会藏令牌的配置目录（~/.cargo 整个不行——credentials.toml 在里面，只给 ~/.cargo/bin；.deno/.bun 同理）。
  */
 export const TOOLCHAIN_DIRS = [
-  '.nvm', '.volta', '.fnm', '.n', '.bun', '.deno',
+  '.nvm', '.volta', '.fnm', '.n', '.bun/bin', '.deno/bin',
   '.pyenv', '.rbenv', '.rustup', '.cargo/bin', 'go/bin', '.ghcup', '.sdkman',
   '.local/share/pnpm', 'Library/pnpm', '.local/bin',
 ]
@@ -120,7 +120,10 @@ function ancestors(p: string): string[] {
   return out
 }
 
-type Resolved = { home: string; dataDir: string; workspace: string; tmp: string; toolchains: string[]; hiddenDataDir: boolean }
+type Resolved = {
+  home: string; dataDir: string; workspace: string; tmp: string; toolchains: string[]
+  hiddenDataDir: boolean; systemdResolve: boolean
+}
 
 function layout(c: Confinement): Resolved {
   const exists = c.exists ?? existsSync
@@ -133,19 +136,23 @@ function layout(c: Confinement): Resolved {
     toolchains: [...TOOLCHAIN_DIRS.map((d) => join(home, d)).filter((d) => exists(d)), ...(c.readable ?? []).map(real)],
     // 数据目录在家目录下就已经一起遮住了；在别处才单独遮
     hiddenDataDir: dataDir === home || dataDir.startsWith(home + '/'),
+    systemdResolve: exists('/run/systemd/resolve'),
   }
 }
 
-/** Seatbelt 规则：后写的规则覆盖先写的——先放开读、再整个遮住家目录（和数据目录）、最后把工具链和自己的文件夹放回来 */
+/** Seatbelt 规则：后写的规则覆盖先写的——先放开读、再整个遮住家目录（和数据目录、共享临时区与外接盘）、最后把工具链和自己的文件夹放回来 */
 export function seatbeltProfile(c: Confinement): string {
   const l = layout(c)
-  const unreadable = [l.home, ...(l.hiddenDataDir ? [] : [l.dataDir])]
+  const unreadable = [l.home, ...(l.hiddenDataDir ? [] : [l.dataDir]), '/private/tmp', '/Volumes']
   const traversable = [...new Set([...ancestors(l.workspace), ...ancestors(l.tmp)])]
   return [
     '(version 1)',
     '(deny default)',
-    // 跑程序、发信号、查系统信息、找系统服务、共享内存：命令行工具离不开这些（开发者沙箱也都放）
-    '(allow process-exec process-fork signal sysctl-read mach-lookup ipc-posix-shm)',
+    // 跑程序、查系统信息、共享内存；发信号只许给同一个沙箱里的进程（不能 kill 宿主机上的网关）；
+    // Mach 服务拦住剪贴板、LaunchServices / AppleEvents（防止经 open / osascript 在沙箱外起程序或偷剪贴板）
+    '(allow process-exec process-fork sysctl-read mach-lookup ipc-posix-shm)',
+    '(allow signal (target same-sandbox))',
+    '(deny mach-lookup (global-name-prefix "com.apple.pasteboard") (global-name-prefix "com.apple.coreservices.launchservices") (global-name "com.apple.coreservices.appleevents"))',
     '(allow network*)',
     '(allow file-read*)',
     `(deny file-read* ${unreadable.map((p) => `(subpath ${sbString(p)})`).join(' ')})`,
@@ -157,12 +164,13 @@ export function seatbeltProfile(c: Confinement): string {
   ].join('\n')
 }
 
-/** bubblewrap：整个根只读，家目录（和数据目录）用空 tmpfs 遮住，再把工具链只读、自己的文件夹可写地放回去 */
+/** bubblewrap：整个根只读，/run、/tmp、家目录（和数据目录）用空 tmpfs 遮住（挡住用户态 systemd D-Bus、ssh-agent 与 docker.sock），再把 DNS、工具链只读、自己的文件夹可写地放回去 */
 export function bubblewrapArgs(c: Confinement): string[] {
   const l = layout(c)
   return [
     '--die-with-parent', '--new-session', '--unshare-all', '--share-net',
-    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp',
+    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/run',
+    ...(l.systemdResolve ? ['--ro-bind', '/run/systemd/resolve', '/run/systemd/resolve'] : []),
     '--tmpfs', l.home,
     ...(l.hiddenDataDir ? [] : ['--tmpfs', l.dataDir]),
     ...l.toolchains.flatMap((d) => ['--ro-bind', d, d]),
@@ -202,9 +210,21 @@ export function sandboxEnv(c: Confinement, base: NodeJS.ProcessEnv = process.env
   }
 }
 
+/** 本机沙箱里还在跑的命令进程组：网关退出时一并清干净（macOS 的 sandbox-exec 没有 --die-with-parent） */
+const activeSandboxPids = new Set<number>()
+
+export function killActiveSandboxes(): void {
+  for (const pid of [...activeSandboxPids]) {
+    activeSandboxPids.delete(pid)
+    try { process.kill(-pid, 'SIGKILL') } catch { /* 已经结束了 */ }
+  }
+}
+
+process.once('exit', killActiveSandboxes)
+
 /**
- * 和容器里 shim 的 runShell 同一套脾气：自己的进程组（超时/停止整组杀）、输出封顶、
- * bash 退出后留 300ms 收尾，后台进程占着管道也不卡。
+ * 和容器里 shim 的 runShell 同一套脾气：自己的进程组（超时/停止/结束整组杀，不让后台子进程脱离沙箱常驻）、
+ * 输出封顶、bash 退出后留 300ms 收尾，后台进程占着管道也不卡。
  */
 export function runSandboxed(cmd: string, opts: {
   sandbox: Sandbox
@@ -222,6 +242,7 @@ export function runSandboxed(cmd: string, opts: {
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
+    if (child.pid) activeSandboxPids.add(child.pid)
     const out: Buffer[] = []
     const errOut: Buffer[] = []
     let size = 0
@@ -237,6 +258,7 @@ export function runSandboxed(cmd: string, opts: {
     child.stderr?.on('data', collect(errOut))
     const killGroup = () => {
       if (child.pid) {
+        activeSandboxPids.delete(child.pid)
         try { process.kill(-child.pid, 'SIGKILL') } catch { /* 已经结束了 */ }
       }
     }
@@ -249,6 +271,7 @@ export function runSandboxed(cmd: string, opts: {
       clearTimeout(timer)
       clearTimeout(grace)
       opts.signal?.removeEventListener('abort', killGroup)
+      killGroup()
       for (const stream of [child.stdout, child.stderr]) {
         stream?.removeAllListeners('data')
         stream?.resume()

@@ -23,6 +23,8 @@ export type TurnQueue = {
   run(laneId: string, threadId: string, job: TurnJob, opts?: { coalesceKey?: string }): Promise<void>
   /** 停掉某个线程的工作：正在跑的收到 abort，排着队的直接丢弃。返回受影响的回合数。 */
   stopThread(threadId: string): number
+  /** 网关退出时停掉全部正在跑和排着队的回合 */
+  stopAll(): number
   /** Reserve an idle bot lane for browser recording. Returns null if work is already running or queued. */
   hold(laneId: string): (() => void) | null
   statuses(): Record<string, TurnState>
@@ -87,6 +89,20 @@ export function createTurnQueue(onStatus: (laneId: string, state: TurnState) => 
           }
         }
         lane.waiting = keep
+      }
+      return stopped
+    },
+    stopAll() {
+      let stopped = 0
+      for (const lane of lanes.values()) {
+        if (lane.running && !lane.running.controller.signal.aborted) {
+          lane.running.controller.abort()
+          stopped++
+        }
+        for (const entry of lane.waiting.splice(0)) {
+          entry.resolve()
+          stopped++
+        }
       }
       return stopped
     },

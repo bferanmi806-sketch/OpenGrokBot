@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Shot } from './computer.js'
 
@@ -36,4 +36,25 @@ export function screenshotFilePath(dataDir: string, botId: string, file: string)
     join(botDataDir(dataDir, botId), 'screenshots', file),
     join(workspaceDir(dataDir, botId), 'screenshots', file),
   ]
+}
+
+/** 动作日志留 90 天，截图证据也按同样的截止时间收掉老文件，免得定时巡检把磁盘慢慢塞满 */
+export async function pruneScreenshots(dataDir: string, beforeMs: number): Promise<number> {
+  const botsRoot = join(dataDir, 'bots')
+  const botDirs = await readdir(botsRoot, { withFileTypes: true }).catch(() => [])
+  let removed = 0
+  for (const entry of botDirs) {
+    if (!entry.isDirectory() || !SAFE_ID.test(entry.name) || entry.name === '..') continue
+    const shotDir = join(botsRoot, entry.name, 'screenshots')
+    const files = await readdir(shotDir).catch(() => [] as string[])
+    for (const file of files) {
+      if (!SCREENSHOT_FILE.test(file)) continue
+      const ts = Number(file.slice(0, -4))
+      if (Number.isFinite(ts) && ts > 0 && ts < beforeMs) {
+        await rm(join(shotDir, file), { force: true })
+        removed++
+      }
+    }
+  }
+  return removed
 }

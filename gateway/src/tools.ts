@@ -43,6 +43,11 @@ const SHELL_DESCRIPTION = {
   local: 'Run a bash command on your own computer, in a sandbox confined to your workspace folder — the working directory and $HOME (the file tools call that same folder /workspace). It persists between sessions. You cannot install software there.',
 }
 
+const SHELL_TIMEOUT_DESCRIPTION = {
+  docker: 'Optional timeout in milliseconds (default 60000, at most 600000). Start long-running servers in the background with their output in a file, e.g. `nohup npm run dev > dev.log 2>&1 &`.',
+  local: 'Optional timeout in milliseconds (default 60000, at most 600000). Background processes are stopped when the command finishes.',
+}
+
 const COMPUTER_TOOLS: ToolDef[] = [
   {
     type: 'function',
@@ -53,7 +58,7 @@ const COMPUTER_TOOLS: ToolDef[] = [
         type: 'object',
         properties: {
           cmd: { type: 'string', description: 'The bash command line to run.' },
-          timeoutMs: { type: 'number', description: 'Optional timeout in milliseconds (default 60000, at most 600000). Start long-running servers in the background with their output in a file, e.g. `nohup npm run dev > dev.log 2>&1 &`.' },
+          timeoutMs: { type: 'number', description: SHELL_TIMEOUT_DESCRIPTION.docker },
         },
         required: ['cmd'],
       },
@@ -376,7 +381,21 @@ export function buildTools(opts: {
   const computerTools = COMPUTER_TOOLS
     .filter((t) => opts.shell !== false || t.function.name !== 'shell')
     .map((t) => (t.function.name === 'shell' && opts.kind === 'local'
-      ? { ...t, function: { ...t.function, description: SHELL_DESCRIPTION.local } }
+      ? {
+        ...t,
+        function: {
+          ...t.function,
+          description: SHELL_DESCRIPTION.local,
+          parameters: {
+            type: 'object',
+            properties: {
+              cmd: { type: 'string', description: 'The bash command line to run.' },
+              timeoutMs: { type: 'number', description: SHELL_TIMEOUT_DESCRIPTION.local },
+            },
+            required: ['cmd'],
+          },
+        },
+      }
       : t))
   const tools = [
     MESSAGE_USER_TOOL,

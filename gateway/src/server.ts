@@ -100,9 +100,11 @@ export type GatewayApp = {
   isBusy(botId: string): boolean
   /** 收拾上传目录：没挂到消息上的过期上传、对不上账的文件。启动时和之后每小时跑一次 */
   sweepUploads(): Promise<{ orphans: number; strays: number; missing: number }>
+  /** 网关收摊时停掉全部正在跑和排队的回合 */
+  stopAll(): void
 }
 
-type QuestionPayload = { question: string; options: string[]; multi: boolean; status: string; answer?: string[] }
+type QuestionPayload = { question: string; options: string[]; multi: boolean; status: string; answer?: string[]; watch?: boolean }
 type WorkflowDraft = { id: string; trace: WorkflowTrace }
 type ActiveWorkflowRecording = {
   recorder: WorkflowRecording | null
@@ -169,7 +171,20 @@ type TurnOpts = {
   watch?: boolean
 }
 
-function startOfLocalDay(now: Date): number {
+function startOfLocalDay(now: Date, timeZone?: string): number {
+  if (timeZone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+      }).formatToParts(now)
+      const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0)
+      const elapsedMs = ((get('hour') * 60 + get('minute')) * 60 + get('second')) * 1000 + now.getMilliseconds()
+      return now.getTime() - elapsedMs
+    } catch {
+      // 不认识的时区名退回本机时区
+    }
+  }
   const day = new Date(now)
   day.setHours(0, 0, 0, 0)
   return day.getTime()
@@ -324,9 +339,17 @@ export function createApp(deps: AppDeps): GatewayApp {
   const stopWorkflowRecording = (active: ActiveWorkflowRecording, recorder: WorkflowRecording) =>
     active.stopping ??= Promise.resolve().then(() => recorder.stop())
 
+  // 防同站跨端口页面把网关嵌进透明 iframe 点击劫持审批或命令行开关
+  app.use('*', async (c, next) => {
+    await next()
+    if (!c.res.headers.has('X-Frame-Options')) c.header('X-Frame-Options', 'SAMEORIGIN')
+    if (!c.res.headers.has('Content-Security-Policy')) c.header('Content-Security-Policy', "frame-ancestors 'self'")
+    if (!c.res.headers.has('Referrer-Policy')) c.header('Referrer-Policy', 'no-referrer')
+  })
+
   if (deps.token) {
     app.use('*', authMiddleware(deps.token, deps.allowedOrigins))
-    app.get('/auth', loginHandler(deps.token))
+    app.get('/auth', loginHandler(deps.token, deps.allowedOrigins))
   }
   app.get('/api/session', (c) => c.json({ ok: true }))
   if (deps.settings) mountSettings(app, { ...deps.settings, db, ...(deps.computers ? { runningKind: deps.computers.kind } : {}) })
@@ -409,7 +432,7 @@ export function createApp(deps: AppDeps): GatewayApp {
   const budgetNote = (bot: BotRow): BudgetHit | null => {
     const budget = deps.dailyTokens ?? 0
     if (!budget) return null
-    const used = usageSince(db, bot.id, startOfLocalDay(now())).total
+    const used = usageSince(db, bot.id, startOfLocalDay(now(), deps.timeZone)).total
     if (used < budget) return null
     const text = noticeText({ notice: 'budget', params: { name: bot.name, used, budget } })
     return { text, name: bot.name, used, budget }
@@ -756,7 +779,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     const botId = c.req.param('botId')
     if (!botById(botId)) return c.json({ error: 'unknown bot' }, 404)
     const routines = listRoutines(db, botId).map(routineView)
-    const usage = { today: usageSince(db, botId, startOfLocalDay(now())), budget: deps.dailyTokens ?? 0 }
+    const usage = { today: usageSince(db, botId, startOfLocalDay(now(), deps.timeZone)), budget: deps.dailyTokens ?? 0 }
     const rules = listActiveRules(db, botId, now().getTime()).map(ruleView)
     const memory = dataDir ? await listMemoryRules(dataDir, botId) : []
     const skills = dataDir ? await listSkills(skillsDir(dataDir)) : []
@@ -1047,9 +1070,14 @@ export function createApp(deps: AppDeps): GatewayApp {
     const bot = botById(message.sender)
     if (bot) {
       const group = groupContext(message.thread_id)
+      // watch 巡检里问的问题：操作者答了也还是只读巡检回合，不能借机提权拿到 shell 或写文件
+      const watch = question.watch === true
       void startTurn(bot, message.thread_id,
         `Your operator answered your question "${question.question}": ${choices.join('; ')}. Carry on from there.`,
-        { origin: 'operator', persistUserMessage: false, prewarm: true, trigger: 'question', ...(group ? { group } : {}) })
+        {
+          origin: watch ? 'routine' : 'operator', persistUserMessage: false, prewarm: true,
+          trigger: watch ? 'watch' : 'question', ...(watch ? { watch: true } : {}), ...(group ? { group } : {}),
+        })
     }
     return c.json({ ok: true }, 202)
   })
@@ -1244,5 +1272,10 @@ export function createApp(deps: AppDeps): GatewayApp {
     runRoutine,
     isBusy: (botId) => turns.isBusy(botId) || workflowRecordings.has(botId),
     sweepUploads: async () => (uploads ? uploads.sweep(markUploadRemoved) : { orphans: 0, strays: 0, missing: 0 }),
+    stopAll: () => {
+      rounds.stopAll()
+      turns.stopAll()
+      waiting.clear()
+    },
   }
 }

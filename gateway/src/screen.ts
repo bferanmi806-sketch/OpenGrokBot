@@ -125,9 +125,15 @@ export function mountScreenProxy(app: Hono, deps: { knownBot: (botId: string) =>
     if (c.req.header('upgrade')?.toLowerCase() === 'websocket') return next()
     const botId = c.req.param('botId')
     if (!deps.knownBot(botId)) return c.json({ error: 'unknown bot' }, 404)
-    const rest = c.req.path.slice(`/vnc/${botId}`.length)
+    const prefix = `/vnc/${encodeURIComponent(botId)}`
+    const rest = c.req.path.startsWith(prefix) ? c.req.path.slice(prefix.length) : c.req.path.slice(`/vnc/${botId}`.length)
     if (rest === '/view.html') {
-      return c.body(VIEWER, 200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' })
+      return c.body(VIEWER, 200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'X-Frame-Options': 'SAMEORIGIN',
+        'Content-Security-Policy': "frame-ancestors 'self'",
+      })
     }
     let decoded: string
     try {
@@ -152,6 +158,8 @@ export function mountScreenProxy(app: Hono, deps: { knownBot: (botId: string) =>
  * 把浏览器里 noVNC 的连接接到容器的 websockify：两头的帧原样转（二进制是 noVNC 的画面和键鼠），
  * 上游还没连上时先排队；任一头断了另一头也关。hooks 让调用方记下「有人在看这块屏幕」。
  */
+const MAX_RELAY_QUEUE_FRAMES = 256
+
 export function screenRelay(target: string, hooks: { onOpen?: () => void; onClose?: () => void } = {}): WSEvents {
   let upstream: WebSocket | null = null
   const queued: (string | ArrayBuffer)[] = []
@@ -168,9 +176,10 @@ export function screenRelay(target: string, hooks: { onOpen?: () => void; onClos
     onMessage: (evt) => {
       const data = evt.data as string | ArrayBuffer
       if (upstream?.readyState === WebSocket.OPEN) upstream.send(data)
-      else queued.push(data)
+      else if (queued.length < MAX_RELAY_QUEUE_FRAMES) queued.push(data)
     },
     onClose: () => {
+      queued.length = 0
       hooks.onClose?.()
       upstream?.close()
     },

@@ -17,10 +17,14 @@ $env:OPENSUPERBOT_QUIET_TOKEN = '1'
 $logDir = Join-Path $env:LOCALAPPDATA 'OpenSuperBot'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $log = Join-Path $logDir 'gateway.log'
+if ((Test-Path $log) -and (Get-Item $log).Length -ge 5MB) {
+  Move-Item -Force -Path $log -Destination "$log.1"
+}
 
 $node = (Get-Command node -ErrorAction Stop).Source
 if (-not (Test-Path 'gateway\dist\main.js')) { throw "gateway\dist\main.js is missing: run 'pnpm install' and 'pnpm build' in $repo first." }
 
-"[$(Get-Date -Format s)] starting the gateway from $repo" | Add-Content -Path $log
-& $node 'gateway\dist\main.js' *>> $log
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+"[$(Get-Date -Format s)] starting the gateway from $repo" | Out-File -FilePath $log -Append -Encoding utf8
+& $node 'gateway\dist\main.js' 2>&1 | Out-File -FilePath $log -Append -Encoding utf8
 exit $LASTEXITCODE

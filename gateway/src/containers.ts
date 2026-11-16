@@ -21,14 +21,19 @@ const VNC_PORT = '6080/tcp'
 
 export type Endpoints = { shim: string; cdp: string; vnc: string; shimToken?: string; vncPassword?: string }
 export type ContainerSecrets = { shimToken: string; vncPassword: string }
-export type ContainerOptions = { memoryMb?: number; cpus?: number; timeZone?: string }
+export type ContainerOptions = { memoryMb?: number; cpus?: number; timeZone?: string; browserDir?: string }
 
 const DEFAULT_MEMORY_MB = 2048
 const DEFAULT_CPUS = 2
 
-/** 塑造容器的设置（内存、CPU、时区）的指纹：改了设置，旧容器就得按新设置重建，否则改了等于没改 */
+/** 塑造容器的设置（内存、CPU、时区、浏览器目录独立挂载）的指纹：改了设置，旧容器就得按新设置重建，否则改了等于没改 */
 export function containerConfigKey(opts: ContainerOptions): string {
-  const shape = { memoryMb: opts.memoryMb ?? DEFAULT_MEMORY_MB, cpus: opts.cpus ?? DEFAULT_CPUS, timeZone: opts.timeZone ?? '' }
+  const shape = {
+    memoryMb: opts.memoryMb ?? DEFAULT_MEMORY_MB,
+    cpus: opts.cpus ?? DEFAULT_CPUS,
+    timeZone: opts.timeZone ?? '',
+    ...(opts.browserDir ? { browserMount: true } : {}),
+  }
   return createHash('sha256').update(JSON.stringify(shape)).digest('hex').slice(0, 16)
 }
 
@@ -70,7 +75,10 @@ export function createContainerSpec(
     ],
     ExposedPorts: { [SHIM_PORT]: {}, [CDP_PORT]: {}, [VNC_PORT]: {} },
     HostConfig: {
-      Binds: [`${resolve(workspaceDir)}:/workspace`], // 相对路径会被 docker 当成卷名
+      Binds: [
+        `${resolve(workspaceDir)}:/workspace`, // 相对路径会被 docker 当成卷名
+        ...(opts.browserDir ? [`${resolve(opts.browserDir)}:/var/lib/bot-browser`] : []),
+      ],
       PortBindings: { [SHIM_PORT]: loopback, [CDP_PORT]: loopback, [VNC_PORT]: loopback },
       RestartPolicy: { Name: 'unless-stopped' },
       NetworkMode: BOT_NETWORK,
@@ -240,6 +248,7 @@ export async function ensureContainer(
   const existing = (await docker.listContainers({ all: true, filters: { name: [name] } }))
     .find((c) => c.Names.includes(`/${name}`))
   let container = existing ? docker.getContainer(existing.Id) : null
+  let wasAlreadyRunning = false
   if (container && existing) {
     const imageId = await currentImageId(docker)
     const outdatedSpec = existing.Labels?.['ai.opensuperbot.spec'] !== SPEC_VERSION
@@ -249,7 +258,7 @@ export async function ensureContainer(
     const otherWorkspace = owner !== undefined && !samePath(owner, workspaceDir)
     const otherSettings = existing.Labels?.['ai.opensuperbot.config'] !== containerConfigKey(opts)
     if (outdatedSpec || outdatedImage || otherWorkspace || otherSettings) {
-      // 登录态和文件都在挂载的 workspace 里，重建容器不丢东西
+      // 登录态和文件都在挂载目录里，重建容器不丢东西
       const why = outdatedSpec ? 'new container spec'
         : outdatedImage ? 'bot image was rebuilt'
           : otherWorkspace ? 'it belonged to another data dir' : 'memory, CPU or timezone settings changed'
@@ -258,14 +267,31 @@ export async function ensureContainer(
       container = null
     } else if (existing.State !== 'running') {
       await container.start()
+    } else {
+      wasAlreadyRunning = true
     }
   }
   if (!container) {
     container = await createComputer(docker, createContainerSpec(botId, workspaceDir, newSecrets(), opts))
     await container.start()
   }
-  const endpoints = readEndpoints(await container.inspect())
+  let endpoints = readEndpoints(await container.inspect())
   const fetchImpl = opts.fetchImpl ?? fetch
+  if (wasAlreadyRunning) {
+    // 容器进程还在但里面的浏览器可能已经卡死：快速探一下，不通就重启容器自愈，别白等 60 秒
+    const quickMs = Math.min(opts.readyTimeoutMs ?? 60_000, 3_000)
+    const healthy = await waitForShim(endpoints.shim, quickMs, fetchImpl)
+      .then(() => waitForCdp(endpoints.cdp, quickMs, fetchImpl, endpoints.shimToken))
+      .then(() => true, () => false)
+    if (!healthy) {
+      console.log(`[gateway] restarting unresponsive container ${name}`)
+      await container.stop({ t: 5 }).catch(() => {})
+      await container.start()
+      endpoints = readEndpoints(await container.inspect())
+    } else {
+      return endpoints
+    }
+  }
   await waitForShim(endpoints.shim, opts.readyTimeoutMs, fetchImpl)
   await waitForCdp(endpoints.cdp, opts.readyTimeoutMs, fetchImpl, endpoints.shimToken)
   return endpoints

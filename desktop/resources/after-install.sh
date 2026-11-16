@@ -46,7 +46,7 @@ if apparmor_status --enabled > /dev/null 2>&1; then
     for f in /etc/apparmor.d/*; do
         [ -f "$f" ] || continue
         [ "$f" = '/etc/apparmor.d/opensuperbot-bwrap' ] && continue
-        if grep -qs '/usr/bin/bwrap' "$f" 2>/dev/null; then
+        if grep -Eqs '^[[:space:]]*(profile[[:space:]]+([^[:space:]]+[[:space:]]+)?)?"?/usr/bin/bwrap"?([[:space:]][^#,]*)?\{' "$f" 2>/dev/null; then
             BWRAP_COVERED=1
             break
         fi

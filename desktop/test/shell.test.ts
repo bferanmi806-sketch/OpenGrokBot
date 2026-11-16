@@ -54,6 +54,10 @@ describe('diagnostics', () => {
     expect(redact('Authorization: Bearer abcdefghijklmnop')).toBe('Authorization: Bearer <hidden>')
     expect(redact('key sk-live-abcdef123456 rejected')).toBe('key sk-live…<hidden> rejected')
     expect(redact('key xai-abcdefghijklmnop')).toBe('key xai-abcd…<hidden>')
+    expect(redact('https://generativelanguage.googleapis.com/v1beta/models?key=AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz123456')).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models?key=<hidden>',
+    )
+    expect(redact('groq key gsk_abcdefghijklmnopqrstuvwx failed')).toBe('groq key gsk_abcd…<hidden> failed')
   })
 })
 
@@ -99,5 +103,13 @@ describe('the log file', () => {
     openLog(file, { maxBytes: 100 }).write('fresh')
     expect(readFileSync(`${file}.1`, 'utf8')).toBe('y'.repeat(200))
     expect(readFileSync(file, 'utf8')).toMatch(/fresh\n$/)
+  })
+
+  it('redacts tokens and API keys before writing lines to gateway.log', () => {
+    const file = join(dir, 'gateway.log')
+    openLog(file).write('Authorization: Bearer secret-session-token-12345')
+    const written = readFileSync(file, 'utf8')
+    expect(written).toContain('Bearer <hidden>')
+    expect(written).not.toContain('secret-session-token-12345')
   })
 })

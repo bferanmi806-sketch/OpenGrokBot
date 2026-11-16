@@ -19,8 +19,8 @@ injection — that follows an agent wherever it runs. This page is precise about
 | A payload stays inside its fence | What a webhook delivered reaches the model between two lines that carry the payload's own SHA-256 fingerprint, with every payload line prefixed by `│`. Writing a convincing end-of-payload line from inside would mean finding a text that contains its own hash. |
 | An upgrade keeps a way back | Before a schema upgrade the gateway writes a complete copy of the database next to it and keeps the three most recent. It refuses to upgrade if the copy fails. |
 | Bots cannot reach each other | All bot computers share one Docker network with container-to-container traffic switched off. And because on Docker Desktop a container can still reach ports published on the host, everything a computer publishes wants that computer's own secret: its shell/file shim and its browser control port (CDP) a per-container token, its screen a per-container VNC password. |
-| Each Docker computer is a cage | Its own container with memory, CPU and process limits, `no-new-privileges`, and only its own workspace mounted. Every port is published to `127.0.0.1` only. |
-| A local computer's files stay in its folder | `read_file` and `write_file` resolve inside that teammate's folder — `/workspace` maps to it — and a path that leaves it by name or through a symlink is refused. Its browser profile lives outside that folder, so the teammate cannot read its own cookie store through the file tools. |
+| Each Docker computer is a cage | Its own container with memory, CPU and process limits, `no-new-privileges`, and only its own workspace and isolated `/var/lib/bot-browser` profile mounted. Every port is published to `127.0.0.1` only, and the shim strips `SHIM_TOKEN` and `VNC_PASSWORD` from commands it runs. |
+| A local computer's files stay in its folder | `read_file` and `write_file` resolve inside that teammate's folder — `/workspace` maps to it — and a path that leaves it by name or through a symlink is refused. Its browser profile lives outside that folder, downloads land inside `<workspace>/downloads`, and `browser_goto` accepts only `http:` / `https:` URLs (with `file:` requests aborted in Chrome), so the teammate cannot read your disk or its own cookie store through the browser or file tools. |
 | A local computer's commands are off, then caged | Commands are off until you turn them on for that teammate in its panel. On, they run under Seatbelt (macOS) or bubblewrap (Linux): they can write only the teammate's folder and a private tmp; your whole home directory — keys, documents, other projects, your own browser profile, the gateway's data dir — is unreadable, except the runtime managers (`~/.nvm`, `~/.volta`, `~/.pyenv`, `~/.cargo/bin`, …) that are put back read-only; a data dir outside your home is hidden too; `HOME` points at the folder and the environment is a short whitelist. The switch refuses to turn on until a self-check shows the sandbox blocks a write outside the folder, a read of the gateway token and a listing of your home directory. A command that outlives its timeout, or that you stop, is killed with its whole process group. |
 | A file you send cannot run as a page | The gateway decides what an uploaded file is from its content, not from the type the client declared, and accepts only images, PDFs, plain text and Markdown; a page dressed up as an image is refused. It serves uploads with `nosniff` and a sandboxing `Content-Security-Policy`, images inline and everything else as a download. An upload is stored under a random id, never under the name it came with. |
 | A PDF you send cannot take the gateway down | A PDF's text is extracted in a separate thread with a memory ceiling, a 20-second limit, and caps of 200 pages and 2 million characters. A document that breaks the parser, or runs into a limit, is stored without text and reported as such; the upload itself still succeeds and the gateway keeps running. Pages are not rendered and scripts in the document are not run. |
@@ -28,7 +28,7 @@ injection — that follows an agent wherever it runs. This page is precise about
 | A bot cannot put code in front of you | The screen page and its noVNC code are served by the gateway from its own copy; only the raw VNC stream comes from the bot's computer. Nothing a bot changes inside its container reaches your browser as a page. |
 | Standing rules only change through the chip | `MEMORY.md` lives outside the bot's workspace. The only ways to change it are `save_memory`, `forget_memory` and the remove button in the computer panel, and each of them posts a diff chip; a `MEMORY.md` a bot writes into its own workspace is ignored. Screenshots — the evidence — are stored outside it too. |
 | Handoffs are allowlisted | By default only the chief of staff can reach everyone. Peer directions need `OPENSUPERBOT_A2A_ALLOW`, and relays stop after two hops. |
-| A watch routine cannot act | Its turns are offered only read-only tools, and any other tool the model names is refused by the gateway: no shell, no writing files, no clicking, typing or key presses in the browser, no handoffs, no changes to rules or routines. What it holds never matches a standing rule. It can still load pages, so it can still be steered by what it reads; it just has nothing to act with. |
+| A watch routine cannot act | Its turns are offered only read-only tools — including if you answer a question it asked with `ask_operator` — and any other tool the model names is refused by the gateway: no shell, no writing files, no clicking, typing or key presses in the browser, no handoffs, no changes to rules or routines. What it holds never matches a standing rule. It can still load pages, so it can still be steered by what it reads; it just has nothing to act with. |
 | A batch is approved item by item | The gateway stores the exact items a bot held and the ones you left ticked; the bot is told that subset and nothing else. A batch can never become a standing rule. |
 | Shared skills are yours | Skills live in `<data>/skills`, outside every bot's computer; bots read them through `read_skill`, which only accepts a name from the list. |
 | There is a record | Every tool call, approval decision and webhook call lands in the action log in SQLite, with what started the turn. Text typed into a page is not logged. Entries older than 90 days are dropped. |
@@ -96,17 +96,18 @@ The Electron shell ([desktop.md](desktop.md)) wraps the same gateway without giv
 
 - **Sandboxed renderer, no Node.** Every window runs with `contextIsolation: true`, `sandbox: true`,
   `nodeIntegration: false`, `nodeIntegrationInSubFrames: false` and `webviewTag: false`.
-- **Cookie sign-in, no token in URLs or logs.** Main reads `<data>/auth-token` directly and sets the `HttpOnly`,
-  `SameSite=Strict` session cookie for `http://127.0.0.1:<port>` before loading the UI. Logs (`logs/gateway.log`) and
-  copied diagnostics scrub gateway tokens, `Bearer` headers and `sk-` / `xai-` keys.
+- **Cookie sign-in, no token in URLs or logs.** Main reads `OPENSUPERBOT_TOKEN` or `<data>/auth-token` directly and
+  sets the `HttpOnly`, `SameSite=Strict` session cookie for `http://127.0.0.1:<port>` before loading the UI. Logs
+  (`logs/gateway.log`) and copied diagnostics scrub gateway tokens, `?key=` query strings, `Bearer` headers and `sk-` /
+  `xai-` / `AIza` / `gsk_` keys.
 - **Narrow, origin-checked preload.** Only the main window receives `window.opensuperbot`, frozen to `info()` and
   `loginItem.get()` / `loginItem.set(on)`. Every `ipcMain` handler checks `senderFrame` and rejects calls from
   anything other than the top-level gateway loopback page (`data:` error pages, iframes and other origins are refused
   and logged).
-- **Locked navigation and permissions.** Windows may navigate only to the gateway's loopback origin (`http:` / `https:`
-  links elsewhere open in your system browser; `file:`, `javascript:` and custom schemes are blocked). Only
-  `notifications` and `clipboard-sanitized-write` are granted to the gateway's page; camera, microphone, geolocation
-  and clipboard reading are denied.
+- **Locked navigation and permissions.** Windows and subframes may navigate or redirect only to the gateway's loopback
+  origin (`http:` / `https:` links elsewhere open in your system browser; `file:`, `javascript:` and custom schemes are
+  blocked). Only `notifications` and `clipboard-sanitized-write` are granted to the gateway's page; camera, microphone,
+  geolocation and clipboard reading are denied.
 - **One opt-out release check, no auto-updater.** The macOS build is ad-hoc signed (not notarized) and Linux packages
   are not signed by a repository key, so the app never downloads or installs code updates automatically. When
   **Check for a newer version on startup** is enabled in Settings, startup sends one `GET` to
@@ -126,9 +127,10 @@ A local computer is weaker than a container in ways you should know before you g
   system, not the network: a command can reach anything your machine can, including services on `localhost`. It
   cannot read the gateway token, so it cannot drive the gateway — but a service of yours that trusts localhost
   without a password is reachable.
-- **System services stay reachable.** The sandbox confines files, not the operating system: a command can read
-  anything outside your home that your user can (system libraries, `/opt`, `/etc`), and on macOS it can talk to any
-  Mach service (the pasteboard among them).
+- **System services stay partly reachable.** The sandbox confines files, not the whole operating system: a command can
+  read system libraries, `/opt` and `/etc` (though `/Volumes` and host `/tmp` are hidden), and on macOS Seatbelt blocks
+  pasteboard, LaunchServices and AppleEvents Mach services and cross-sandbox signals, while other system IPC remains
+  reachable.
 - **No resource limits.** Nothing caps a local teammate's memory or CPU; a runaway command is killed only by its
   timeout (ten minutes at most) or the stop button.
 - **The profile is a file.** The teammate's cookies live under `<data>/bots/<id>/browser`, readable by any program

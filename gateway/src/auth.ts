@@ -84,16 +84,26 @@ function presentedToken(c: Context): string | undefined {
   return getCookie(c, SESSION_COOKIE) ?? getCookie(c, LEGACY_SESSION_COOKIE)
 }
 
+function effectivePort(u: URL): string {
+  if (u.port) return u.port
+  return u.protocol === 'https:' ? '443' : '80'
+}
+
 /** 同一端口上的 localhost / 127.0.0.1 / [::1] 是同一台机器的同一个服务 */
 function sameHost(a: URL, b: URL): boolean {
   const loopback = (h: string) => (['127.0.0.1', '[::1]', '::1'].includes(h) ? 'localhost' : h)
-  return loopback(a.hostname) === loopback(b.hostname) && a.port === b.port
+  return loopback(a.hostname) === loopback(b.hostname) && effectivePort(a) === effectivePort(b)
+}
+
+function forwardedHttps(c: Context): boolean {
+  return c.req.header('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase() === 'https'
 }
 
 /** 网关自己的地址以 Host 头为准，不看请求 URL：以前的 @hono/node-ws 拼升级 URL 时会丢端口，Host 头才是浏览器真正连的地址 */
-function selfUrl(c: Context): URL {
+function selfUrl(c: Context, trustHttps = false): URL {
   const host = c.req.header('host')
-  return host ? new URL(`http://${host}`) : new URL(c.req.url)
+  const scheme = new URL(c.req.url).protocol === 'https:' || (trustHttps && forwardedHttps(c)) ? 'https' : 'http'
+  return host ? new URL(`${scheme}://${host}`) : new URL(c.req.url)
 }
 
 function originAllowed(c: Context, allowedOrigins: string[]): boolean {
@@ -101,7 +111,14 @@ function originAllowed(c: Context, allowedOrigins: string[]): boolean {
   if (!origin) return true // curl、脚本不带 Origin，交给令牌把关
   try {
     const from = new URL(origin)
-    return sameHost(from, selfUrl(c)) || allowedOrigins.some((allowed) => sameHost(from, new URL(allowed)))
+    const parsedAllowed = allowedOrigins.flatMap((a) => {
+      try { return [new URL(a)] } catch { return [] }
+    })
+    const trustHttps = parsedAllowed.some((u) => u.protocol === 'https:')
+    const self = selfUrl(c, trustHttps)
+    if (sameHost(from, self) && (self.protocol !== 'https:' || from.protocol === 'https:')) return true
+    return parsedAllowed.some((allowed) =>
+      sameHost(from, allowed) && (allowed.protocol !== 'https:' || from.protocol === 'https:'))
   } catch {
     return false
   }
@@ -147,17 +164,19 @@ export function authMiddleware(token: string, allowedOrigins: string[] = []): Mi
 }
 
 /** 启动日志里的一次性链接：/auth?token=… → 种下 HttpOnly + SameSite=Strict 的会话 cookie。 */
-export function loginHandler(token: string): Handler {
+export function loginHandler(token: string, allowedOrigins: string[] = []): Handler {
+  const hasHttpsOrigin = allowedOrigins.some((a) => a.toLowerCase().startsWith('https://'))
   return (c) => {
     if (!sameToken(c.req.query('token') ?? '', token)) {
       return c.text('That sign-in link does not match this gateway. Use the one printed at startup.', 401)
     }
+    const isSecure = new URL(c.req.url).protocol === 'https:' || (hasHttpsOrigin && forwardedHttps(c))
     setCookie(c, SESSION_COOKIE, token, {
       httpOnly: true,
       sameSite: 'Strict',
       path: '/',
       maxAge: 60 * 60 * 24 * 365,
-      secure: new URL(c.req.url).protocol === 'https:',
+      secure: isSecure,
     })
     return c.redirect('/', 302)
   }

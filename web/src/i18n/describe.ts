@@ -71,7 +71,7 @@ function describeCron(t: T, expr: string): string {
   if (/^\d+$/.test(min) && /^\d+$/.test(hour) && month === '*') {
     const at = `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`
     if (dom === '*' && dow === '*') return t('cron.daily', { at })
-    if (dom === '*' && /^[0-6]$/.test(dow)) return t('cron.weekly', { day: weekday(t, Number(dow)), at })
+    if (dom === '*' && /^[0-7]$/.test(dow)) return t('cron.weekly', { day: weekday(t, Number(dow) % 7), at })
     if (/^\d+$/.test(dom) && dow === '*') return t('cron.monthly', { day: dom, at })
   }
   return expr

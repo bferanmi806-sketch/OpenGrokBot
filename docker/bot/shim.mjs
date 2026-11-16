@@ -4,12 +4,14 @@
 // 没有口令的 CDP 就等于把这台电脑的浏览器（连同登录态）送给了别的 bot。
 import { spawn } from 'node:child_process'
 import { timingSafeEqual } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { mkdir, open, readFile, realpath, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
 import { connect } from 'node:net'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 
 const ROOT = '/workspace'
+const HIDDEN_BROWSER = '/workspace/.browser'
 const PORT = Number(process.env.SHIM_PORT || 7717)
 const CDP_PORT = Number(process.env.CDP_PORT || 9222)
 const CDP_UPSTREAM = 9223 // Chromium 自己只听容器内回环的 9223
@@ -20,16 +22,43 @@ const DEFAULT_SHELL_MS = 60_000
 const MAX_SHELL_MS = 10 * 60_000
 
 function tokenMatches(presented) {
-  if (!TOKEN) return true // 老网关建的容器没有口令：照旧放行，网关升级后会重建容器
+  if (!TOKEN) return process.env.SHIM_INSECURE === '1'
   const a = Buffer.from(String(presented ?? ''))
   const b = Buffer.from(TOKEN)
   return a.length === b.length && timingSafeEqual(a, b)
 }
 
+function isHidden(p) {
+  return p === HIDDEN_BROWSER || p.startsWith(HIDDEN_BROWSER + '/')
+}
+
 function safePath(p) {
   const full = resolve(ROOT, p ?? '')
   if (full !== ROOT && !full.startsWith(ROOT + '/')) return null
+  if (isHidden(full)) return null
   return full
+}
+
+async function confined(given) {
+  const full = safePath(given)
+  if (!full) return null
+  const root = await realpath(ROOT)
+  let probe = full
+  for (;;) {
+    try {
+      const real = await realpath(probe)
+      const rest = relative(probe, full)
+      const landed = rest ? join(real, rest) : real
+      if (landed !== root && !landed.startsWith(root + '/')) return null
+      if (isHidden(landed)) return null
+      return landed
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err
+      const parent = dirname(probe)
+      if (parent === probe) return null
+      probe = parent
+    }
+  }
 }
 
 function readBody(req) {
@@ -65,9 +94,14 @@ function shellTimeout(requested) {
  * 只杀 bash 的话，`sleep`、`npm run dev` 这些孙进程会成为孤儿接着跑。
  * bash 退出后稍等片刻就收尾：后台进程（`server &`）占着输出管道时，调用不该一直挂着。
  */
+function childEnv() {
+  const { SHIM_TOKEN: _t, VNC_PASSWORD: _v, ...rest } = process.env
+  return rest
+}
+
 function runShell(cmd, timeoutMs, signal) {
   return new Promise((resolveShell) => {
-    const child = spawn('/bin/bash', ['-c', cmd], { cwd: ROOT, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn('/bin/bash', ['-c', cmd], { cwd: ROOT, env: childEnv(), detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
     const out = []
     const errOut = []
     let size = 0
@@ -118,18 +152,30 @@ const routes = {
   // 网关那头停了（操作者按了停止、或请求超时）就连命令一起杀掉，别让它在后台接着跑
   'POST /shell': async (body, signal) => runShell(String(body.cmd ?? ''), body.timeoutMs, signal),
   'POST /read': async (body) => {
-    const full = safePath(body.path)
+    const full = await confined(body.path)
     if (!full) return { status: 400, body: { error: 'path escapes workspace' } }
+    let info
+    try { info = await stat(full) }
+    catch { return { status: 404, body: { error: `no such file: ${body.path}` } } }
+    if (!info.isFile()) return { status: 400, body: { error: 'not a file' } }
+    if (info.size > MAX_BODY) return { status: 413, body: { error: 'file too large' } }
     try { return { content: await readFile(full, 'utf8') } }
     catch { return { status: 404, body: { error: `no such file: ${body.path}` } } }
   },
   'POST /write': async (body) => {
-    const full = safePath(body.path)
+    const full = await confined(body.path)
     if (!full) return { status: 400, body: { error: 'path escapes workspace' } }
     const content = String(body.content ?? '')
+    const bytes = Buffer.byteLength(content, 'utf8')
+    if (bytes > MAX_BODY) return { status: 413, body: { error: 'content too large' } }
     await mkdir(dirname(full), { recursive: true })
-    await writeFile(full, content, 'utf8')
-    return { ok: true, bytes: Buffer.byteLength(content) }
+    const handle = await open(full, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW)
+    try {
+      await handle.writeFile(content, 'utf8')
+    } finally {
+      await handle.close()
+    }
+    return { ok: true, bytes }
   },
 }
 

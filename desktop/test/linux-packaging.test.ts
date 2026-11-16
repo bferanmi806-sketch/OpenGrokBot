@@ -56,6 +56,28 @@ describe('Linux .deb packaging for Ubuntu 24.04+', () => {
     const install = readFileSync(join(desktopDir, config.deb.afterInstall), 'utf8')
     // 用户或别的工具已经给 /usr/bin/bwrap 写了规则就不去撞它（同一个路径两份规则会让 AppArmor 报错）
     expect(install).toMatch(/grep.*\/usr\/bin\/bwrap/)
+
+    const remove = readFileSync(join(desktopDir, config.deb.afterRemove), 'utf8')
+    expect(remove).toContain('"$1" = "upgrade"')
+    if (process.platform !== 'win32') {
+      // 只有真正的 bwrap profile 头才算已覆盖；别的软件里写的子规则或注释不该误伤
+      const regexMatch = install.match(/grep -Eqs '([^']+)'/)
+      expect(regexMatch).toBeTruthy()
+      const pattern = regexMatch![1]!
+      const matches = (line: string) => {
+        try {
+          execFileSync('grep', ['-Eq', pattern], { input: `${line}\n` })
+          return true
+        } catch {
+          return false
+        }
+      }
+      expect(matches('profile bwrap /usr/bin/bwrap flags=(unconfined) {')).toBe(true)
+      expect(matches('profile opensuperbot-bwrap "/usr/bin/bwrap" flags=(unconfined) {')).toBe(true)
+      expect(matches('/usr/bin/bwrap {')).toBe(true)
+      expect(matches('  /usr/bin/bwrap ix,')).toBe(false)
+      expect(matches('# profile bwrap /usr/bin/bwrap {')).toBe(false)
+    }
   })
 
   it('after-pack ships apparmor-bwrap into Linux resources alongside keeping one SQLite prebuild', async () => {

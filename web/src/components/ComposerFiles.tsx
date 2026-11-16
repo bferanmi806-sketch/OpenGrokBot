@@ -131,10 +131,16 @@ export function usePendingFiles(scope: string, io: FilesIO | undefined) {
     return ready.map(({ preview: _preview, ...rest }) => rest)
   }, [commit])
 
-  /** 没发出去：放回来 */
+  /** 没发出去：放回来（take 时吊销过的图片预览要重新建一份） */
   const restore = useCallback((taken: PendingFile[]) => {
-    for (const item of taken) wanted.current.set(item.key, null)
-    commit([...taken, ...itemsRef.current])
+    const withPreview = taken.map((item) => {
+      wanted.current.set(item.key, null)
+      if (!item.preview && item.mime && isImageType(item.mime) && typeof URL.createObjectURL === 'function') {
+        return { ...item, preview: URL.createObjectURL(item.file) }
+      }
+      return item
+    })
+    commit([...withPreview, ...itemsRef.current])
   }, [commit])
 
   useEffect(() => () => {

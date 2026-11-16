@@ -12,13 +12,15 @@ export type Scheduler = {
   size(): number
 }
 
-const realCron: CronFactory = (expr, onTick) => new Cron(expr, onTick)
+const realCron = (timeZone?: string): CronFactory => (expr, onTick) =>
+  new Cron(expr, timeZone ? { timezone: timeZone } : {}, onTick)
 
 export function createScheduler(deps: {
   run: (routine: RoutineRow) => void | Promise<void>
   makeCron?: CronFactory
+  timeZone?: string
 }): Scheduler {
-  const makeCron = deps.makeCron ?? realCron
+  const makeCron = deps.makeCron ?? realCron(deps.timeZone)
   const jobs = new Map<number, CronJob>()
 
   const stopAll = (): void => {

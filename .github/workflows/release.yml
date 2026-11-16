@@ -125,6 +125,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft -q .isDraft)" != "true" ]; then
+              echo "::error::Refusing to overwrite already-published release $GITHUB_REF_NAME"
+              exit 1
+            fi
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
           else
             gh release create "$GITHUB_REF_NAME" dist/* \

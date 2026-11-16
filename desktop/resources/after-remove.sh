@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Keep symlinks and AppArmor profiles intact during package upgrades; incoming postinst replaces them.
+if [ "$1" = "upgrade" ] || [ "$1" = "failed-upgrade" ]; then
+    exit 0
+fi
+
 if type update-alternatives >/dev/null 2>&1; then
     update-alternatives --remove '${executable}' '/opt/${sanitizedProductName}/${executable}'
 else

@@ -18,9 +18,12 @@ export type DiagnosticsInput = {
 
 const SECRETS: [RegExp, string][] = [
   [/(token=)[\w-]{8,}/gi, '$1<hidden>'],
+  [/([?&]key=)[\w-]{8,}/gi, '$1<hidden>'],
   [/(Bearer\s+)[\w.-]{8,}/gi, '$1<hidden>'],
   [/\b(sk-[\w-]{4})[\w-]{8,}/g, '$1…<hidden>'],
   [/\b(xai-[\w-]{4})[\w-]{8,}/g, '$1…<hidden>'],
+  [/\b(AIza[\w-]{4})[\w-]{16,}/g, '$1…<hidden>'],
+  [/\b(gsk_[\w-]{4})[\w-]{16,}/g, '$1…<hidden>'],
 ]
 
 export function redact(text: string): string {

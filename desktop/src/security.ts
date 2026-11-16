@@ -83,7 +83,8 @@ export const SAFE_WEB_PREFERENCES = {
 
 /** 接线用到的那几样 Electron 的东西（测试里换成假的） */
 export type ContentsLike = {
-  on(event: 'will-navigate', listener: (e: { preventDefault(): void }, url: string) => void): unknown
+  on(event: 'will-navigate' | 'will-redirect', listener: (e: { preventDefault(): void }, url: string) => void): unknown
+  on(event: 'will-frame-navigate', listener: (e: { preventDefault(): void; url: string; isMainFrame: boolean }) => void): unknown
   on(event: 'will-attach-webview', listener: (e: { preventDefault(): void }) => void): unknown
   setWindowOpenHandler(handler: (details: { url: string }) => unknown): void
 }
@@ -93,16 +94,44 @@ export function secureContents(contents: ContentsLike, opts: {
   openExternal: (url: string) => void
   /** 网关自己的页：主进程用同样的安全设置开一个窗口（地址已换成登录过的那个） */
   openInApp: (url: string) => void
+  /** 主窗口内跳到 localhost / [::1] 时改写成带 cookie 的 127.0.0.1 地址 */
+  navigateInApp?: (url: string) => void
   onAction: (url: string) => void
   log?: (line: string) => void
 }): void {
   contents.on('will-navigate', (e, url) => {
-    const decision = navigationDecision(url, opts.gatewayOrigin())
-    if (decision === 'allow') return
+    const gw = opts.gatewayOrigin()
+    const decision = navigationDecision(url, gw)
+    if (decision === 'allow') {
+      if (opts.navigateInApp && parse(url)?.origin !== parse(gw)?.origin) {
+        e.preventDefault()
+        opts.navigateInApp(toGatewayUrl(url, gw))
+      }
+      return
+    }
     e.preventDefault()
     if (decision === 'action') opts.onAction(url)
     else if (decision === 'external') opts.openExternal(url)
     else opts.log?.(`blocked navigation to ${url.slice(0, 200)}`)
+  })
+  contents.on('will-redirect', (e, url) => {
+    const gw = opts.gatewayOrigin()
+    const decision = navigationDecision(url, gw)
+    if (decision === 'allow') {
+      if (opts.navigateInApp && parse(url)?.origin !== parse(gw)?.origin) {
+        e.preventDefault()
+        opts.navigateInApp(toGatewayUrl(url, gw))
+      }
+      return
+    }
+    e.preventDefault()
+    if (decision === 'external') opts.openExternal(url)
+    else opts.log?.(`blocked redirect to ${url.slice(0, 200)}`)
+  })
+  contents.on('will-frame-navigate', (e) => {
+    if (e.isMainFrame || isGateway(e.url, opts.gatewayOrigin())) return
+    e.preventDefault()
+    opts.log?.(`blocked subframe navigation to ${e.url.slice(0, 200)}`)
   })
   contents.on('will-attach-webview', (e) => e.preventDefault())
   contents.setWindowOpenHandler(({ url }) => {

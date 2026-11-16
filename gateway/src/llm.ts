@@ -187,12 +187,22 @@ function createChatLLM(target: LlmTarget, fetchImpl: typeof fetch, sleep: Sleep)
       })
       type WireToolCall = { id: string; function?: { name?: string; arguments?: string } }
       type WireResponse = {
-        choices?: { message?: { role: 'assistant'; content?: string | null; tool_calls?: WireToolCall[] } }[]
+        error?: { message?: string } | null
+        choices?: {
+          finish_reason?: string | null
+          message?: { role: 'assistant'; content?: string | null; tool_calls?: WireToolCall[] }
+        }[]
         usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } }
       }
       const data = await postJson<WireResponse>(url, body, target, opts, fetchImpl, sleep)
-      const msg = data.choices?.[0]?.message
+      if (data.error?.message) throw new Error(`LLM API: ${data.error.message.slice(0, 300)}`)
+      const choice = data.choices?.[0]
+      const msg = choice?.message
       if (!msg) throw new Error('LLM API: empty choices')
+      // 撞上输出上限：半截的工具参数或空回复都别当正常结束（和 Claude / Responses 一致）
+      if (choice.finish_reason === 'length' && (!msg.content?.trim() || msg.tool_calls?.length)) {
+        throw new Error('LLM API: the reply was cut off at its output limit before finishing this step')
+      }
       return {
         content: msg.content ?? null,
         toolCalls: (msg.tool_calls ?? []).map((t) => ({

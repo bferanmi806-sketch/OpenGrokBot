@@ -360,4 +360,59 @@ describe('Thread', () => {
     expect(container.querySelector('.webhook-body')!.textContent).toBe(body)
     expect(container.querySelector('.row.from-user')).toBeNull()
   })
+
+  it('isolates drafts per conversation and restores yours when switching back', async () => {
+    const { rerender } = render(
+      <Thread conversation={dm} roster={roster} messages={messages} thinking={false} onSend={() => {}} onDecide={() => {}} />,
+    )
+    const box = screen.getByPlaceholderText('Message Scout') as HTMLTextAreaElement
+    await userEvent.type(box, 'draft for Scout')
+    expect(box.value).toBe('draft for Scout')
+
+    rerender(
+      <Thread conversation={group} roster={roster} messages={[]} thinking={false} onSend={() => {}} onDecide={() => {}} />,
+    )
+    const groupBox = screen.getByPlaceholderText('Message Offsite crew, or type @ to ask someone directly') as HTMLTextAreaElement
+    expect(groupBox.value).toBe('')
+    await userEvent.type(groupBox, 'hello crew')
+
+    rerender(
+      <Thread conversation={dm} roster={roster} messages={messages} thinking={false} onSend={() => {}} onDecide={() => {}} />,
+    )
+    expect((screen.getByPlaceholderText('Message Scout') as HTMLTextAreaElement).value).toBe('draft for Scout')
+  })
+
+  it('renders disallowed or relative markdown links as plain text instead of empty target=_blank anchors', () => {
+    const unsafe: Message[] = [{
+      id: 50,
+      thread_id: 'dm:researcher',
+      sender: 'researcher',
+      kind: 'text',
+      payload: null,
+      created_at: 50,
+      content: 'Avoid [js](javascript:alert(1)) and [rel](/api/uploads/1), keep [safe](https://example.com).',
+    }]
+    const { container } = render(
+      <Thread conversation={dm} roster={roster} messages={unsafe} thinking={false} onSend={() => {}} onDecide={() => {}} />,
+    )
+    const links = [...container.querySelectorAll('.bubble.markdown a')]
+    expect(links.map((a) => a.getAttribute('href'))).toEqual(['https://example.com'])
+    expect(screen.getByText('js').tagName).toBe('SPAN')
+    expect(screen.getByText('rel').tagName).toBe('SPAN')
+  })
+
+  it('keeps rich-text paste as text instead of attaching the clipboard preview bitmap', () => {
+    const onSend = vi.fn()
+    render(<Thread conversation={dm} roster={roster} messages={messages} thinking={false} onSend={onSend} onDecide={() => {}} />)
+    const box = screen.getByPlaceholderText('Message Scout')
+    const fakeImg = new File([new Uint8Array([137, 80, 78, 71])], 'preview.png', { type: 'image/png' })
+    const prevented = !fireEvent.paste(box, {
+      clipboardData: {
+        types: ['text/plain', 'text/html', 'Files'],
+        getData: (t: string) => (t === 'text/plain' ? 'copied table text' : '<b>copied</b>'),
+        items: [{ kind: 'file', type: 'image/png', getAsFile: () => fakeImg }],
+      },
+    })
+    expect(prevented).toBe(false)
+  })
 })

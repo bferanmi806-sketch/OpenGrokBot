@@ -241,6 +241,14 @@ const MIGRATIONS: Migration[] = [
     if (!have.has('pages')) db.exec('ALTER TABLE uploads ADD COLUMN pages INTEGER')
     if (!have.has('text_state')) db.exec('ALTER TABLE uploads ADD COLUMN text_state TEXT')
   },
+  // v10：待拍板审批、未答问题和登录接管请求的局部索引——托盘轮询 /api/summary 和侧栏刷新不再扫全表历史
+  (db) => db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(bot_id, thread_id) WHERE status = 'pending';
+    CREATE INDEX IF NOT EXISTS idx_messages_open_wait ON messages(sender, thread_id)
+      WHERE kind = 'question' AND json_extract(payload, '$.status') = 'open';
+    CREATE INDEX IF NOT EXISTS idx_messages_login_req ON messages(sender, thread_id, id)
+      WHERE kind = 'login_request';
+  `),
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length
@@ -307,6 +315,8 @@ export function openDb(
   const existed = path !== ':memory:' && existsSync(path)
   const db = new Database(path)
   db.pragma('journal_mode = WAL')
+  db.pragma('synchronous = NORMAL')
+  db.pragma('busy_timeout = 5000')
   const before = schemaVersion(db)
   // 只有真有东西可丢时才备份：新建的空库、已经是最新的库、更新的网关写的库（下面会直接拒绝）都不用
   const hasData = existed && Number(db.prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table'`).pluck().get()) > 0
@@ -379,13 +389,29 @@ export function listMessages(db: Db, threadId: string, limit = 200): MessageRow[
   return rows.reverse().map(parseRow)
 }
 
+/** 一次取出给出一组线程各自的最后一条消息，避免侧栏刷新对每个同事和每个群单独查一遍 */
+function lastMessagesByThread(db: Db, threadIds: string[]): Map<string, MessageRow> {
+  const out = new Map<string, MessageRow>()
+  if (!threadIds.length) return out
+  const placeholders = threadIds.map(() => '?').join(',')
+  const rows = db.prepare(
+    `SELECT m.* FROM messages m
+     JOIN (SELECT thread_id, MAX(id) AS max_id FROM messages WHERE thread_id IN (${placeholders}) GROUP BY thread_id) latest
+       ON m.id = latest.max_id`,
+  ).all(...threadIds) as Record<string, unknown>[]
+  for (const r of rows) {
+    const parsed = parseRow(r)
+    out.set(parsed.thread_id, parsed)
+  }
+  return out
+}
+
 export function listBotsWithLastMessage(db: Db): SidebarBot[] {
   const bots = db.prepare(`SELECT * FROM bots ORDER BY name`).all() as BotRow[]
-  const lastStmt = db.prepare(`SELECT * FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT 1`)
+  const latest = lastMessagesByThread(db, bots.map((b) => `dm:${b.id}`))
   return bots.map((b) => {
     const threadId = `dm:${b.id}`
-    const last = lastStmt.get(threadId) as Record<string, unknown> | undefined
-    return { ...b, thread_id: threadId, last_message: last ? parseRow(last) : null }
+    return { ...b, thread_id: threadId, last_message: latest.get(threadId) ?? null }
   })
 }
 
@@ -470,7 +496,7 @@ export function pendingCount(db: Db): number {
   return n
 }
 
-/** 某位同事手上有没有等着操作者的事：待批的审批、没回答的问题，或者它最后一句话是在请人登录 */
+/** 某位同事手上有没有等着操作者的事：待批的审批、没回答的问题，或者发了登录接管后操作者还没开口 */
 export function waitsOnOperator(db: Db, botId: string): boolean {
   const held = db.prepare(`SELECT 1 FROM approvals WHERE bot_id = ? AND status = 'pending' LIMIT 1`).get(botId)
   if (held) return true
@@ -478,14 +504,34 @@ export function waitsOnOperator(db: Db, botId: string): boolean {
     `SELECT 1 FROM messages WHERE kind = 'question' AND sender = ? AND json_extract(payload, '$.status') = 'open' LIMIT 1`,
   ).get(botId)
   if (asked) return true
-  const last = lastMessageOf(db, `dm:${botId}`)
-  return last?.kind === 'login_request' && last.sender === botId
+  const login = db.prepare(
+    `SELECT 1 FROM messages lr WHERE lr.kind = 'login_request' AND lr.sender = ?
+       AND NOT EXISTS (SELECT 1 FROM messages u WHERE u.thread_id = lr.thread_id AND u.sender = 'user' AND u.id > lr.id)
+     LIMIT 1`,
+  ).get(botId)
+  return Boolean(login)
 }
 
 export function listConversations(db: Db): Conversation[] {
   const bots = db.prepare('SELECT * FROM bots ORDER BY name').all() as BotRow[]
   const byId = new Map(bots.map((b) => [b.id, b]))
   const pending = pendingByThread(db)
+  const groupRows = db.prepare(`SELECT id, title FROM threads WHERE kind = 'group' ORDER BY title`)
+    .all() as { id: string; title: string }[]
+  const allThreadIds = [...bots.map((b) => `dm:${b.id}`), ...groupRows.map((g) => g.id)]
+  const latest = lastMessagesByThread(db, allThreadIds)
+  const membersByGroup = new Map<string, string[]>()
+  if (groupRows.length) {
+    const placeholders = groupRows.map(() => '?').join(',')
+    const memberRows = db.prepare(
+      `SELECT thread_id, bot_id FROM thread_members WHERE thread_id IN (${placeholders}) ORDER BY joined_at, bot_id`,
+    ).all(...groupRows.map((g) => g.id)) as { thread_id: string; bot_id: string }[]
+    for (const r of memberRows) {
+      const list = membersByGroup.get(r.thread_id) ?? []
+      list.push(r.bot_id)
+      membersByGroup.set(r.thread_id, list)
+    }
+  }
   const dms: Conversation[] = bots.map((b) => ({
     id: `dm:${b.id}`,
     kind: 'dm',
@@ -493,13 +539,11 @@ export function listConversations(db: Db): Conversation[] {
     emoji: b.emoji,
     subtitle: b.role,
     members: [b.id],
-    last_message: lastMessageOf(db, `dm:${b.id}`),
+    last_message: latest.get(`dm:${b.id}`) ?? null,
     pending: pending.get(`dm:${b.id}`) ?? 0,
   }))
-  const groupRows = db.prepare(`SELECT * FROM threads WHERE kind = 'group' ORDER BY title`)
-    .all() as { id: string; title: string }[]
   const groups: Conversation[] = groupRows.map((t) => {
-    const members = threadMembers(db, t.id)
+    const members = membersByGroup.get(t.id) ?? []
     return {
       id: t.id,
       kind: 'group',
@@ -507,7 +551,7 @@ export function listConversations(db: Db): Conversation[] {
       emoji: '👥',
       subtitle: members.map((id) => byId.get(id)?.name ?? id).join(', '),
       members,
-      last_message: lastMessageOf(db, t.id),
+      last_message: latest.get(t.id) ?? null,
       pending: pending.get(t.id) ?? 0,
     }
   })

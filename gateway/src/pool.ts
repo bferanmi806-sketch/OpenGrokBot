@@ -24,7 +24,16 @@ export function createPool(opts: {
   const live = new Map<string, Promise<BotComputer>>()
   const used = new Map<string, number>()
   const retiring = new Map<string, Promise<void>>()
+  const chains = new Map<string, Promise<unknown>>()
   const now = opts.now ?? Date.now
+
+  function serialized<T>(botId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = chains.get(botId) ?? Promise.resolve()
+    const next = prev.catch(() => {}).then(fn)
+    chains.set(botId, next)
+    void next.finally(() => { if (chains.get(botId) === next) chains.delete(botId) }).catch(() => {})
+    return next
+  }
 
   const makeComputer = opts.makeComputer ?? (async (botId: string) => {
     if (!opts.backend) throw new Error('no computer backend configured; bot computers are unavailable')
@@ -40,26 +49,28 @@ export function createPool(opts: {
     } catch {
       // 上一次启动就失败了，当没有缓存处理
     }
-    live.delete(botId)
+    if (live.get(botId) === pending) live.delete(botId)
     return null
   }
 
   return {
-    async get(botId) {
-      await retiring.get(botId)?.catch(() => {})
-      used.set(botId, now())
-      const existing = live.get(botId)
-      if (existing) {
-        const alive = await reuseIfAlive(botId, existing)
-        if (alive) return alive
-      }
-      // 失败不留缓存，否则一次 docker 抖动会永久毒化这个 bot
-      const started = makeComputer(botId).catch((err) => {
-        live.delete(botId)
-        throw err
+    get(botId) {
+      return serialized(botId, async () => {
+        await retiring.get(botId)?.catch(() => {})
+        used.set(botId, now())
+        const existing = live.get(botId)
+        if (existing) {
+          const alive = await reuseIfAlive(botId, existing)
+          if (alive) return alive
+        }
+        // 失败不留缓存，否则一次 docker 抖动会永久毒化这个 bot
+        const started = makeComputer(botId).catch((err) => {
+          if (live.get(botId) === started) live.delete(botId)
+          throw err
+        })
+        live.set(botId, started)
+        return started
       })
-      live.set(botId, started)
-      return started
     },
     peek: (botId) => live.get(botId),
     async disposeAll() {

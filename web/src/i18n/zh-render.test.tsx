@@ -51,7 +51,7 @@ describe('in Chinese', () => {
     expect(screen.getByRole('button', { name: '批准' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '驳回' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '一直放行…' })).toBeInTheDocument()
-    expect(screen.getByText(/你的放行规矩管得到email → bob@acme.com.*这件事是例行任务开的头，不是你/)).toBeInTheDocument()
+    expect(screen.getByText(/你的放行规矩管得到「email → bob@acme.com」.*这件事是例行任务开的头，不是你/)).toBeInTheDocument()
   })
 
   it('the computer panel', () => {

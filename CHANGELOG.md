@@ -7,6 +7,58 @@ names.
 
 ## [Unreleased]
 
+### Security
+
+- **Browser navigation, downloads and profile isolation.** `browser_goto` now accepts only `http:` and `https:`
+  addresses (`file:`, `chrome:`, `view-source:`, `javascript:` and `data:` are refused), link extraction ignores
+  non-HTTP schemes, and local Chrome aborts `file:` requests and saves downloads inside `<workspace>/downloads`
+  instead of your Downloads folder. On Docker computers, each teammate's browser profile now mounts at
+  `/var/lib/bot-browser` outside `/workspace` (migrating existing `/workspace/.browser` profiles automatically), and
+  the container shim refuses symlink escapes, caps file payloads at 16 MB, requires `SHIM_TOKEN` unless
+  `SHIM_INSECURE=1` is set explicitly, and strips `SHIM_TOKEN` and `VNC_PASSWORD` from shell child environments.
+- **Tighter local command sandboxes and process cleanup.** Seatbelt on macOS now restricts signals to
+  `same-sandbox` and blocks pasteboard, LaunchServices and AppleEvents Mach lookups as well as reads of
+  `/private/tmp` and `/Volumes`; `bubblewrap` on Linux mounts `--tmpfs /run` (binding `/run/systemd/resolve` back
+  read-only when present), and both narrow exposed `~/.deno` / `~/.bun` paths to `bin` only. Active sandboxed
+  process groups are tracked and terminated on timeout, abort and gateway exit.
+- **Watch routines stay read-only across questions.** Answering an `ask_operator` card raised during a `watch`
+  routine now resumes with `watch: true`, keeping shell, file-write and mutating browser tools withheld.
+- **Gateway headers, Electron navigation and log redaction.** The gateway sends `X-Frame-Options: SAMEORIGIN`,
+  `Content-Security-Policy: frame-ancestors 'self'` and `Referrer-Policy: no-referrer`, normalizes default ports
+  and `https:` / `X-Forwarded-Proto` origins for CSRF and `Secure` cookies, and validates built-in teammate folder
+  names before seeding. In the desktop shell, `will-redirect` and `will-frame-navigate` enforce the same origin
+  rules as `will-navigate`, `localhost` / `[::1]` navigations rewrite to the signed-in `127.0.0.1` origin, error-page
+  `osb:` actions are scoped to the main window while in the error state, and `logs/gateway.log` redacts tokens,
+  `?key=` query strings and `sk-` / `xai-` / `AIza` / `gsk_` keys as lines are written.
+
+### Changed
+
+- **Faster SQLite queries and cleaner shutdown.** SQLite runs with `synchronous = NORMAL`, `busy_timeout = 5000`
+  and partial indexes on pending approvals, open questions and sign-in requests (schema v10), while conversation
+  and teammate listings batch their latest-message and group-member lookups. Shutdown aborts active and queued
+  turns, kills active sandboxes and closes SQLite cleanly; screenshots older than 90 days are pruned alongside
+  action logs.
+- **Smoother thread rendering and live screen view.** Message rows are memoized with cached `Intl.DateTimeFormat`
+  instances so typing in the composer no longer re-renders Markdown history, drafts and `@` mentions are kept per
+  conversation, Markdown blocks non-`http(s)` / `mailto:` links instead of rendering empty `target="_blank"`
+  anchors, and the CDP live screen updates `<img>` directly without 10 fps React state churn.
+- **Build, packaging and service polish.** Root `pnpm build` compiles `desktop` alongside `web` and `gateway`,
+  `desktop` auto-installs the Electron binary on `prestart` when missing, `.github/workflows/ci.yml` sets explicit
+  `contents: read` permissions, `.github/workflows/release.yml` refuses to clobber an already-published release,
+  `.deb` maintainer scripts preserve AppArmor profiles across package upgrades and match `/usr/bin/bwrap` profile
+  headers accurately, Windows startup logs use UTF-8 with 5 MB rotation, and the systemd unit uses `/usr/bin/env node`
+  with `TimeoutStopSec=15`.
+
+### Fixed
+
+- **Concurrency, lifecycle and edge cases.** Serialized per-bot computer replacement in `pool.ts` when a container
+  dies, tracked in-flight uploads so concurrent saves respect storage quotas and `sweep()` never deletes a file
+  mid-save, surfaced 200-status upstream errors and `finish_reason: "length"` truncated tool calls in Chat
+  Completions, kept `waitsOnOperator` true after `ask_for_login` until you reply, rejected 6-field second-level cron
+  expressions, wired configured timezones into routine scheduling and daily token resets, fixed overlapping message
+  fetches and WebSocket reconnect/sign-out races in the web client, and hardened desktop port probing (`::1`),
+  `OPENSUPERBOT_TOKEN` sign-in, multi-byte UTF-8 log decoding and quit confirmation error recovery.
+
 ## [0.6.0] - 2026-11-13
 
 A desktop app for macOS and Linux (`.dmg`, `.deb`, `.AppImage`), a first-run setup wizard, a settings page and a

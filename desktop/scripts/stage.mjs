@@ -20,7 +20,6 @@ const pnpm = (...args) => execFileSync('pnpm', args, { cwd: REPO, stdio: 'inheri
 if (!process.argv.includes('--no-build')) {
   say('building web, gateway and desktop')
   pnpm('build')
-  pnpm('--filter', '@opensuperbot/desktop', 'build')
 }
 for (const need of ['gateway/dist/main.js', 'web/dist/index.html', 'desktop/dist/main.js', 'desktop/dist/preload.cjs']) {
   if (!existsSync(join(REPO, need))) throw new Error(`${need} is missing; build first (or drop --no-build)`)

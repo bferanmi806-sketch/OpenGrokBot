@@ -2,7 +2,7 @@ import type { Hono } from 'hono'
 import type { ComputerKind } from './computer.js'
 import type { Config } from './config.js'
 import type { Db } from './db.js'
-import { MAIN, resetBotModels } from './connections.js'
+import { MAIN, mainConnection, resetBotModels } from './connections.js'
 import { checkConnection, listModels } from './llm-check.js'
 import { PROVIDERS, providerById } from './providers.js'
 import {
@@ -80,13 +80,22 @@ export function mountSettings(app: Hono, deps: SettingsDeps & { db: Db; /** 启�
     }
     errors.push(...checkSettings(patch).errors.filter((e) => !locked.has(e.key as SettingKey)))
     if (errors.length) return c.json({ error: 'invalid_settings', errors }, 400)
-    const before = now()
-    saveSettings(db, patch)
-    const after = now()
+    const before = mainConnection(startedWith, env, db)
+    const enriched: Record<string, unknown> = { ...patch }
+    if (typeof patch.provider === 'string' && patch.provider !== before.provider) {
+      const preset = providerById(patch.provider)
+      if (preset) {
+        if (patch.baseURL === undefined && preset.baseURL && !locked.has('baseURL')) enriched.baseURL = preset.baseURL
+        if (patch.model === undefined && preset.defaultModel && !locked.has('model')) enriched.model = preset.defaultModel
+        if (patch.vision === undefined && !locked.has('vision')) enriched.vision = preset.vision
+      }
+    }
+    saveSettings(db, enriched)
+    const after = mainConnection(startedWith, env, db)
     if (apiKey !== undefined) saveApiKey(dataDir, typeof apiKey === 'string' ? apiKey : '')
     else if (after.baseURL !== before.baseURL) saveApiKey(dataDir, '') // 换了地址没给新 key：旧 key 不跟过去
     // 默认连接换了地方：同事在它上面单独选的模型多半不存在了
-    if (after.baseURL !== before.baseURL || after.api !== before.api) resetBotModels(db, MAIN)
+    if (after.provider !== before.provider || after.baseURL !== before.baseURL || after.api !== before.api) resetBotModels(db, MAIN)
     return c.json(view())
   })
 

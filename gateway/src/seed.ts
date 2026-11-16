@@ -3,12 +3,18 @@ import { join } from 'node:path'
 import { type Db, ensureDmThread, ensureGroupThread, upsertBot } from './db.js'
 import { parseSoul } from './soul.js'
 
+const SAFE_BOT_ID = /^[a-zA-Z0-9._-]+$/
+
 /** 每个带 SOUL.md 的子目录就是一位同事；role/emoji 取自 SOUL.md 的 frontmatter，没写就保留库里已有的。 */
 export function seedTeammates(db: Db, teammatesDir: string): string[] {
   if (!existsSync(teammatesDir)) return [] // 用户目录是可选的，第一次跑还不存在
   const ids: string[] = []
   for (const entry of readdirSync(teammatesDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
+    if (!SAFE_BOT_ID.test(entry.name) || entry.name === '.' || entry.name === '..') {
+      console.warn(`[gateway] skipping teammate folder "${entry.name}": folder names may only use letters, digits, ., _ or -`)
+      continue
+    }
     const soulPath = join(teammatesDir, entry.name, 'SOUL.md')
     if (!existsSync(soulPath)) continue
     const { meta, body } = parseSoul(readFileSync(soulPath, 'utf8'))

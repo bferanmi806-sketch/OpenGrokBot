@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { FieldErrors, fetchConnectionModels, setBotLlm } from '../api'
+import { useEffect, useRef, useState } from 'react'
+import { FieldErrors, SignedOut, fetchConnectionModels, setBotLlm } from '../api'
 import { useT } from '../i18n'
 import type { BotLlm, ConnectionsState, ProviderPreset } from '../types'
 import { useEscape } from './ConfirmDialog'
@@ -40,13 +40,14 @@ export function BotModelChip({ botId, state, providers, onOpen }: {
   )
 }
 
-export function BotModelPicker({ botId, botName, state, providers, onSaved, onManage, onClose }: {
+export function BotModelPicker({ botId, botName, state, providers, onSaved, onManage, onSignedOut, onClose }: {
   botId: string
   botName: string
   state: ConnectionsState
   providers: ProviderPreset[]
   onSaved: (botId: string, llm: BotLlm) => void
   onManage: () => void
+  onSignedOut?: () => void
   onClose: () => void
 }) {
   const t = useT()
@@ -76,17 +77,23 @@ export function BotModelPicker({ botId, botName, state, providers, onSaved, onMa
       onSaved(botId, await setBotLlm(botId, { connectionId, model: picked && picked !== connection?.model ? picked : null }))
       onClose()
     } catch (err) {
+      if (err instanceof SignedOut) { onSignedOut?.(); return }
       const first = err instanceof FieldErrors ? err.errors[0] : undefined
       setError(first ? fieldText(t, first) : String(err))
     } finally {
       setSaving(false)
     }
   }
+  const scrimDown = useRef(false)
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
+    <div
+      className="modal-scrim"
+      onMouseDown={(e) => { scrimDown.current = e.target === e.currentTarget }}
+      onClick={(e) => { if (e.target === e.currentTarget && scrimDown.current) onClose(); scrimDown.current = false }}
+    >
       <form
-        className="modal picker" role="dialog" aria-label={t('picker.title', { name: botName })}
+        className="modal picker" role="dialog" aria-modal="true" aria-label={t('picker.title', { name: botName })}
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => { e.preventDefault(); void save() }}
       >

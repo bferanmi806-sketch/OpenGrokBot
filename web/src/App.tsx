@@ -98,7 +98,10 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
   useEffect(() => {
     const apply = () => {
       const m = /^#thread=(.+)$/.exec(window.location.hash)
-      if (m) setSelectedId(decodeURIComponent(m[1]!))
+      if (!m) return
+      try {
+        setSelectedId(decodeURIComponent(m[1]!))
+      } catch { /* 坏掉的百分号编码不炸页面 */ }
     }
     apply()
     window.addEventListener('hashchange', apply)
@@ -113,17 +116,17 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
   )
   const threadId = selected?.id ?? null
   const threadIdRef = useRef<string | null>(null)
-  useEffect(() => { threadIdRef.current = threadId }, [threadId])
-  // 正看着的线程里有谁：他们干完了你自己看得见，不用再标「done」；点开的那一刻把已有的「done」消掉
+  threadIdRef.current = threadId
+  // 正看着的单聊里有谁：他们干完了你自己看得见，不用再标「done」；点开单聊的那一刻把已有的「done」消掉（打开群聊不清个人单聊的 done）
   const watchingRef = useRef<string[]>([])
   /** 这一轮忙碌里真往线程说过话的同事：只有它们收工时才标「done」 */
   const postedRef = useRef(new Set<string>())
-  const members = selected?.members.join(',') ?? ''
+  const watchedDm = selected?.kind === 'dm' ? selected.members.join(',') : ''
   useEffect(() => {
-    const ids = members ? members.split(',') : []
+    const ids = watchedDm ? watchedDm.split(',') : []
     watchingRef.current = ids
-    setStatuses((s) => clearDone(s, ids))
-  }, [members])
+    if (ids.length) setStatuses((s) => clearDone(s, ids))
+  }, [watchedDm])
   // 面板此刻属于谁，同步记在 ref 里：拉起电脑要十几秒，结果回来时人可能早换了线程或关了面板
   const panelFor = useRef<string | null>(null)
   const showPanel = useCallback((next: { botId: string; info: ComputerInfo | null } | null) => {
@@ -133,22 +136,35 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
   // 面板属于某一位同事：换了线程就收起，免得新名字盖在旧屏幕上
   useEffect(() => { showPanel(null) }, [selected?.id, showPanel])
 
-  /** 拉消息期间经 WS 到达的更新先记下来，拉回来后叠在快照上，免得被旧快照覆盖掉 */
-  const liveDuringFetch = useRef<Map<number, Message> | null>(null)
+  /** 拉消息期间经 WS 到达的更新先记下来，拉回来后叠在快照上；重叠拉取按序号只认最新那次，绝不让慢快照抹掉刚收到的实时消息 */
+  const liveDuringFetch = useRef(new Map<number, Message>())
+  const inFlightFetches = useRef(0)
+  const msgFetchSeq = useRef(0)
   const loadMessages = useCallback(async (thread: string) => {
-    const mine = new Map<number, Message>()
-    liveDuringFetch.current = mine
+    const seq = ++msgFetchSeq.current
+    inFlightFetches.current += 1
     try {
       const fetched = await fetchMessages(thread)
-      const live = liveDuringFetch.current ?? new Map<number, Message>()
-      if (threadIdRef.current !== thread) return
-      const merged = fetched.map((m) => live.get(m.id) ?? m)
-      const known = new Set(merged.map((m) => m.id))
-      for (const m of live.values()) if (!known.has(m.id)) merged.push(m)
-      setMessages(merged.sort((a, b) => a.id - b.id))
+      if (seq !== msgFetchSeq.current || threadIdRef.current !== thread) return
+      const live = liveDuringFetch.current
+      setMessages((prev) => {
+        const recent = new Map<number, Message>()
+        for (const m of prev) if (m.thread_id === thread) recent.set(m.id, m)
+        for (const [id, m] of live) if (m.thread_id === thread) recent.set(id, m)
+        const merged = fetched.map((m) => recent.get(m.id) ?? m)
+        const known = new Set(merged.map((m) => m.id))
+        const maxFetchedId = fetched.reduce((mx, m) => Math.max(mx, m.id), 0)
+        for (const m of recent.values()) {
+          if (!known.has(m.id) && (live.has(m.id) || m.id > maxFetchedId)) merged.push(m)
+        }
+        return merged.sort((a, b) => a.id - b.id)
+      })
     } finally {
-      // 只清自己的记账：两次拉取重叠时，晚到的那次不能把正在飞的那次的记账抹掉
-      if (liveDuringFetch.current === mine) liveDuringFetch.current = null
+      inFlightFetches.current -= 1
+      if (inFlightFetches.current <= 0) {
+        inFlightFetches.current = 0
+        liveDuringFetch.current.clear()
+      }
     }
   }, [])
 
@@ -212,6 +228,8 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
     loadMessages(threadId).catch(guard)
   }, [threadId, guard, loadMessages])
 
+  const signOut = useCallback(() => setSignedOut(true), [])
+
   useEffect(() => {
     if (signedOut !== false) return
     return connectEvents((e) => {
@@ -233,16 +251,20 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
       }
       if (e.type !== 'message') return // 更新的网关发来不认识的事件，不归这里管
       if (e.message.sender !== 'user' && e.message.kind !== 'activity') postedRef.current.add(e.message.sender)
-      // 就地更新的旧消息（activity 卡片收尾、审批 chip 翻转）不该顶掉更新的那条预览
-      setConversations((cs) => cs.map((c) => (
-        c.id === e.threadId && e.message.id >= (c.last_message?.id ?? 0) ? { ...c, last_message: e.message } : c
-      )))
+      // 就地更新的旧消息（activity 卡片收尾、审批 chip 翻转）不该顶掉更新的那条预览；没变就不换数组引用
+      setConversations((cs) => {
+        const idx = cs.findIndex((c) => c.id === e.threadId)
+        if (idx === -1 || e.message.id < (cs[idx]!.last_message?.id ?? 0)) return cs
+        const next = [...cs]
+        next[idx] = { ...cs[idx]!, last_message: e.message }
+        return next
+      })
       // 审批、问题来了或定了，侧栏的「等你」计数要跟着变
       if (['approval_request', 'approval_resolved', 'question'].includes(e.message.kind)) {
         void refreshConversations().catch(guard)
       }
       if (e.threadId === threadIdRef.current) {
-        liveDuringFetch.current?.set(e.message.id, e.message)
+        if (inFlightFetches.current > 0) liveDuringFetch.current.set(e.message.id, e.message)
         // 同 id 就替换：审批 chip 被放行、activity 卡片多了一步，都是就地更新
         setMessages((ms) => {
           const at = ms.findIndex((m) => m.id === e.message.id)
@@ -252,8 +274,8 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
           return next
         })
       }
-    })
-  }, [signedOut, resync, refreshConversations, guard])
+    }, { onSignedOut: signOut })
+  }, [signedOut, resync, refreshConversations, guard, signOut])
 
   const waiting = conversations.reduce((sum, c) => sum + (c.pending ?? 0), 0)
   useEffect(() => {
@@ -384,7 +406,14 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
       guard(err)
     }
   }
-  const signOut = useCallback(() => setSignedOut(true), [])
+  const selectConversation = useCallback((id: string) => {
+    setSelectedId(id)
+    // 清掉旧的 #thread=，否则桌面端下次再点同一条通知时 hash 没变，hashchange 就不会触发
+    if (window.location.hash.startsWith('#thread=')) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    }
+  }, [])
+  const hireScrimDown = useRef(false)
 
   if (signedOut) return <SignIn />
   if (wizard && setup) {
@@ -424,7 +453,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
         conversations={conversations}
         selectedId={selected?.id ?? null}
         statuses={statuses}
-        onSelect={setSelectedId}
+        onSelect={selectConversation}
         onNewBot={() => { setHireError(undefined); setHiring(true) }}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
@@ -467,7 +496,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
       ) : (
         <main className="thread thread-empty">{t('app.noTeammates')}</main>
       )}
-      {panel ? (
+      {panel && selected?.kind === 'dm' && selected.members[0] === panel.botId ? (
         <ComputerPanel
           info={panel.info}
           botName={selected?.title ?? ''}
@@ -494,7 +523,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
         />
       ) : null}
       {llms && modelsOpen ? (
-        <ModelsDialog state={llms} providers={providers} roster={roster} onChange={setLlms} onClose={() => setModelsOpen(false)} />
+        <ModelsDialog state={llms} providers={providers} roster={roster} onChange={setLlms} onSignedOut={signOut} onClose={() => setModelsOpen(false)} />
       ) : null}
       {llms && pickerFor && !modelsOpen ? (
         <BotModelPicker
@@ -504,12 +533,17 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
           providers={providers}
           onSaved={(botId, llm) => setLlms((s) => (s ? { ...s, bots: { ...s.bots, [botId]: llm } } : s))}
           onManage={() => { setPickerFor(null); setModelsOpen(true) }}
+          onSignedOut={signOut}
           onClose={() => setPickerFor(null)}
         />
       ) : null}
       {hiring ? (
-        <div className="modal-scrim" onClick={() => setHiring(false)}>
-          <div className="modal" role="dialog" aria-label={t('app.hireTitle')} onClick={(e) => e.stopPropagation()}>
+        <div
+          className="modal-scrim"
+          onMouseDown={(e) => { hireScrimDown.current = e.target === e.currentTarget }}
+          onClick={(e) => { if (e.target === e.currentTarget && hireScrimDown.current) setHiring(false); hireScrimDown.current = false }}
+        >
+          <div className="modal" role="dialog" aria-modal="true" aria-label={t('app.hireTitle')} onClick={(e) => e.stopPropagation()}>
             <div className="modal-head">
               <div className="modal-title">{t('app.hireTitle')}</div>
               <button type="button" className="modal-close" onClick={() => setHiring(false)} aria-label={t('hire.cancel')} title={t('hire.cancel')}>

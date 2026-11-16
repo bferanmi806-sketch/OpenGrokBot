@@ -1,7 +1,8 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { FieldErrors, SignedOut, downloadBrowser, fetchAbout, fetchSettings, fetchSetup, saveSettings } from '../api'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { ApiError, FieldErrors, SignedOut, downloadBrowser, fetchAbout, fetchSettings, fetchSetup, saveSettings } from '../api'
 import { desktopApi, type DesktopInfo } from '../desktop'
 import { useT, type MessageKey } from '../i18n'
+import { errorText } from '../i18n/describe'
 import type { AboutInfo, BrowserStatus, ConnectionsState, FieldError, ProviderPreset, SettingsView, SetupInfo } from '../types'
 import { connectionLabel, fieldText } from './ModelsDialog'
 import { BrowserLine, type LanguageSetting } from './SetupWizard'
@@ -80,7 +81,7 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
       setSettings(next)
       return next
     } catch (err) {
-      if (err instanceof SignedOut) onSignedOut()
+      if (err instanceof SignedOut) { onSignedOut(); return null }
       setErrors(err instanceof FieldErrors ? err.errors : [{ key: '', code: 'invalid' }])
       return null
     } finally {
@@ -93,7 +94,9 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
     try {
       onBrowser(await downloadBrowser())
     } catch (err) {
-      setErrors([{ key: 'browser', code: err instanceof Error ? err.message : String(err) }])
+      if (err instanceof SignedOut) { onSignedOut(); return }
+      const message = err instanceof ApiError ? errorText(t, err) : err instanceof Error ? err.message : String(err)
+      setErrors([{ key: 'browser', code: message }])
     } finally {
       setDownloading(false)
     }
@@ -114,12 +117,18 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
   const shownBrowser: BrowserStatus | null = downloading && (live?.state === 'missing' || live?.state === 'failed')
     ? { state: 'downloading', item: null, percent: null, totalMiB: null } : live
   const suggested = setup?.computers.browserMirror.suggested ?? null
-  const why = setup && setup.computers.choice === 'auto' && setup.computers.why && setup.computers.why !== 'chosen'
-    ? t(`setup.computer.why.${setup.computers.why}` as MessageKey) : null
+  const whyKey = setup && setup.computers.choice === 'auto' && setup.computers.why && setup.computers.why !== 'chosen'
+    ? (`setup.computer.why.${setup.computers.why}` as MessageKey) : null
+  const why = (whyKey ? t(whyKey) : null) || (whyKey ? setup?.computers.reason ?? null : null)
+  const scrimDown = useRef(false)
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div className="modal modal-wide settings" role="dialog" aria-label={t('settings.title')} onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-scrim"
+      onMouseDown={(e) => { scrimDown.current = e.target === e.currentTarget }}
+      onClick={(e) => { if (e.target === e.currentTarget && scrimDown.current) onClose(); scrimDown.current = false }}
+    >
+      <div className="modal modal-wide settings" role="dialog" aria-modal="true" aria-label={t('settings.title')} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div className="modal-title">{t('settings.title')}</div>
           <button type="button" className="modal-close" onClick={onClose} aria-label={t('settings.close')} title={t('settings.close')}>

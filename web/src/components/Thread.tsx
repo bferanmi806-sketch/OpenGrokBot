@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
 import type {
   ActivityPayload, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, Conversation, LoginPayload, MemoryPayload,
   Message, QuestionPayload, ReportPayload, RoutinePayload, RuleDuration, ScreenshotPayload, WebhookPayload,
@@ -42,10 +42,116 @@ function dayLabel(ts: number, now: Date, t: T): string {
   })
 }
 
-const timeLabel = (ts: number, locale: string | undefined) =>
-  new Date(ts).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })
+const timeFormatters = new Map<string, Intl.DateTimeFormat>()
+const timeLabel = (ts: number, locale: string | undefined) => {
+  const key = locale ?? 'default'
+  let fmt = timeFormatters.get(key)
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit' })
+    timeFormatters.set(key, fmt)
+  }
+  return fmt.format(ts)
+}
 
 type Mention = { id: string; name: string; emoji: string }
+
+/** 单条消息独立 memo：底部输入框每次敲键盘、挪光标都不再把上面 ~200 条 Markdown 重新编译一遍 */
+const ThreadMessageRow = memo(function ThreadMessageRow({
+  message, dayHeader, showTime, sameSpeakerNext, speaker, t,
+  onDecide, onAnswer, onOpenScreen, onPreview, onRemoveFile, onRequestRemoveFile,
+}: {
+  message: Message
+  dayHeader: string | null
+  showTime: boolean
+  sameSpeakerNext: boolean
+  speaker: { name: string; emoji: string } | undefined
+  t: T
+  onDecide: (approvalId: number, decision: 'approve' | 'discard', remember?: RuleDuration, items?: number[]) => void | Promise<void>
+  onAnswer?: ((messageId: number, choices: string[]) => void | Promise<void>) | undefined
+  onOpenScreen?: (() => void) | undefined
+  onPreview: (img: LightboxImage) => void
+  onRemoveFile?: ((id: string) => void) | undefined
+  onRequestRemoveFile: (p: AttachmentPayload) => void
+}) {
+  const renderBody = (m: Message) => {
+    if (m.kind === 'text' && isNotice(m.payload)) {
+      const n = m.payload
+      return (
+        <div className="bubble markdown">
+          {n.notice === 'paused' && n.lead ? <Markdown text={n.lead} /> : null}
+          <p>{noticeText(t, n)}</p>
+        </div>
+      )
+    }
+    if (!m.payload) {
+      return m.sender === 'user'
+        ? <div className="bubble">{m.content}</div>
+        : <div className="bubble markdown"><Markdown text={m.content} /></div>
+    }
+    switch (m.kind) {
+      case 'report': return <ReportChip payload={m.payload as ReportPayload} />
+      case 'screenshot': return <ScreenshotChip payload={m.payload as ScreenshotPayload} onPreview={onPreview} />
+      case 'approval_request': return <ApprovalChip payload={m.payload as ApprovalPayload} onDecide={onDecide} />
+      case 'memory_updated': return <MemoryChip payload={m.payload as MemoryPayload} />
+      case 'routine_created': return <RoutineChip payload={m.payload as RoutinePayload} />
+      case 'bot_ref': return <BotRefChip payload={m.payload as BotRefPayload} />
+      case 'login_request':
+        return <LoginChip payload={m.payload as LoginPayload} onOpenScreen={() => onOpenScreen?.()} />
+      case 'activity': return <ActivityChip payload={m.payload as ActivityPayload} />
+      case 'webhook': return <WebhookChip payload={m.payload as WebhookPayload} />
+      case 'attachment':
+        return (
+          <AttachmentChip
+            payload={m.payload as AttachmentPayload}
+            onPreview={onPreview}
+            {...(onRemoveFile ? { onRemove: onRemoveFile, onRequestRemove: onRequestRemoveFile } : {})}
+          />
+        )
+      case 'question':
+        return <QuestionChip payload={m.payload as QuestionPayload} onAnswer={(choices) => onAnswer?.(m.id, choices)} />
+      case 'approval_resolved': {
+        const p = m.payload as ApprovalResolvedPayload
+        return (
+          <div className="decision">
+            {p.decision === 'approve' ? `✓ ${t('thread.approved')}` : `✕ ${t('thread.discarded')}`} · {p.action}
+            {p.count ? ` · ${t('thread.itemsOf', { approved: p.count.approved, of: p.count.of })}` : ''}
+            {p.remembered ? ` · ${t('thread.ruleSaved', { scope: `${p.remembered.kind} → ${p.remembered.target}` })}` : ''}
+          </div>
+        )
+      }
+      default: return <div className="bubble">{m.content}</div>
+    }
+  }
+
+  const rowClass = message.kind === 'approval_resolved' ? 'centered' : message.sender === 'user' ? 'from-user' : 'from-bot'
+  const at = showTime ? new Date(message.created_at) : null
+
+  return (
+    <Fragment>
+      {dayHeader ? <div className="day-divider" role="separator">{dayHeader}</div> : null}
+      <div className={`row ${rowClass}${sameSpeakerNext ? ' row-grouped' : ''}`}>
+        <div className="row-inner">
+          {speaker || showTime ? (
+            <div className="row-meta">
+              {speaker ? (
+                <span className="speaker">
+                  <BotAvatar seed={message.sender} emoji={speaker.emoji} size="xs" />
+                  <span className="speaker-name">{speaker.name}</span>
+                </span>
+              ) : null}
+              {showTime && at ? (
+                <time className="row-time" dateTime={at.toISOString()} title={at.toLocaleString(t.locale)}>
+                  {timeLabel(message.created_at, t.locale)}
+                </time>
+              ) : null}
+            </div>
+          ) : null}
+          {renderBody(message)}
+        </div>
+      </div>
+    </Fragment>
+  )
+})
 
 /** 光标前正在打的 `@查询`：行首、空白或左括号后面的 @，一直到光标，中间没有空白 */
 const MENTION_QUERY = /(?:^|[\s(（])@([^\s@]*)$/u
@@ -104,16 +210,7 @@ export function Thread({
   const [unpinned, setUnpinned] = useState(false)
   const [hasNewBelow, setHasNewBelow] = useState(false)
   const prevMsgCount = useRef(messages.length)
-
-  useEffect(() => {
-    setSendError(null)
-    setDropping(false)
-    setLightbox(null)
-    setConfirmFile(null)
-    setUnpinned(false)
-    setHasNewBelow(false)
-    prevMsgCount.current = 0
-  }, [conversation.id])
+  const scrollingToBottom = useRef(false)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const boxRef = useRef<HTMLTextAreaElement>(null)
@@ -123,7 +220,56 @@ export function Thread({
   const [active, setActive] = useState(0)
   const [dismissedAt, setDismissedAt] = useState<number | null>(null)
   const menuId = useId()
-  useEffect(() => { setPicked([]) }, [conversation.id])
+
+  // 每个对话记住自己打了一半的草稿和 @点名，切换对话不串台，回来还在
+  const draftsRef = useRef(new Map<string, { draft: string; picked: Mention[] }>())
+  const convIdRef = useRef(conversation.id)
+  convIdRef.current = conversation.id
+  const latestDraftRef = useRef({ draft, picked })
+  latestDraftRef.current = { draft, picked }
+  const prevConvIdRef = useRef(conversation.id)
+
+  useEffect(() => {
+    const prevId = prevConvIdRef.current
+    if (prevId !== conversation.id) {
+      const prevState = latestDraftRef.current
+      if (prevState.draft || prevState.picked.length) draftsRef.current.set(prevId, prevState)
+      else draftsRef.current.delete(prevId)
+      const saved = draftsRef.current.get(conversation.id)
+      setDraft(saved?.draft ?? '')
+      setPicked(saved?.picked ?? [])
+      setCaret((saved?.draft ?? '').length)
+      setActive(0)
+      setDismissedAt(null)
+      prevConvIdRef.current = conversation.id
+    }
+    setSendError(null)
+    setDropping(false)
+    setLightbox(null)
+    setConfirmFile(null)
+    setUnpinned(false)
+    setHasNewBelow(false)
+    scrollingToBottom.current = false
+    prevMsgCount.current = 0
+  }, [conversation.id])
+
+  // 拖文件按了 Esc 或移出窗口之外时不会冒 main 的 dragleave：全局兜底清掉遮罩
+  useEffect(() => {
+    if (!dropping) return
+    const clear = () => setDropping(false)
+    const onKey = (e: globalThis.KeyboardEvent) => { if (e.key === 'Escape') clear() }
+    window.addEventListener('dragend', clear)
+    window.addEventListener('drop', clear)
+    window.addEventListener('blur', clear)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('dragend', clear)
+      window.removeEventListener('drop', clear)
+      window.removeEventListener('blur', clear)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [dropping])
+
   // 选中一位后把光标放回名字后面：要在 React 换掉文本之后、下一次按键之前，所以用 layout effect 而不是下一帧
   const caretAfterPick = useRef<number | null>(null)
   useLayoutEffect(() => {
@@ -152,7 +298,7 @@ export function Thread({
   const pinned = useRef(true)
   useEffect(() => { pinned.current = true }, [conversation.id])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = scrollRef.current
     if (el && pinned.current) {
       el.scrollTop = el.scrollHeight
@@ -165,15 +311,19 @@ export function Thread({
   const jumpToBottom = () => {
     const el = scrollRef.current
     pinned.current = true
+    scrollingToBottom.current = true
     setUnpinned(false)
     setHasNewBelow(false)
     if (!el) return
     if (typeof el.scrollTo === 'function') el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-    else el.scrollTop = el.scrollHeight
+    else {
+      el.scrollTop = el.scrollHeight
+      scrollingToBottom.current = false
+    }
   }
 
-  // 输入框随内容长高，最多八行左右
-  useEffect(() => {
+  // 输入框随内容长高，最多八行左右（layout effect 免得先画出一帧未撑开的高度再跳）
+  useLayoutEffect(() => {
     const box = boxRef.current
     if (!box) return
     box.style.height = 'auto'
@@ -188,11 +338,13 @@ export function Thread({
 
   const submit = () => {
     if (!canSend) return
+    const sentConvId = conversation.id
     const text = draft.trim()
     const named = picked
     const mentions = named.filter((m) => stillMentioned(text, m.name)).map((m) => m.id)
     const taken = pending.take()
     const ids = taken.flatMap((f) => (f.upload ? [f.upload.id] : []))
+    draftsRef.current.delete(sentConvId)
     setDraft('')
     setPicked([])
     setDismissedAt(null)
@@ -202,8 +354,13 @@ export function Thread({
     setHasNewBelow(false)
     const result = ids.length ? onSend(text, mentions.length ? mentions : undefined, ids)
       : mentions.length ? onSend(text, mentions) : onSend(text)
-    // 没发出去：把字、点过的名和文件放回来，说清原因，别让人以为发了
+    // 没发出去：如果还在这个对话里就把字、点过的名和文件放回来；已经切走就存回原对话的草稿，绝不灌进当前新对话
     void Promise.resolve(result).catch((err: unknown) => {
+      if (convIdRef.current !== sentConvId) {
+        if (text || named.length) draftsRef.current.set(sentConvId, { draft: text, picked: named })
+        for (const item of taken) if (item.upload) files?.discard(item.upload.id)
+        return
+      }
       setDraft((now) => now || text)
       setPicked((now) => (now.length ? now : named))
       pending.restore(taken)
@@ -288,60 +445,16 @@ export function Thread({
     submit()
   }
 
-  const renderBody = (m: Message) => {
-    // 网关替同事说的固定话：按界面语言重说；收尾时同事自己交代的几行照原样（markdown）放在前面
-    if (m.kind === 'text' && isNotice(m.payload)) {
-      const n = m.payload
-      return (
-        <div className="bubble markdown">
-          {n.notice === 'paused' && n.lead ? <Markdown text={n.lead} /> : null}
-          <p>{noticeText(t, n)}</p>
-        </div>
-      )
-    }
-    // 同事的话按 markdown 显示（模型天然写 markdown）；你自己打的字照原样显示，星号就是星号
-    if (!m.payload) {
-      return m.sender === 'user'
-        ? <div className="bubble">{m.content}</div>
-        : <div className="bubble markdown"><Markdown text={m.content} /></div>
-    }
-    switch (m.kind) {
-      case 'report': return <ReportChip payload={m.payload as ReportPayload} />
-      case 'screenshot': return <ScreenshotChip payload={m.payload as ScreenshotPayload} onPreview={setLightbox} />
-      case 'approval_request': return <ApprovalChip payload={m.payload as ApprovalPayload} onDecide={onDecide} />
-      case 'memory_updated': return <MemoryChip payload={m.payload as MemoryPayload} />
-      case 'routine_created': return <RoutineChip payload={m.payload as RoutinePayload} />
-      case 'bot_ref': return <BotRefChip payload={m.payload as BotRefPayload} />
-      case 'login_request':
-        return <LoginChip payload={m.payload as LoginPayload} onOpenScreen={() => onOpenScreen?.()} />
-      case 'activity': return <ActivityChip payload={m.payload as ActivityPayload} />
-      case 'webhook': return <WebhookChip payload={m.payload as WebhookPayload} />
-      case 'attachment':
-        return (
-          <AttachmentChip
-            payload={m.payload as AttachmentPayload}
-            onPreview={setLightbox}
-            {...(files?.remove ? { onRemove: files.remove, onRequestRemove: setConfirmFile } : {})}
-          />
-        )
-      case 'question':
-        return <QuestionChip payload={m.payload as QuestionPayload} onAnswer={(choices) => onAnswer?.(m.id, choices)} />
-      case 'approval_resolved': {
-        const p = m.payload as ApprovalResolvedPayload
-        return (
-          <div className="decision">
-            {p.decision === 'approve' ? `✓ ${t('thread.approved')}` : `✕ ${t('thread.discarded')}`} · {p.action}
-            {p.count ? ` · ${t('thread.itemsOf', { approved: p.count.approved, of: p.count.of })}` : ''}
-            {p.remembered ? ` · ${t('thread.ruleSaved', { scope: `${p.remembered.kind} → ${p.remembered.target}` })}` : ''}
-          </div>
-        )
-      }
-      default: return <div className="bubble">{m.content}</div>
-    }
-  }
-
-  const rowClass = (m: Message) =>
-    m.kind === 'approval_resolved' ? 'centered' : m.sender === 'user' ? 'from-user' : 'from-bot'
+  const callbacksRef = useRef({ onDecide, onAnswer, onOpenScreen, removeFile: files?.remove })
+  callbacksRef.current = { onDecide, onAnswer, onOpenScreen, removeFile: files?.remove }
+  const stableDecide = useCallback(
+    (...args: Parameters<typeof onDecide>) => callbacksRef.current.onDecide(...args),
+    [],
+  )
+  const stableAnswer = useCallback((messageId: number, choices: string[]) => callbacksRef.current.onAnswer?.(messageId, choices), [])
+  const stableOpenScreen = useCallback(() => callbacksRef.current.onOpenScreen?.(), [])
+  const stableRemoveFile = useCallback((id: string) => callbacksRef.current.removeFile?.(id), [])
+  const hasRemoveFile = Boolean(files?.remove)
 
   // 群里必须看得出谁在说话；单聊只有一个对象，加名字反而是噪音
   const speakerOf = (m: Message) =>
@@ -353,6 +466,16 @@ export function Thread({
   const starters = conversation.kind === 'group'
     ? [t('thread.starter.group1'), t('thread.starter.group2')]
     : [t('thread.starter.dm1'), t('thread.starter.dm2')]
+
+  const sendStarter = (prompt: string) => {
+    const sentConvId = conversation.id
+    setSendError(null)
+    void Promise.resolve(onSend(prompt)).catch((err: unknown) => {
+      if (convIdRef.current !== sentConvId) return
+      const reason = err instanceof ApiError ? errorText(t, err) : err instanceof Error ? err.message : String(err)
+      setSendError(t('thread.notSent', { reason }))
+    })
+  }
 
   return (
     <main
@@ -399,9 +522,13 @@ export function Thread({
       <div
         className="thread-scroll"
         ref={scrollRef}
+        onWheel={() => { scrollingToBottom.current = false }}
+        onTouchMove={() => { scrollingToBottom.current = false }}
         onScroll={(e) => {
           const el = e.currentTarget
           const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+          if (nearBottom) scrollingToBottom.current = false
+          if (scrollingToBottom.current) return
           pinned.current = nearBottom
           setUnpinned(!nearBottom)
           if (nearBottom) setHasNewBelow(false)
@@ -421,7 +548,7 @@ export function Thread({
                   key={prompt}
                   type="button"
                   className="starter-chip"
-                  onClick={() => void onSend(prompt)}
+                  onClick={() => sendStarter(prompt)}
                 >
                   {prompt}
                 </button>
@@ -440,31 +567,22 @@ export function Thread({
             && next.kind !== 'approval_resolved' && dayKey(next.created_at) === dayKey(m.created_at)
             && next.created_at - m.created_at <= TIME_GAP_MS,
           )
-          const at = new Date(m.created_at)
           return (
-            <Fragment key={m.id}>
-              {newDay ? <div className="day-divider" role="separator">{dayLabel(m.created_at, now, t)}</div> : null}
-              <div className={`row ${rowClass(m)}${sameSpeakerNext ? ' row-grouped' : ''}`}>
-                <div className="row-inner">
-                  {speaker || showTime ? (
-                    <div className="row-meta">
-                      {speaker ? (
-                        <span className="speaker">
-                          <BotAvatar seed={m.sender} emoji={speaker.emoji} size="xs" />
-                          <span className="speaker-name">{speaker.name}</span>
-                        </span>
-                      ) : null}
-                      {showTime ? (
-                        <time className="row-time" dateTime={at.toISOString()} title={at.toLocaleString(t.locale)}>
-                          {timeLabel(m.created_at, t.locale)}
-                        </time>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {renderBody(m)}
-                </div>
-              </div>
-            </Fragment>
+            <ThreadMessageRow
+              key={m.id}
+              message={m}
+              dayHeader={newDay ? dayLabel(m.created_at, now, t) : null}
+              showTime={showTime}
+              sameSpeakerNext={sameSpeakerNext}
+              speaker={speaker}
+              t={t}
+              onDecide={stableDecide}
+              onAnswer={onAnswer ? stableAnswer : undefined}
+              onOpenScreen={onOpenScreen ? stableOpenScreen : undefined}
+              onPreview={setLightbox}
+              onRemoveFile={hasRemoveFile ? stableRemoveFile : undefined}
+              onRequestRemoveFile={setConfirmFile}
+            />
           )
         })}
         {thinking ? <div className="row from-bot"><div className="bubble typing">•••</div></div> : null}
@@ -510,13 +628,17 @@ export function Thread({
             onChange={(e) => {
               setDraft(e.target.value)
               setCaret(e.target.selectionStart ?? e.target.value.length)
+              setActive(0)
             }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
             onKeyDown={onKeyDown}
             onPaste={(e) => {
-              // 粘贴的是文件（截图、从访达复制的图）就当附件；粘贴文字照常
+              // 粘贴的是文件（截图、从访达复制的图）就当附件；从表格/文档复制富文本时剪贴板会附带预览图，有正文就按字贴
               const pasted = files ? Array.from(e.clipboardData?.files ?? []) : []
               if (!pasted.length) return
+              const types = Array.from(e.clipboardData?.types ?? [])
+              const plain = typeof e.clipboardData?.getData === 'function' ? e.clipboardData.getData('text/plain') : ''
+              if (types.includes('text/html') && plain.trim() !== '') return
               e.preventDefault()
               pending.add(pasted)
             }}

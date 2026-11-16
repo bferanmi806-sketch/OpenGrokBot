@@ -46,8 +46,10 @@ describe('the confinement rules', () => {
   it('Seatbelt: deny by default; read the system but not the home dir; see the way to the workspace; toolchains read-only; write only its own folders', () => {
     const profile = seatbeltProfile(cHome)
     expect(profile.startsWith('(version 1)\n(deny default)')).toBe(true)
+    expect(profile).toContain('(allow signal (target same-sandbox))')
+    expect(profile).toContain('(deny mach-lookup (global-name-prefix "com.apple.pasteboard")')
     expect(profile).toContain('(allow network*)')
-    expect(profile).toContain('(allow file-read*)\n(deny file-read* (subpath "/Users/op") (subpath "/data"))')
+    expect(profile).toContain('(allow file-read*)\n(deny file-read* (subpath "/Users/op") (subpath "/data") (subpath "/private/tmp") (subpath "/Volumes"))')
     expect(profile).toContain('(allow file-read-metadata (literal "/data") (literal "/data/workspaces") (literal "/data/bots") (literal "/data/bots/bob"))')
     expect(profile).toContain('(allow file-read* (subpath "/Users/op/.nvm") (subpath "/Users/op/.cargo/bin"))')
     expect(profile).not.toContain('"/Users/op/.cargo")') // 整个 .cargo 不给：credentials.toml 在里面
@@ -60,25 +62,28 @@ describe('the confinement rules', () => {
   it('Seatbelt: a data dir under the home dir is hidden by the home rule alone', () => {
     const under = { workspace: '/Users/op/osb/data/workspaces/bob', tmp: '/Users/op/osb/data/bots/bob/tmp', dataDir: '/Users/op/osb/data', home: '/Users/op', exists: () => false }
     const profile = seatbeltProfile(under)
-    expect(profile).toContain('(deny file-read* (subpath "/Users/op"))')
+    expect(profile).toContain('(deny file-read* (subpath "/Users/op") (subpath "/private/tmp") (subpath "/Volumes"))')
     expect(profile).toContain('(literal "/Users/op/osb/data/workspaces")')
     expect(profile).not.toContain('(allow file-read* (subpath')
   })
 
-  it('bubblewrap: read-only root, the home dir (and a data dir elsewhere) hidden under tmpfs, toolchains read-only, its own folders bound back in, network kept', () => {
+  it('bubblewrap: read-only root, /run and the home dir (and a data dir elsewhere) hidden under tmpfs, toolchains read-only, its own folders bound back in, network kept', () => {
     const args = bubblewrapArgs(cHome)
     expect(args.slice(0, 4)).toEqual(['--die-with-parent', '--new-session', '--unshare-all', '--share-net'])
     const joined = args.join(' ')
     expect(joined).toContain('--ro-bind / /')
+    expect(joined).toContain('--tmpfs /tmp --tmpfs /run')
     expect(joined).toContain('--tmpfs /Users/op --tmpfs /data')
     expect(joined).toContain('--ro-bind /Users/op/.nvm /Users/op/.nvm --ro-bind /Users/op/.cargo/bin /Users/op/.cargo/bin')
     expect(joined).toContain('--bind /data/workspaces/bob /data/workspaces/bob --bind /data/bots/bob/tmp /data/bots/bob/tmp')
     // 遮住在前、放回在后：挂载顺序就是优先级
-    expect(args.indexOf('--tmpfs')).toBeLessThan(args.indexOf('--ro-bind', 5))
+    expect(args.indexOf('--tmpfs')).toBeLessThan(args.lastIndexOf('--ro-bind'))
     expect(args.lastIndexOf('--tmpfs')).toBeLessThan(args.indexOf('--bind'))
     expect(args.slice(-2)).toEqual(['--chdir', '/data/workspaces/bob'])
     const under = bubblewrapArgs({ workspace: '/home/op/osb/data/workspaces/bob', tmp: '/home/op/osb/data/bots/bob/tmp', dataDir: '/home/op/osb/data', home: '/home/op', exists: () => false })
-    expect(under.filter((a) => a === '--tmpfs')).toHaveLength(2) // /tmp 和家目录；数据目录在家里，不用再遮
+    expect(under.filter((a) => a === '--tmpfs')).toHaveLength(3) // /tmp、/run 和家目录；数据目录在家里，不用再遮
+    const withResolve = bubblewrapArgs({ workspace: '/home/op/osb/data/workspaces/bob', tmp: '/home/op/osb/data/bots/bob/tmp', dataDir: '/home/op/osb/data', home: '/home/op', exists: (p) => p === '/run/systemd/resolve' })
+    expect(withResolve.join(' ')).toContain('--tmpfs /run --ro-bind /run/systemd/resolve /run/systemd/resolve')
   })
 
   it('hands the command to bash inside the sandbox, with a scrubbed environment that still finds this node', () => {

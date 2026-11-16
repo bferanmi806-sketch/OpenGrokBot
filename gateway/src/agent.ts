@@ -4,6 +4,7 @@ import {
   MAX_BATCH_ITEMS, RULEABLE_KINDS, blockText, canRemember, destinationReason, type BlockReason, normalizeItems, normalizeKind, normalizeTarget,
   type ApprovalKind,
 } from './approvals.js'
+import { checkBrowserUrl } from './browser-page.js'
 import type { BotComputer, Shot } from './computer.js'
 import { limitText, noticeText, type BudgetHit, type Notice } from './notices.js'
 import { insertMessage, listMessages, updateMessagePayload, type BotRow, type Db, type MessageRow } from './db.js'
@@ -557,7 +558,7 @@ async function execWorkflowTool(
       }
       events.onMessage(insertMessage(deps.db, {
         threadId: deps.threadId, sender: deps.bot.id, kind: 'question',
-        payload: { question, options, multi: args.multi === true, status: 'open' },
+        payload: { question, options, multi: args.multi === true, status: 'open', ...(deps.watch ? { watch: true } : {}) },
       }))
       return 'Question posted as a card. Stop here and wait for the answer — do not guess it.'
     }
@@ -704,7 +705,8 @@ async function execComputerTool(
       await computer.writeFile(String(args.path ?? ''), String(args.content ?? ''))
       return { text: `Wrote ${String(args.path ?? '')}.` }
     case 'browser_goto': {
-      const r = await computer.goto(String(args.url ?? ''))
+      const url = checkBrowserUrl(String(args.url ?? ''))
+      const r = await computer.goto(url)
       return { text: `Now on "${r.title}" (${r.url})` }
     }
     case 'browser_extract': {

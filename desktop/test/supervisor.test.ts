@@ -175,4 +175,15 @@ describe('the gateway supervisor', () => {
     slow.ready()
     expect(s.events.ready).not.toHaveBeenCalled()
   })
+
+  it('decodes multi-byte UTF-8 characters split across pipe chunks without corruption', () => {
+    const s = setup()
+    s.sup.start()
+    const full = Buffer.from('[gateway] 你好世界\n', 'utf8')
+    // 把「你」(3 字节 UTF-8) 从中间劈成两半发过来
+    const splitAt = full.indexOf(Buffer.from('你')) + 1
+    s.last().stdout.emit('data', full.subarray(0, splitAt))
+    s.last().stdout.emit('data', full.subarray(splitAt))
+    expect(s.sup.tail()).toEqual(['[gateway] 你好世界'])
+  })
 })

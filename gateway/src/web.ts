@@ -23,7 +23,7 @@ const TYPES: Record<string, string> = {
 }
 
 /** 这些前缀归网关自己：没匹配上就该是 404，而不是回落成前端页面 */
-const RESERVED = ['/api/', '/ws', '/auth', '/vnc/']
+const RESERVED = ['/api/', '/ws', '/auth', '/vnc/', '/screen/', '/hooks/']
 
 /**
  * 构建好的前端由网关直接托管：一个端口、一个进程，适合常驻（launchd/systemd）和隧道访问。
@@ -52,6 +52,10 @@ export function serveWeb(app: Hono, distDir: string): boolean {
     return c.body(body, 200, {
       'Content-Type': TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream',
       'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'SAMEORIGIN',
+      'Content-Security-Policy': "frame-ancestors 'self'",
+      'Referrer-Policy': 'no-referrer',
     })
   })
   return true

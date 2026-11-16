@@ -1,3 +1,5 @@
+import { StringDecoder } from 'node:string_decoder'
+
 /**
  * 看着网关这个子进程：拉起来、等它说 ready、崩了按退避重启、实在不行就停下等人看错误页、退出时让它按顺序收摊。
  * 不碰 Electron：子进程怎么起（utilityProcess.fork）、计时器、时钟都从外面传进来，测试里换成假的。
@@ -101,18 +103,23 @@ export function createSupervisor(opts: SupervisorOptions, events: SupervisorEven
     thisRun = []
     const c = opts.fork()
     child = c
-    // stdout 和 stderr 各自攒半行：两路交错着来，也不会拼成一行
+    // stdout 和 stderr 各自攒半行：两路交错着来，也不会拼成一行；用 StringDecoder 保证跨块的中文 UTF-8 不乱码
     const partial = { out: '', err: '' }
+    const decoders = { out: new StringDecoder('utf8'), err: new StringDecoder('utf8') }
+    const MAX_PARTIAL = 64 * 1024
     const split = (from: 'out' | 'err') => (chunk: unknown) => {
-      const lines = (partial[from] + String(chunk)).split(/\r?\n/)
-      partial[from] = lines.pop() ?? ''
+      const decoded = Buffer.isBuffer(chunk) ? decoders[from].write(chunk) : String(chunk)
+      const lines = (partial[from] + decoded).split(/\r?\n/)
+      const rest = lines.pop() ?? ''
+      partial[from] = rest.length > MAX_PARTIAL ? rest.slice(-MAX_PARTIAL) : rest
       for (const l of lines) if (l.trim()) record(l)
     }
     c.stdout?.on('data', split('out'))
     c.stderr?.on('data', split('err'))
     exited = new Promise((resolve) => c.on('exit', (code) => {
       for (const from of ['out', 'err'] as const) {
-        if (partial[from].trim()) record(partial[from])
+        const tailText = partial[from] + decoders[from].end()
+        if (tailText.trim()) record(tailText)
         partial[from] = ''
       }
       resolve(code)

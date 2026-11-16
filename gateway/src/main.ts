@@ -17,7 +17,8 @@ import { botImageReady } from './containers.js'
 import { createPool, reapIdleComputers } from './pool.js'
 import { listRoutines } from './routines.js'
 import { createScreenViewers, mountScreenProxy, screenRelay, screencastRelay } from './screen.js'
-import { probeSandbox, sandboxSelfCheck } from './sandbox.js'
+import { pruneScreenshots } from './screenshots.js'
+import { killActiveSandboxes, probeSandbox, sandboxSelfCheck } from './sandbox.js'
 import { createScheduler, type Scheduler } from './scheduler.js'
 import { seedGroup, seedTeammates } from './seed.js'
 import { createApp } from './server.js'
@@ -135,6 +136,7 @@ const gateway = createApp({
 const { app, hub } = gateway
 
 schedulerBox.current = createScheduler({
+  timeZone: config.timeZone,
   run: async (routine) => {
     const outcome = await gateway.runRoutine(routine)
     if (outcome === 'skipped') {
@@ -144,11 +146,15 @@ schedulerBox.current = createScheduler({
 })
 schedulerBox.current.load(listRoutines(db))
 
-// 动作日志留 90 天：启动时清一次，之后每天清一次
+// 动作日志和截图证据留 90 天：启动时清一次，之后每天清一次
 const ACTION_LOG_DAYS = 90
 const pruneOldActions = () => {
-  const removed = pruneActions(db, Date.now() - ACTION_LOG_DAYS * 24 * 60 * 60_000)
+  const cutoff = Date.now() - ACTION_LOG_DAYS * 24 * 60 * 60_000
+  const removed = pruneActions(db, cutoff)
   if (removed) console.log(`[gateway] dropped ${removed} action-log entries older than ${ACTION_LOG_DAYS} days`)
+  void pruneScreenshots(config.dataDir, cutoff).then((shots) => {
+    if (shots) console.log(`[gateway] dropped ${shots} screenshots older than ${ACTION_LOG_DAYS} days`)
+  }).catch(() => {})
 }
 pruneOldActions()
 setInterval(pruneOldActions, 24 * 60 * 60_000).unref()
@@ -239,10 +245,13 @@ if (config.idleStopMinutes > 0) {
   timer.unref()
 }
 
-// 收摊：Ctrl-C、SIGTERM、桌面壳的 stop 都走这里。先停调度和接新连接，再收电脑（本机 Chrome 跟着关）；
+// 收摊：Ctrl-C、SIGTERM、桌面壳的 stop 都走这里。先停调度、活跃回合和接新连接，再收电脑（本机 Chrome 跟着关）并关库；
 // bot 的 Docker 电脑该长期在线：只断 CDP 连接，容器留着（也保住浏览器登录态）
 onShutdown(runtime, async () => {
   schedulerProxy.stopAll()
+  gateway.stopAll()
+  killActiveSandboxes()
   server.close()
   await pool.disposeAll()
+  try { db.close() } catch { /* 已经关了 */ }
 }, { log: (line) => console.log(`[gateway] ${line}`) })

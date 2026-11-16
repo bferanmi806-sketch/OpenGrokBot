@@ -46,8 +46,10 @@ export function createDockerBackend(
     async make(botId) {
       await retireLegacy()
       const dir = workspaceDir(opts.dataDir, botId)
+      const browserDir = join(botDataDir(opts.dataDir, botId), 'docker-browser')
       await mkdir(dir, { recursive: true })
-      return createDockerComputer(await ensureContainer(docker, botId, dir, opts.containerOptions), {
+      await mkdir(browserDir, { recursive: true })
+      return createDockerComputer(await ensureContainer(docker, botId, dir, { ...opts.containerOptions, browserDir }), {
         putArchive: (tar, path) => docker.getContainer(containerName(botId)).putArchive(tar, { path }),
       })
     },

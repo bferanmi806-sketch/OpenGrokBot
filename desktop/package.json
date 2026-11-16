@@ -12,6 +12,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prestart": "node -e \"const fs=require('node:fs');if(!fs.existsSync('node_modules/electron/path.txt'))require('./node_modules/electron/install.js')\"",
     "start": "electron .",
     "install-electron": "node node_modules/electron/install.js",
     "typecheck": "tsc --noEmit -p .",

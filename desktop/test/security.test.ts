@@ -76,7 +76,17 @@ describe('wiring the rules onto a page', () => {
       setWindowOpenHandler: (h) => { handler = h },
     }
     const navigate = (url: string) => { const e = { preventDefault: vi.fn() }; bus.emit('will-navigate', e, url); return e.preventDefault }
-    return { contents, navigate, open: (url: string) => handler!({ url }), webview: () => { const e = { preventDefault: vi.fn() }; bus.emit('will-attach-webview', e); return e.preventDefault } }
+    const redirect = (url: string) => { const e = { preventDefault: vi.fn() }; bus.emit('will-redirect', e, url); return e.preventDefault }
+    const frameNavigate = (url: string, isMainFrame = false) => {
+      const e = { preventDefault: vi.fn(), url, isMainFrame }
+      bus.emit('will-frame-navigate', e)
+      return e.preventDefault
+    }
+    return {
+      contents, navigate, redirect, frameNavigate,
+      open: (url: string) => handler!({ url }),
+      webview: () => { const e = { preventDefault: vi.fn() }; bus.emit('will-attach-webview', e); return e.preventDefault },
+    }
   }
 
   it('lets the gateway through, hands sites to the browser, runs actions, and refuses webviews', () => {
@@ -112,5 +122,22 @@ describe('wiring the rules onto a page', () => {
 
   it('the safe settings keep pages away from Node', () => {
     expect(SAFE_WEB_PREFERENCES).toMatchObject({ contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false })
+  })
+
+  it('guards redirects, subframes, and rewrites localhost navigations to the signed-in origin', () => {
+    const f = fakeContents()
+    const navigateInApp = vi.fn()
+    const opts = { gatewayOrigin: () => GW, openExternal: vi.fn(), openInApp: vi.fn(), navigateInApp, onAction: vi.fn(), log: vi.fn() }
+    secureContents(f.contents, opts)
+
+    expect(f.navigate('http://localhost:4747/vnc/chief')).toHaveBeenCalled()
+    expect(navigateInApp).toHaveBeenCalledWith('http://127.0.0.1:4747/vnc/chief')
+
+    expect(f.redirect('https://evil.example/phish')).toHaveBeenCalled()
+    expect(opts.openExternal).toHaveBeenCalledWith('https://evil.example/phish')
+    expect(f.redirect('file:///etc/passwd')).toHaveBeenCalled()
+
+    expect(f.frameNavigate('http://127.0.0.1:4747/vnc/chief/view.html', false)).not.toHaveBeenCalled()
+    expect(f.frameNavigate('https://evil.example/embed', false)).toHaveBeenCalled()
   })
 })

@@ -234,16 +234,43 @@ export async function updateRoutine(id: number, action: RoutineAction): Promise<
 }
 
 /** 断线自动重连；网关每次连上都会先发一份 hello 快照，调用方据此补拉错过的消息。 */
-export function connectEvents(onEvent: (e: GatewayEvent) => void): () => void {
+export function connectEvents(onEvent: (e: GatewayEvent) => void, opts?: { onSignedOut?: () => void }): () => void {
   let ws: WebSocket | null = null
   let closed = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let retry = 0
   const open = () => {
-    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
-    ws.onmessage = (ev) => {
+    if (closed) return
+    let opened = false
+    const sock = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
+    ws = sock
+    sock.onopen = () => {
+      opened = true
+      retry = 0
+    }
+    sock.onmessage = (ev) => {
+      opened = true
+      retry = 0
       try { onEvent(JSON.parse(ev.data)) } catch { /* 忽略脏帧 */ }
     }
-    ws.onclose = () => { if (!closed) setTimeout(open, 1500) }
+    sock.onclose = () => {
+      if (ws === sock) ws = null
+      if (closed) return
+      if (!opened && opts?.onSignedOut) {
+        void checkSession().then((ok) => { if (!ok && !closed) opts.onSignedOut?.() }).catch(() => {})
+      }
+      const delay = Math.min(1500 * 2 ** Math.min(retry++, 3), 12_000)
+      timer = setTimeout(open, delay)
+    }
   }
   open()
-  return () => { closed = true; ws?.close() }
+  return () => {
+    closed = true
+    clearTimeout(timer)
+    if (ws) {
+      ws.onclose = null
+      ws.close()
+      ws = null
+    }
+  }
 }
