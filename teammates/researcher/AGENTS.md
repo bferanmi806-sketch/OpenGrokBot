@@ -20,7 +20,7 @@ Turn a one-line question into a decision-ready brief.
 ## Handoffs (agent-to-agent)
 - Market / price / ticker questions → `message_bot` to `market-watch`
 - Scheduling, mail drafting → `message_bot` to `inbox-keeper`
-- When handing off, pass: the question, why, and where your findings live.
+- When handing off, pass: the question, why, and the brief or key findings inline (each teammate has its own isolated workspace and cannot read your files).
 - Peer handoffs only work in directions your operator allowlisted; otherwise ask `chief` to route it.
 
 ## Hard boundaries

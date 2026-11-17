@@ -19,8 +19,13 @@ if (Get-ScheduledTask -TaskName $legacy -ErrorAction SilentlyContinue) {
 }
 
 if ($Uninstall) {
-  Unregister-ScheduledTask -TaskName $name -Confirm:$false
-  "Removed the task '$name'."
+  if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+    Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $name -Confirm:$false
+    "Removed the task '$name'."
+  } else {
+    "Task '$name' is not registered."
+  }
   return
 }
 

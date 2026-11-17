@@ -8,7 +8,7 @@ import { BotModelChip, BotModelPicker, botModel, botSeesImages } from './compone
 import { ConfirmDialog, useEscape } from './components/ConfirmDialog'
 import { DemoBanner } from './components/DemoBanner'
 import { ComputerPanel } from './components/ComputerPanel'
-import { XIcon } from './components/Icons'
+import { SidebarIcon, XIcon } from './components/Icons'
 import { ModelsDialog } from './components/ModelsDialog'
 import { NewBotForm } from './components/NewBotForm'
 import { SettingsDialog } from './components/SettingsDialog'
@@ -230,12 +230,24 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
 
   const signOut = useCallback(() => setSignedOut(true), [])
 
+  /** 拉一次面板数据；只在面板还开给同一位同事时才放进去 */
+  const loadPanel = useCallback(async (botId: string) => {
+    try {
+      const info = await fetchComputer(botId)
+      if (panelFor.current === botId) showPanel({ botId, info })
+    } catch (err) {
+      if (panelFor.current === botId) showPanel(null)
+      guard(err)
+    }
+  }, [guard, showPanel])
+
   useEffect(() => {
     if (signedOut !== false) return
     return connectEvents((e) => {
       if (e.type === 'hello') {
         setStatuses((s) => applyHello(s, e.statuses))
         void resync()
+        if (panelFor.current) void loadPanel(panelFor.current)
         return
       }
       if (e.type === 'status') {
@@ -243,6 +255,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
         const posted = postedRef.current.has(e.botId)
         if (e.state !== 'thinking') postedRef.current.delete(e.botId)
         setStatuses((s) => applyStatus(s, e.botId, e.state, watchingRef.current.includes(e.botId), posted))
+        if (e.state !== 'thinking' && panelFor.current === e.botId) void loadPanel(e.botId)
         return
       }
       if (e.type === 'setup.browser') {
@@ -263,6 +276,10 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
       if (['approval_request', 'approval_resolved', 'question'].includes(e.message.kind)) {
         void refreshConversations().catch(guard)
       }
+      // 面板开着时，记忆规则变动、放行规则落地或例行任务改动都实时刷新
+      if (panelFor.current && ['memory_updated', 'approval_resolved', 'activity'].includes(e.message.kind)) {
+        void loadPanel(panelFor.current)
+      }
       if (e.threadId === threadIdRef.current) {
         if (inFlightFetches.current > 0) liveDuringFetch.current.set(e.message.id, e.message)
         // 同 id 就替换：审批 chip 被放行、activity 卡片多了一步，都是就地更新
@@ -275,23 +292,12 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
         })
       }
     }, { onSignedOut: signOut })
-  }, [signedOut, resync, refreshConversations, guard, signOut])
+  }, [signedOut, resync, refreshConversations, loadPanel, guard, signOut])
 
   const waiting = conversations.reduce((sum, c) => sum + (c.pending ?? 0), 0)
   useEffect(() => {
     document.title = waiting ? `(${waiting}) OpenSuperBot` : 'OpenSuperBot'
   }, [waiting])
-
-  /** 拉一次面板数据；只在面板还开给同一位同事时才放进去 */
-  const loadPanel = async (botId: string) => {
-    try {
-      const info = await fetchComputer(botId)
-      if (panelFor.current === botId) showPanel({ botId, info })
-    } catch (err) {
-      if (panelFor.current === botId) showPanel(null)
-      guard(err)
-    }
-  }
 
   const openScreen = () => {
     if (!selected || selected.kind !== 'dm') return
@@ -494,7 +500,19 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
           ) : null}
         />
       ) : (
-        <main className="thread thread-empty">{t('app.noTeammates')}</main>
+        <main className="thread thread-empty">
+          <button
+            type="button"
+            className="mobile-menu-btn"
+            onClick={() => setSidebarOpen((o) => !o)}
+            aria-label={t('sidebar.toggle')}
+            title={t('sidebar.toggle')}
+            style={{ position: 'absolute', top: 14, left: 14 }}
+          >
+            <SidebarIcon size={15} />
+          </button>
+          {t('app.noTeammates')}
+        </main>
       )}
       {panel && selected?.kind === 'dm' && selected.members[0] === panel.botId ? (
         <ComputerPanel

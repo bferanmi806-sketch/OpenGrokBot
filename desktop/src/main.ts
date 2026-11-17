@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { homedir, release } from 'node:os'
 import { join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { BrowserWindow, Menu, Notification, Tray, app, dialog, ipcMain, nativeImage, session, shell, utilityProcess, type MenuItemConstructorOptions } from 'electron'
+import { BrowserWindow, Menu, Notification, Tray, app, dialog, ipcMain, nativeImage, net, session, shell, utilityProcess, type MenuItemConstructorOptions } from 'electron'
 import { fetchNames, fetchSummary, notificationFor, quitQuestion, texts, trayStatus, watchGateway, type GatewayMessageEvent, type Summary } from './activity.js'
 import { diagnosticsText } from './diagnostics.js'
 import { registerDesktopApi } from './ipc.js'
@@ -203,6 +203,7 @@ function run() {
       gatewayBase: base(port),
       token: token(),
       releasesUrl: testUrl,
+      externalFetchImpl: net.fetch.bind(net) as typeof fetch,
       log: (line) => say(line),
     })
     if (found) {

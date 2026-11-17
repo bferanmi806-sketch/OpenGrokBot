@@ -53,9 +53,11 @@ export async function checkForUpdate(opts: {
   token: string
   releasesUrl?: string
   fetchImpl?: typeof fetch
+  externalFetchImpl?: typeof fetch
   log?: (line: string) => void
 }): Promise<AvailableUpdate | null> {
   const fetchFn = opts.fetchImpl ?? fetch
+  const externalFetch = opts.externalFetchImpl ?? fetchFn
   try {
     const settingsRes = await fetchFn(`${opts.gatewayBase}/api/settings`, {
       headers: { authorization: `Bearer ${opts.token}` },
@@ -73,7 +75,7 @@ export async function checkForUpdate(opts: {
   }
 
   try {
-    const res = await fetchFn(opts.releasesUrl ?? RELEASES_API_URL, {
+    const res = await externalFetch(opts.releasesUrl ?? RELEASES_API_URL, {
       headers: {
         accept: 'application/vnd.github+json',
         'user-agent': `OpenSuperBot/${opts.currentVersion}`,

@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { FieldErrors, downloadBrowser, saveSettings, testConnection, updateConnection, type ConnectionFields } from '../api'
+import { ApiError, FieldErrors, downloadBrowser, saveSettings, testConnection, updateConnection, type ConnectionFields } from '../api'
 import { useT, type MessageKey, type T } from '../i18n'
-import { sandboxMissingText } from '../i18n/describe'
+import { errorText, sandboxMissingText } from '../i18n/describe'
 import type { BrowserStatus, CheckResult, ConnectionsState, FieldError, ModelConnection, ProviderPreset, SetupInfo } from '../types'
 import { CheckLine, NOTES, checkText, fieldText } from './ModelsDialog'
 import { StartAtLogin } from './StartAtLogin'
@@ -369,7 +369,7 @@ function ComputerStep({ setup, browser, onBrowser, onNext }: {
       if (suggested && useMirror && c.browserMirror.current !== suggested.url) await saveSettings({ browserMirror: suggested.url })
       onBrowser(await downloadBrowser())
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(err instanceof ApiError ? errorText(t, err) : err instanceof Error ? err.message : String(err))
     } finally {
       setAsked(false)
     }

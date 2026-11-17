@@ -46,7 +46,7 @@ import {
   type ImageNote, type UploadRow,
 } from './uploads.js'
 import type { WorkflowRecording } from './workflow-recorder.js'
-import { listWorkflowTraces, parseWorkflowTrace, readWorkflowTrace, saveWorkflowTrace, type WorkflowTrace } from './workflows.js'
+import { deleteWorkflowTrace, listWorkflowTraces, parseWorkflowTrace, readWorkflowTrace, saveWorkflowTrace, type WorkflowTrace } from './workflows.js'
 
 /** 这个网关的电脑是什么做的，以及本机模式有没有能用的沙箱（命令行开关要看它） */
 export type ComputersInfo = {
@@ -171,16 +171,20 @@ type TurnOpts = {
   watch?: boolean
 }
 
-function startOfLocalDay(now: Date, timeZone?: string): number {
+export function startOfLocalDay(now: Date, timeZone?: string): number {
   if (timeZone) {
     try {
-      const parts = new Intl.DateTimeFormat('en-US', {
+      const fmt = new Intl.DateTimeFormat('en-CA', {
         timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
         hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
-      }).formatToParts(now)
-      const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0)
-      const elapsedMs = ((get('hour') * 60 + get('minute')) * 60 + get('second')) * 1000 + now.getMilliseconds()
-      return now.getTime() - elapsedMs
+      })
+      const read = (d: Date) => Object.fromEntries(fmt.formatToParts(d).map((p) => [p.type, Number(p.value)]))
+      const p = read(now)
+      const nowUtc = Date.UTC(p.year!, p.month! - 1, p.day!, p.hour!, p.minute!, p.second!, now.getUTCMilliseconds())
+      const approx = Date.UTC(p.year!, p.month! - 1, p.day!, 0, 0, 0, 0) - (nowUtc - now.getTime())
+      const mp = read(new Date(approx))
+      const mUtc = Date.UTC(mp.year!, mp.month! - 1, mp.day!, mp.hour!, mp.minute!, mp.second!, 0)
+      return Date.UTC(p.year!, p.month! - 1, p.day!, 0, 0, 0, 0) - (mUtc - approx)
     } catch {
       // 不认识的时区名退回本机时区
     }
@@ -373,7 +377,7 @@ export function createApp(deps: AppDeps): GatewayApp {
   }
 
   function presenceOf(botId: string): Presence {
-    if (turns.isBusy(botId)) return 'thinking'
+    if (turns.isWorking(botId)) return 'thinking'
     if (waitsOnOperator(db, botId)) return 'waiting'
     const outcome = lastOutcome.get(botId)
     return outcome && BLOCKING.has(outcome) ? 'blocked' : 'idle'
@@ -860,8 +864,10 @@ export function createApp(deps: AppDeps): GatewayApp {
       }
       active.recorder = recorder
       active.timeout = setTimeout(() => {
+        if (active.cancelled) return
         const stopping = stopWorkflowRecording(active, recorder)
         void stopping.then((trace) => {
+          if (active.cancelled) return
           const draftTrace = parseWorkflowTrace({ ...trace, truncated: true })
           active.draft = { id: active.draft?.id ?? randomUUID(), trace: draftTrace }
           workflowDrafts.set(botId, active.draft)
@@ -905,6 +911,10 @@ export function createApp(deps: AppDeps): GatewayApp {
     const active = workflowRecordings.get(botId)
     if (!active) return c.json({ error: 'no workflow is being recorded' }, 409)
     active.cancelled = true
+    if (active.timeout) {
+      clearTimeout(active.timeout)
+      active.timeout = null
+    }
     if (active.recorder) {
       const stopping = stopWorkflowRecording(active, active.recorder)
       await stopping.catch(() => {})
@@ -964,6 +974,18 @@ export function createApp(deps: AppDeps): GatewayApp {
       return trace ? c.json(trace) : c.json({ error: 'unknown workflow' }, 404)
     } catch {
       return c.json({ error: 'could not read workflow trace' }, 400)
+    }
+  })
+
+  app.delete('/api/bots/:botId/workflows/:workflowId', (c) => {
+    const botId = c.req.param('botId')
+    if (!botById(botId)) return c.json({ error: 'unknown bot' }, 404)
+    try {
+      return deleteWorkflowTrace(db, botId, c.req.param('workflowId'))
+        ? c.body(null, 204)
+        : c.json({ error: 'unknown workflow' }, 404)
+    } catch {
+      return c.json({ error: 'invalid workflow id' }, 400)
     }
   })
 
@@ -1094,7 +1116,12 @@ export function createApp(deps: AppDeps): GatewayApp {
     const key = c.req.header('x-opensuperbot-key') ?? c.req.header('x-opengrokbot-key') ?? c.req.query('key') ?? ''
     // 签名要对着原始字节算，所以先读请求体；带密钥的老路子不需要它也能先挡掉生人。
     // 边读边数：分块传输没有 content-length，不能等读完一整个请求再说它太大
-    const bytes = signature || key ? await readBodyUpTo(c.req.raw.body, MAX_HOOK_BYTES) : Buffer.alloc(0)
+    let bytes: Buffer | null
+    try {
+      bytes = signature || key ? await readBodyUpTo(c.req.raw.body, MAX_HOOK_BYTES) : Buffer.alloc(0)
+    } catch {
+      return c.json({ error: 'incomplete request body' }, 400)
+    }
     if (bytes === null) return c.json({ error: 'payload too large' }, 413)
     const routine = signature ? routineForSignature(db, id, bytes, signature) : routineForWebhook(db, id, key)
     if (!routine) return c.json({ error: 'unknown webhook' }, 404)
@@ -1155,6 +1182,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     const id = Number(c.req.param('id'))
     if (!deleteRoutine(db, id)) return c.json({ error: 'unknown routine' }, 404)
     scheduler?.remove(id)
+    deliveries.delete(id)
     return c.json({ ok: true })
   })
 
@@ -1243,7 +1271,8 @@ export function createApp(deps: AppDeps): GatewayApp {
     const dmMentions = resolveMentions(body?.mentions, text, [])
     if (!dmMentions.ok) return c.json({ error: dmMentions.error, code: dmMentions.code }, 400)
 
-    const bot = botById(threadId.replace(/^dm:/, ''))
+    if (!threadId.startsWith('dm:')) return c.json({ error: 'unknown thread' }, 404)
+    const bot = botById(threadId.slice(3))
     if (!bot) return c.json({ error: 'unknown thread' }, 404)
 
     // 一个光秃秃的 👍 就是放行，不该变成一条闲聊；带着文件的 👍 是在说那个文件

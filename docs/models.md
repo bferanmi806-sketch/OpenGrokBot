@@ -1,6 +1,6 @@
 # AI models
 
-Every teammate can run on its own model. Open **AI** in the sidebar to manage *connections* — a service, its key
+Every teammate can run on its own model. Open **AI models** in the sidebar to manage *connections* — a service, its key
 and a default model — then click the model label at the top of a teammate's thread to pick one for it. A change
 takes effect from that teammate's next turn.
 

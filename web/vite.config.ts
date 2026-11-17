@@ -16,9 +16,22 @@ export default defineConfig({
       '/hooks': 'http://127.0.0.1:4747',
     },
   },
+  build: {
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            { name: 'vendor-react', test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/ },
+            { name: 'vendor-markdown', test: /node_modules[\\/](react-markdown|remark-|micromark|mdast-|unist-|hast-|vfile|unified|bail|trough|devlop|property-information|space-separated-tokens|comma-separated-tokens|estree-util|html-url-attributes|is-plain-obj|ccount|escape-string-regexp|markdown-table|zwitch|longest-streak|decode-named-character-reference|character-entities)/ },
+          ],
+        },
+      },
+    },
+  },
   test: {
     environment: 'jsdom',
     globals: true,
+    isolate: false,
     setupFiles: './src/test-setup.ts',
     // jsdom 渲染吃 CPU：机器被别的进程占满时，一个本该几毫秒的渲染测试也跑过 5 秒。
     // 放宽的只是时间上限，断言错了照样立刻失败

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
@@ -85,7 +85,7 @@ beforeEach(() => {
   vi.stubGlobal('WebSocket', FakeSocket)
   document.title = 'OpenSuperBot'
 })
-afterEach(() => { vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe('App language', () => {
   it('speaks the language saved in settings', async () => {

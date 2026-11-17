@@ -64,6 +64,9 @@ describe('turn queue', () => {
     const release = q.hold('scout')
     expect(release).toBeTypeOf('function')
     expect(q.isBusy('scout')).toBe(true)
+    expect(q.isWorking('scout')).toBe(false)
+    expect(q.statuses()).toEqual({})
+    expect(statuses).toEqual([])
 
     const turn = q.run('scout', 'dm:scout', async () => { ran.push('turn') })
     await tick()
@@ -73,7 +76,17 @@ describe('turn queue', () => {
     await turn
     expect(ran).toEqual(['turn'])
     expect(q.isBusy('scout')).toBe(false)
+    expect(q.isWorking('scout')).toBe(false)
     expect(statuses).toEqual(['scout:thinking', 'scout:idle'])
+  })
+
+  it('keeps statuses quiet when a held lane is released with no queued work', () => {
+    const statuses: string[] = []
+    const q = createTurnQueue((bot, state) => statuses.push(`${bot}:${state}`))
+    const release = q.hold('scout')!
+    release()
+    expect(statuses).toEqual([])
+    expect(q.isBusy('scout')).toBe(false)
   })
 
   it('cannot reserve a bot lane while a turn is running', async () => {

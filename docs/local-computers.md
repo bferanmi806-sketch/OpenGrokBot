@@ -45,8 +45,8 @@ says so in its log, with the reason (for a missing image, the command that build
 - **No Linux userland.** A local teammate cannot `apt install` tools. Teammates that need that get a sealed
   computer (Apple container or Docker) instead.
 
-Each teammate will show which kind of computer it has — **sealed** (container or VM) or **local sandbox** — and you
-can move a teammate between them.
+Each teammate's computer panel shows which kind of computer is running — **sealed** (Docker container) or **local** — and you
+can switch the gateway between automatic, local and Docker in **Settings** (a change takes effect when the gateway restarts).
 
 ## No terminal either
 

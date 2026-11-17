@@ -65,6 +65,7 @@ xdpyinfo -display :99 >/dev/null 2>&1 || { echo "[entrypoint] Xvfb failed to sta
 VNC_AUTH=(-nopw)
 if [ -n "${VNC_PASSWORD:-}" ]; then
   x11vnc -storepasswd "$VNC_PASSWORD" /tmp/.vncpass >/dev/null 2>&1
+  chmod 600 /tmp/.vncpass
   VNC_AUTH=(-rfbauth /tmp/.vncpass)
 fi
 unset VNC_PASSWORD

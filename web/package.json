@@ -1,6 +1,15 @@
 {
   "name": "@opensuperbot/web",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wolfqing/OpenSuperBot.git",
+    "directory": "web"
+  },
+  "bugs": {
+    "url": "https://github.com/wolfqing/OpenSuperBot/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

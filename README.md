@@ -15,8 +15,8 @@ persistent memory, bot-to-bot handoffs, and an iMessage-shaped app to manage the
 Cursor plans and **meters its own usage on top**, and every bot runs on xAI's cloud **with your logins inside it**.
 
 This is the same shape, self-hosted. One gateway process on your machine, a computer of its own for every bot (a
-Docker container, or without Docker a browser and a folder on your Mac or Linux box), a dense web client that reads
-like a workbench, and a model of your choice behind each teammate — Claude, OpenAI, Gemini, Grok, DeepSeek, Kimi,
+Docker container, or without Docker a browser and a folder on your Mac, Linux or Windows machine), a desktop app or
+dense web client that reads like a workbench, and a model of your choice behind each teammate — Claude, OpenAI, Gemini, Grok, DeepSeek, Kimi,
 Qwen, GLM, MiniMax, a local Ollama, or anything OpenAI-compatible.
 
 ![A teammate's thread: it reports what it did, holds what would go out, and shows you what it saw](assets/screenshot-thread.png)
@@ -176,7 +176,7 @@ OPENSUPERBOT_API_KEY=sk-… OPENSUPERBOT_MODEL=grok-4.7 pnpm dev
 
 (PowerShell: `$env:OPENSUPERBOT_API_KEY = 'sk-…'; $env:OPENSUPERBOT_MODEL = 'grok-4.7'; pnpm dev`.)
 
-To put teammates on different models, open **AI** in the sidebar, add a connection per service you have a key for,
+To put teammates on different models, open **AI models** in the sidebar, add a connection per service you have a key for,
 and pick one from the top of a teammate's thread. See [AI models](docs/models.md) for the services, which keys
 work, and which subscriptions other apps may and may not use.
 
@@ -254,8 +254,8 @@ official xAI product. [Download the latest release](https://github.com/wolfqing/
 ## Roadmap
 
 - [ ] **teach-mode** — record a browser demonstration once and keep it as a workflow the teammate can run again,
-      by hand or from a routine. The one Grok Bot feature with no open equivalent; a contributor has taken the
-      first slice (the recorder and its trace format) in [#1](../../issues/1)
+      by hand or from a routine. The first slice (typed browser workflow recorder and trace format, [docs/workflows.md](docs/workflows.md))
+      is in; deterministic replay and routine integration are tracked in [#1](../../issues/1)
 - [x] **Computers without Docker** on macOS and Linux — a browser profile and a folder per teammate, commands
       off by default and sandboxed when on (v0.4.0); on Windows, the browser and the folder
 - [x] **Desktop app with a first-run wizard** on macOS and Linux — no Docker, Node or terminal needed, menu bar /

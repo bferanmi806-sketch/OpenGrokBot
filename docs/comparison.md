@@ -11,15 +11,15 @@ ships almost daily, so this table ages fast. Corrections welcome via PR — it o
 |---|---|---|---|
 | Always-on teammates | ✅ on xAI's cloud | ✅ a container, or a local sandbox, each | Yours runs where you say: Mac mini, NAS, $5 VPS |
 | Whose computer | A cloud computer per member; xAI's wording says a member's bots share it | A separate container per teammate | Separate desks mean separate blast radii: one teammate's browser, files and logins are out of another's reach |
-| Watch its screen / take over | ✅ status, side preview, full-screen takeover | ✅ noVNC panel from the thread | |
+| Watch its screen / take over | ✅ status, side preview, full-screen takeover | ✅ noVNC panel (Docker) or CDP screencast + desktop sign-in window (local) | |
 | Signing in | Secure Form fills logins from chat; 1Password on Mac; takeover as fallback | Takeover only: you sign in on its screen | Theirs is smoother; ours never lets a password pass through the gateway |
-| Work on your own machine | ✅ "Your computer" in the desktop app; web traffic can leave through your desktop | ✅ local computers (v0.4.0): a browser profile and a folder of its own on your machine, commands off until you allow them and sandboxed then | macOS and Linux; Windows still needs Docker ([local-computers.md](local-computers.md)) |
+| Work on your own machine | ✅ "Your computer" in the desktop app; web traffic can leave through your desktop | ✅ local computers: a browser profile and a folder of its own on your machine, commands off until you allow them and sandboxed then | macOS, Linux and Windows (commands stay off on Windows; see [local-computers.md](local-computers.md)) |
 | Named bots, persistent memory | ✅ | ✅ | Rules live in `MEMORY.md` outside the bot's computer; every change is a diff chip |
 | Forget a rule | ✅ | ✅ `forget_memory`, or remove it in the panel | |
 | Approval gate on outward actions | ✅ draft cards, Auto-review by a separate model | ✅ Approve / Discard, or a bare 👍 | Ours is held by instruction, not a sandbox — see [security.md](security.md) |
 | Standing approvals | ✅ Custom Rules: Always allow / Ask first | ✅ *Always allow…* per teammate, kind and exact destination, for 1 h, 24 h or until revoked | Money and bookings always ask here |
 | Question cards | ✅ single and multi-select | ✅ `ask_operator`, single and multi-select | |
-| Presence on the roster | ✅ animated avatars: idle, thinking, working, waiting, blocked, done | ✅ status dot and label: working, needs you, stuck, done | |
+| Presence on the roster | ✅ animated avatars: idle, thinking, working, waiting, blocked, done | ✅ animated face avatars and status labels: working, needs you, stuck, done | |
 | Routines on a schedule | ✅ | ✅ | Cron in plain English, survives restarts, never runs twice at once |
 | Routines on events | ✅ webhooks, GitHub, Slack, Linear, a bot's own inbox | ✅ webhooks | Point GitHub or anything else at the routine's address |
 | Look-only routines | Not a separate mode in the changelog | ✅ watch routines: read-only tools, silent unless something needs you | The shape of dots' "proactive research" |
@@ -29,16 +29,16 @@ ships almost daily, so this table ages fast. Corrections welcome via PR — it o
 | See and stop the work | ✅ | ✅ | Each computer step shows live; a stop button ends the turn |
 | Spend control | Included usage, then an on-demand limit you set | ✅ per-bot daily token budget | Plus whatever cap you set on the API key |
 | Bots messaging each other | ✅; Team admins can switch it off | ✅ off by default, allowlisted per direction, two hops max | |
-| Group threads + dispatch | ✅ up to six bots per group | ✅ members report, the chief of staff closes with `✓ item → @bot · when` | |
+| Group threads + dispatch | ✅ up to six bots per group | ✅ `@` mentions to ask specific teammates, or ask the whole room and let Chief close with `✓ item → @bot · when` | |
 | A bot that offers work unasked | ✅ the primary Bot | Partly: a watch routine speaks up when it finds something | Nothing here goes looking for work on its own |
 | Its own email address | ✅ with `name+tag@` routing to routines | ❌ | |
-| Learn a routine by watching you | ✅ "follow along" | ❌ roadmap | The one big gap; routines are written in words today |
+| Learn a routine by watching you | ✅ "follow along" | Partly: typed browser workflow recorder (API); replay and UI on the roadmap | See [workflows.md](workflows.md) and [#1](https://github.com/wolfqing/OpenSuperBot/issues/1) |
 | Shared team bots, Slack | ✅ Team Bots, Slack threads, per-person memory | ❌ | This stack is built for one operator |
 | Connectors | Marketplace of plugins (GitHub, Gmail, Outlook, Notion, Figma, QuickBooks, Stripe…) | The browser and the shell | Anything with a website works here, but nothing is pre-wired |
 | Voice | ✅ voice chat and calls | ❌ | |
-| Apps | macOS, Windows and Linux desktop; iOS | A web client in your browser, reachable from other machines through a tunnel | Not tuned for phones yet |
-| Model choice | Grok only | Any OpenAI-compatible: Grok, Kimi, DeepSeek, local | `stub` runs with no key |
-| Setup | Zero (their infra) | `pnpm install`; Docker only if you want sealed containers | This is the price of custody |
+| Apps | macOS, Windows and Linux desktop; iOS | macOS and Linux desktop apps (`.dmg`, `.deb`, `.AppImage`), plus the web UI in any browser | Windows desktop installer and phone layout still ahead |
+| Model choice | Grok only | Claude, OpenAI, Gemini, Grok, DeepSeek, Kimi, Qwen, GLM, MiniMax, local Ollama, or any compatible endpoint — per teammate | `stub` demo mode runs with no key |
+| Setup | Zero (their infra) | Desktop installer + first-run wizard (no Node or Docker needed), or `pnpm install` from source | This is the price of custody |
 | Your credentials live | xAI's cloud | Your disk | The actual point |
 
 ## The other two: Meta Muse and OpenAI dots
@@ -74,7 +74,7 @@ today they cannot act, but they can still load any page.
 |---|---|---|
 | Subscription | Comes with SuperGrok and Cursor plans from Pro up, with its own usage meter; past the included usage you upgrade or set an on-demand limit | $0 |
 | Compute | included | hardware you own, or a ~$5/mo VPS (2GB RAM min if the teammates use Docker) |
-| Model usage | included up to the plan's allowance | your API bill; moderate single-bot usage on grok-4.5 ≈ single-digit $/mo; local model = $0 |
+| Model usage | included up to the plan's allowance | your API bill; moderate single-bot usage on grok-4.7 ≈ single-digit $/mo; local model = $0 |
 
 ## What Grok Bot genuinely does better
 

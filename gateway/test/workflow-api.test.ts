@@ -59,6 +59,7 @@ describe('workflow recording API', () => {
       expect(await start.json()).toEqual({ ok: true, recording: true })
       expect(startedIntent).toBe('Send the completed form')
       expect(isBusy('researcher')).toBe(true)
+      expect(await (await app.request('/api/summary')).json()).toMatchObject({ working: 0 })
       expect((await app.request('/api/bots/researcher/workflows/recording', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Second recording' }),
       })).status).toBe(409)
@@ -109,6 +110,14 @@ describe('workflow recording API', () => {
       })
       expect(duplicateSave.status).toBe(200)
       expect(await duplicateSave.json()).toEqual(saved)
+      // 某一行数据坏了只跳过它自己，不让整张列表 500
+      db.prepare('INSERT INTO workflows (id, bot_id, title, trace_json, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run('00000000-0000-4000-8000-000000000001', 'researcher', 'Broken', '{not-json', 1)
+      expect(await (await app.request('/api/bots/researcher/workflows')).json()).toEqual([saved])
+      expect((await app.request('/api/bots/researcher/workflows/not-a-uuid', { method: 'DELETE' })).status).toBe(400)
+      expect((await app.request(`/api/bots/researcher/workflows/${saved.id}`, { method: 'DELETE' })).status).toBe(204)
+      expect((await app.request(`/api/bots/researcher/workflows/${saved.id}`, { method: 'DELETE' })).status).toBe(404)
+      expect((await app.request(`/api/bots/researcher/workflows/${saved.id}`)).status).toBe(404)
       expect((await app.request('/api/bots/researcher/computer')).status).toBe(200)
       expect((await app.request('/api/bots/researcher/workflows/recording/stop', { method: 'POST' })).status).toBe(409)
     } finally {

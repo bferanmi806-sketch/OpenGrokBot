@@ -1,6 +1,14 @@
 {
   "name": "opensuperbot",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wolfqing/OpenSuperBot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wolfqing/OpenSuperBot/issues"
+  },
   "type": "module",
   "packageManager": "pnpm@10.33.2",
   "engines": {
@@ -27,6 +35,9 @@
       "electron-winstaller",
       "protobufjs",
       "ssh2"
-    ]
+    ],
+    "overrides": {
+      "minimatch@>=7.0.0 <11.0.1": "^11.0.8"
+    }
   }
 }

@@ -292,7 +292,15 @@ export function listWorkflowTraces(db: Db, botId: string): SavedWorkflowTrace[] 
   validateBotId(botId)
   const rows = db.prepare('SELECT id, trace_json FROM workflows WHERE bot_id = ? ORDER BY created_at DESC, id DESC')
     .all(botId) as WorkflowRow[]
-  return rows.map(({ id, trace_json }) => ({ id: id as WorkflowTraceId, trace: parseWorkflowTrace(JSON.parse(trace_json)) }))
+  const out: SavedWorkflowTrace[] = []
+  for (const { id, trace_json } of rows) {
+    try {
+      out.push({ id: id as WorkflowTraceId, trace: parseWorkflowTrace(JSON.parse(trace_json)) })
+    } catch {
+      // 某一行坏了只跳过它自己，不让整张列表 500
+    }
+  }
+  return out
 }
 
 export function readWorkflowTrace(db: Db, botId: string, id: string): WorkflowTrace | null {
@@ -300,4 +308,10 @@ export function readWorkflowTrace(db: Db, botId: string, id: string): WorkflowTr
   if (!isWorkflowTraceId(id)) throw new TypeError('invalid workflow id')
   const row = db.prepare('SELECT trace_json FROM workflows WHERE bot_id = ? AND id = ?').get(botId, id) as { trace_json: string } | undefined
   return row ? parseWorkflowTrace(JSON.parse(row.trace_json)) : null
+}
+
+export function deleteWorkflowTrace(db: Db, botId: string, id: string): boolean {
+  validateBotId(botId)
+  if (!isWorkflowTraceId(id)) throw new TypeError('invalid workflow id')
+  return db.prepare('DELETE FROM workflows WHERE bot_id = ? AND id = ?').run(botId, id).changes > 0
 }

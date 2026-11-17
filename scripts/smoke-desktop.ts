@@ -144,7 +144,9 @@ interface PlaywrightElectron {
 async function runSmoke() {
   const args = process.argv.slice(2)
   const realDataDir = args.includes('--real-data-dir')
-  const positional = args.find((a) => !a.startsWith('--')) ?? process.env.OPENSUPERBOT_APP?.trim()
+  const positional = args.find((a) => !a.startsWith('--'))
+    ?? process.env.OPENSUPERBOT_APP?.trim()
+    ?? process.env.SMOKE_APP_PATH?.trim()
   const executablePath = resolvePackagedExecutable({ explicit: positional })
   const { rootDir, useEnvOverride } = prepareSmokeRoot({ realDataDir })
 

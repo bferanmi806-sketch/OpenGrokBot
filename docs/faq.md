@@ -10,10 +10,10 @@ v0.1 of this repo was a **distribution of OpenClaw**. v0.2 is its own core — g
 Because the distribution could not give you a private computer per teammate, approval/memory/routine chips, or takeover login — and those *are* the product. Everything cheap to reuse was still reused: the personas in `teammates/` are plain Markdown and survived the rewrite unchanged.
 
 **Can I use it without an xAI key?**
-Yes — anything OpenAI-compatible: Anthropic-compatible gateways, OpenAI, Kimi, DeepSeek, OpenRouter, or a local model via Ollama (`$0/mo`, fully offline). Set `OPENSUPERBOT_API_BASE` and `OPENSUPERBOT_MODEL`. Using the Grok API is just the poetic default. `OPENSUPERBOT_MODEL=stub` runs the whole product offline with no key at all.
+Yes — Claude (Anthropic Messages API), OpenAI (Responses API), Gemini, Grok, DeepSeek, Kimi, Qwen, GLM, MiniMax, OpenRouter, a local model via Ollama (`$0/mo`, fully offline), or any OpenAI- or Anthropic-compatible endpoint. Pick one in the first-run setup wizard or **AI models** in the sidebar, and assign different models per teammate from the top of each thread (see [models.md](models.md)). Demo mode (`OPENSUPERBOT_MODEL=stub`, or *Try demo mode* in the wizard) runs offline with no key at all.
 
-**Which Grok model?**
-`OPENSUPERBOT_MODEL` defaults to `grok-4.7`. Switching models is one environment variable — no config file to edit.
+**Which model is the default when configured via environment variables?**
+`OPENSUPERBOT_MODEL` defaults to `grok-4.7`. In the UI, each teammate can switch connections or models from the chip in its thread header with no restart.
 
 **Does it really match Grok Bot?**
 Read [comparison.md](comparison.md) — including the "what Grok Bot genuinely does better" section. Short version: custody, model freedom and a separate computer per teammate, yes; teach-by-demonstration, form sign-in, connectors and app polish, no.

@@ -7,6 +7,13 @@ names.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-17
+
+Security hardening across browser navigation, local command sandboxes, Docker containers and Electron window
+navigation, smoother thread rendering and faster SQLite queries, offline lockfile-pinned desktop staging, saved
+workflow deletion, refreshed architecture and comparison docs, and concurrency fixes across uploads, containers and
+routine scheduling.
+
 ### Security
 
 - **Browser navigation, downloads and profile isolation.** `browser_goto` now accepts only `http:` and `https:`
@@ -43,21 +50,29 @@ names.
   conversation, Markdown blocks non-`http(s)` / `mailto:` links instead of rendering empty `target="_blank"`
   anchors, and the CDP live screen updates `<img>` directly without 10 fps React state churn.
 - **Build, packaging and service polish.** Root `pnpm build` compiles `desktop` alongside `web` and `gateway`,
-  `desktop` auto-installs the Electron binary on `prestart` when missing, `.github/workflows/ci.yml` sets explicit
-  `contents: read` permissions, `.github/workflows/release.yml` refuses to clobber an already-published release,
+  `desktop/scripts/stage.mjs` stages gateway production dependencies offline from `pnpm-lock.yaml` instead of
+  `--legacy` registry resolution (verified on every CI run), `desktop` auto-installs the Electron binary on `prestart`
+  when missing and uses Electron's proxy-aware `net.fetch` for release checks, `pnpm.overrides` upgrades transitive
+  `minimatch` (`>=7 <11.0.1`) to `^11.0.8`, `.github/workflows/ci.yml` sets explicit `contents: read` permissions,
+  `.github/workflows/release.yml` runs typechecks and tests and refuses to clobber an already-published release,
   `.deb` maintainer scripts preserve AppArmor profiles across package upgrades and match `/usr/bin/bwrap` profile
   headers accurately, Windows startup logs use UTF-8 with 5 MB rotation, and the systemd unit uses `/usr/bin/env node`
   with `TimeoutStopSec=15`.
+- **Saved workflow deletion and resilient listing.** Added `DELETE /api/bots/:botId/workflows/:workflowId` and kept
+  `GET /api/bots/:botId/workflows` from failing with `500` when a single stored row is malformed.
 
 ### Fixed
 
 - **Concurrency, lifecycle and edge cases.** Serialized per-bot computer replacement in `pool.ts` when a container
   dies, tracked in-flight uploads so concurrent saves respect storage quotas and `sweep()` never deletes a file
   mid-save, surfaced 200-status upstream errors and `finish_reason: "length"` truncated tool calls in Chat
-  Completions, kept `waitsOnOperator` true after `ask_for_login` until you reply, rejected 6-field second-level cron
-  expressions, wired configured timezones into routine scheduling and daily token resets, fixed overlapping message
-  fetches and WebSocket reconnect/sign-out races in the web client, and hardened desktop port probing (`::1`),
-  `OPENSUPERBOT_TOKEN` sign-in, multi-byte UTF-8 log decoding and quit confirmation error recovery.
+  Completions, kept `waitsOnOperator` true after `ask_for_login` until you reply, kept workflow recording lanes from
+  reporting teammates as `"thinking"` or inflating `/api/summary`'s `working` count, rejected aborted webhook/upload
+  request streams instead of treating partial bodies as empty, rejected 6-field second-level cron expressions, wired
+  DST-aware configured timezones into routine scheduling and daily token resets, fixed overlapping message fetches and
+  WebSocket reconnect/sign-out races in the web client, refreshed open computer panels on live events, and hardened
+  desktop port probing (`::1`), `OPENSUPERBOT_TOKEN` sign-in, multi-byte UTF-8 log decoding and quit confirmation
+  error recovery.
 
 ## [0.6.0] - 2026-11-13
 
@@ -171,8 +186,6 @@ a tool-scoping fix so only turns you start can change rules or routines.
   hopping when it waits on you, shaking its head when stuck, smiling when done — and holds still when your system
   asks for reduced motion. The README screenshots are retaken with them.
 - Screenshots are served with `X-Content-Type-Options: nosniff`, like uploaded files.
-- The README screenshots are retaken on 0.5.0. They show the new name, each teammate's model chip, and a local
-  computer's live screen in the panel. The conversation is the built-in scripted demo.
 
 ### Fixed
 
@@ -643,7 +656,8 @@ A self-hosted Grok Bot alternative assembled from OpenClaw: three preconfigured 
 Ticker) with strict boundaries, agent-to-agent handoffs, any model provider, a one-command setup that never
 overwrites an existing OpenClaw config, a Docker/VPS path and an honest comparison with Grok Bot.
 
-[Unreleased]: https://github.com/wolfqing/OpenSuperBot/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/wolfqing/OpenSuperBot/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/wolfqing/OpenSuperBot/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/wolfqing/OpenSuperBot/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/wolfqing/OpenSuperBot/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/wolfqing/OpenSuperBot/compare/v0.3.1...v0.4.0

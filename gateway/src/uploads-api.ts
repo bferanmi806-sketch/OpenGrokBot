@@ -37,7 +37,12 @@ export function mountUploads(app: Hono, deps: { uploads: Uploads | null; onRemov
     if (!uploads) return c.json({ error: 'uploads need a data folder' }, 503)
     const tooLarge = () => c.json({ error: UPLOAD_ERRORS.too_large, code: 'too_large' }, 413)
     if (Number(c.req.header('content-length') ?? 0) > MAX_UPLOAD_REQUEST_BYTES) return tooLarge()
-    const raw = await readBodyUpTo(c.req.raw.body, MAX_UPLOAD_REQUEST_BYTES)
+    let raw: Buffer | null
+    try {
+      raw = await readBodyUpTo(c.req.raw.body, MAX_UPLOAD_REQUEST_BYTES)
+    } catch {
+      return c.json({ error: UPLOAD_ERRORS.bad_request, code: 'bad_request' }, 400)
+    }
     if (raw === null) return tooLarge()
     let body: unknown
     try {

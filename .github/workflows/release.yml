@@ -53,6 +53,8 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
       - name: Stage gateway, web UI, and built-in teammates
         run: node desktop/scripts/stage.mjs
       - name: Build installers

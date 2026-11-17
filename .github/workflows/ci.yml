@@ -27,6 +27,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - name: Verify desktop staging layout
+        run: node desktop/scripts/stage.mjs --no-build
       - name: Windows start-up scripts parse, install and uninstall
         if: runner.os == 'Windows'
         shell: pwsh

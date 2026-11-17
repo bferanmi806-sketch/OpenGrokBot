@@ -1,3 +1,4 @@
+import { isUtf8 } from 'node:buffer'
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
@@ -122,12 +123,7 @@ export function sniffType(b: Buffer): Sniffed | null {
   }
   if (starts(b, ascii('%PDF-'))) return { mime: 'application/pdf' }
   if (b.length === 0 || b.includes(0)) return null
-  try {
-    new TextDecoder('utf-8', { fatal: true }).decode(b)
-    return { mime: 'text/plain' }
-  } catch {
-    return null
-  }
+  return isUtf8(b) ? { mime: 'text/plain' } : null
 }
 
 /** 只收规规矩矩的 base64：不带 data: 前缀、没有空白、填充齐全。别的一律当坏的，不去猜 */

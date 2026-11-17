@@ -15,7 +15,7 @@ xAI 的 Grok Bot 卖的是「随时在线的同事」：每个 bot 配一台云�
 每个 bot 都跑在 xAI 的云上，**你的登录态也一起在里面**。
 
 这个仓库是同样的形状，自托管版：你机器上一个 gateway 进程、每个 bot 一台自己的电脑（一个 Docker 容器；没有
-Docker 时，就是你 Mac 或 Linux 机器上它自己的浏览器和文件夹）、一个信息密度很高、更像工作台的网页客户端，每位同事
+Docker 时，就是你 Mac、Linux 或 Windows 机器上它自己的浏览器和文件夹）、桌面 App 或信息密度很高、更像工作台的网页客户端，每位同事
 后面接你选的模型：Claude、OpenAI、Gemini、Grok、DeepSeek、Kimi、通义、智谱、MiniMax、本地 Ollama，或任何
 OpenAI 兼容的模型。
 
@@ -157,7 +157,7 @@ OPENSUPERBOT_API_KEY=sk-… OPENSUPERBOT_MODEL=grok-4.7 pnpm dev
 
 （PowerShell：`$env:OPENSUPERBOT_API_KEY = 'sk-…'; $env:OPENSUPERBOT_MODEL = 'grok-4.7'; pnpm dev`。）
 
-想让不同同事用不同的模型：点侧栏的 **AI**，每家有 key 的服务加一个连接，再到同事对话的顶部给它选一个。
+想让不同同事用不同的模型：点侧栏底部的 **AI 模型**，每家有 key 的服务加一个连接，再到同事对话的顶部给它选一个。
 支持哪些服务、该用哪种 key、哪些订阅不许别的应用用，见 [AI 模型](docs/models.md)。
 
 gateway 启动时自己选电脑的种类并写进日志：Docker 守护进程应答、镜像也建好了就用 Docker，否则用本机模式
@@ -229,8 +229,7 @@ Build 驱动你本机的 `grok` 命令行——会话按项目分组，Markdown�
 
 ## 路线图
 
-- [ ] **teach-mode**——录一遍浏览器操作，存成一个同事能反复执行的 workflow，手动跑或由 routine 定时跑。这是
-      Grok Bot 唯一没有开源等价物的能力；已有贡献者接下第一步（录制器和录制格式），在 [#1](../../issues/1)
+- [ ] **teach-mode**——录一遍浏览器操作，存成一个同事能反复执行的 workflow，手动跑或由 routine 定时跑。第一步（类型化浏览器录制器与录制格式，见 [docs/workflows.md](docs/workflows.md)）已合入；确定性回放与例行任务接入跟进在 [#1](../../issues/1)
 - [x] **不用 Docker 的电脑**（macOS 和 Linux）——每位同事独立的浏览器 profile 和文件夹，命令行默认关、打开后跑在
       系统沙箱里（v0.4.0）；Windows 上有浏览器和文件夹
 - [x] **带首次启动向导的桌面 App**（macOS 和 Linux）——试用不需要 Docker、Node 和终端，支持菜单栏/托盘常驻、开机自启与

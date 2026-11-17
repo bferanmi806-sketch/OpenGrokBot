@@ -5,7 +5,7 @@ schedule, or hand steps to the agent when a page changes. The slice exposes API 
 buttons or workflow editor to the product UI.
 
 Recordings attach to the page already owned by the teammate's shared `BrowserSession`. They do not launch a second
-browser or replace its logged-in context. In v0.4.0 local-computer mode, `showWindow()` and `hideWindow()` relaunch
+browser or replace its logged-in context. In local-computer mode, `showWindow()` and `hideWindow()` relaunch
 Chromium; the recorder reattaches to the replacement page and continues recording. Show the local browser window
 before recording: its panel screencast is view-only, so the operator drives the real window. Docker recording also
 attaches to the current page. The recorder captures navigation, clicks, text entry, selection, checkbox state, and
@@ -31,7 +31,9 @@ exist per teammate. Stop capture to receive a review draft:
 POST /api/bots/{botId}/workflows/recording/stop
 ```
 
-Stopping does not save anything to SQLite. Review the returned trace, remove steps that should not be retained,
+Stopping does not save anything to SQLite (recordings also auto-stop after 15 minutes with `truncated: true`). To
+cancel an active recording and discard everything captured so far without creating a draft, send
+`DELETE /api/bots/{botId}/workflows/recording`. Review the returned trace, remove steps that should not be retained,
 replace literal values with `{ "kind": "placeholder", "key": "customerEmail" }`, and then save the edited trace:
 
 ```http
@@ -48,11 +50,12 @@ DELETE /api/bots/{botId}/workflows/drafts/{draftId}
 ```
 
 Drafts are held in gateway memory until saved or discarded. Restarting the gateway discards pending drafts. Saved
-traces are stored as rows in the gateway SQLite database, alongside routines. List and read saved traces with:
+traces are stored as rows in the gateway SQLite database, alongside routines. List, read, and delete saved traces with:
 
 ```http
 GET /api/bots/{botId}/workflows
 GET /api/bots/{botId}/workflows/{workflowId}
+DELETE /api/bots/{botId}/workflows/{workflowId}
 ```
 
 The computer status response includes `workflowRecording` during capture and `workflowDraft` while review is

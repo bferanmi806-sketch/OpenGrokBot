@@ -2,7 +2,7 @@
   "name": "@opensuperbot/desktop",
   "productName": "OpenSuperBot",
   "desktopName": "opensuperbot.desktop",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "OpenSuperBot desktop app: hosts the gateway and shows the UI in a window",
   "type": "module",
@@ -31,6 +31,14 @@
     "vitest": "^5.0.5"
   },
   "homepage": "https://github.com/wolfqing/OpenSuperBot",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wolfqing/OpenSuperBot.git",
+    "directory": "desktop"
+  },
+  "bugs": {
+    "url": "https://github.com/wolfqing/OpenSuperBot/issues"
+  },
   "author": "wolfqing",
   "license": "MIT"
 }

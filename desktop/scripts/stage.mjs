@@ -15,7 +15,8 @@ const DESKTOP = join(dirname(fileURLToPath(import.meta.url)), '..')
 const REPO = join(DESKTOP, '..')
 const STAGE = join(DESKTOP, 'stage')
 const say = (line) => console.log(`[stage] ${line}`)
-const pnpm = (...args) => execFileSync('pnpm', args, { cwd: REPO, stdio: 'inherit' })
+const pnpmBin = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
+const pnpm = (...args) => execFileSync(pnpmBin, args, { cwd: REPO, stdio: 'inherit', shell: process.platform === 'win32' })
 
 if (!process.argv.includes('--no-build')) {
   say('building web, gateway and desktop')
@@ -27,8 +28,8 @@ for (const need of ['gateway/dist/main.js', 'web/dist/index.html', 'desktop/dist
 
 rmSync(STAGE, { recursive: true, force: true })
 say('deploying the gateway with its production dependencies')
-// 网关不依赖工作区里别的包，用 legacy deploy 就够（pnpm 10 的新 deploy 要开 inject-workspace-packages）
-pnpm('--filter', '@opensuperbot/gateway', 'deploy', '--prod', '--legacy', '--config.node-linker=hoisted', join(STAGE, 'gateway'))
+// 严格按根 pnpm-lock.yaml 从本地 store 离线落盘（不用 --legacy，避免绕过锁文件重新联网拉包）
+pnpm('--filter', '@opensuperbot/gateway', 'deploy', '--prod', '--config.inject-workspace-packages=true', '--config.node-linker=hoisted', join(STAGE, 'gateway'))
 cpSync(join(REPO, 'web', 'dist'), join(STAGE, 'web', 'dist'), { recursive: true })
 cpSync(join(REPO, 'teammates'), join(STAGE, 'teammates'), { recursive: true })
 

@@ -66,7 +66,7 @@ stable version is out. When turned off in Settings, it sends no request. It neve
 automatically.
 
 For smoke tests: `pnpm run smoke:desktop` (`scripts/smoke-desktop.ts`) launches a packaged build through Playwright's
-`_electron` (`SMOKE_APP_PATH` overrides the executable, `SMOKE_EXPECT_SANDBOX=1` also runs the command sandbox
+`_electron` (`OPENSUPERBOT_APP` overrides the executable, `SMOKE_EXPECT_SANDBOX=1` also runs the command sandbox
 self-check), steps through demo mode, drives a real browser screenshot, and verifies that quitting leaves no Chrome or
 gateway process behind. `OPENSUPERBOT_DESKTOP_NO_EXTERNAL=1` logs links instead of opening the browser,
 `OPENSUPERBOT_DESKTOP_DOWNLOADS` points downloads at another folder, and with `OPENSUPERBOT_DESKTOP_TEST=1` the app
