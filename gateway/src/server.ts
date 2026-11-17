@@ -47,6 +47,10 @@ import {
 } from './uploads.js'
 import type { WorkflowRecording } from './workflow-recorder.js'
 import { deleteWorkflowTrace, listWorkflowTraces, parseWorkflowTrace, readWorkflowTrace, saveWorkflowTrace, type WorkflowTrace } from './workflows.js'
+import {
+  assertWorkflowReplayable, MAX_WORKFLOW_RUN_REQUEST_BYTES, parseWorkflowBindings, runWorkflow,
+  WorkflowReplayValidationError, type WorkflowApprovalRequest,
+} from './workflow-runner.js'
 
 /** 这个网关的电脑是什么做的，以及本机模式有没有能用的沙箱（命令行开关要看它） */
 export type ComputersInfo = {
@@ -113,6 +117,23 @@ type ActiveWorkflowRecording = {
   releaseTurns: () => void
   timeout: ReturnType<typeof setTimeout> | null
   cancelled: boolean
+  released: boolean
+}
+type WorkflowRunPhase =
+  | { kind: 'running'; approvedStepIndex?: number }
+  | { kind: 'awaiting_approval'; approvalId: number; stepIndex: number }
+  | { kind: 'finished' }
+type ActiveWorkflowRun = {
+  runId: string
+  workflowId: string
+  botId: string
+  threadId: string
+  trace: WorkflowTrace
+  bindings: Map<string, string>
+  rulesAllowed: boolean
+  releaseTurns: () => void
+  controller: AbortController
+  phase: WorkflowRunPhase
   released: boolean
 }
 
@@ -331,6 +352,7 @@ export function createApp(deps: AppDeps): GatewayApp {
   }
   const workflowRecordings = new Map<string, ActiveWorkflowRecording>()
   const workflowDrafts = new Map<string, WorkflowDraft>()
+  const workflowRuns = new Map<string, ActiveWorkflowRun>()
   const releaseWorkflowRecording = (botId: string, active: ActiveWorkflowRecording) => {
     if (active.timeout) clearTimeout(active.timeout)
     active.timeout = null
@@ -612,9 +634,127 @@ export function createApp(deps: AppDeps): GatewayApp {
     })
   }
 
+  function releaseWorkflowRun(active: ActiveWorkflowRun, abort = false): void {
+    active.phase = { kind: 'finished' }
+    if (workflowRuns.get(active.botId) === active) workflowRuns.delete(active.botId)
+    if (abort && !active.controller.signal.aborted) active.controller.abort()
+    active.bindings.clear()
+    if (!active.released) {
+      active.released = true
+      active.releaseTurns()
+    }
+  }
+
+  function isAwaitingWorkflowApproval(active: ActiveWorkflowRun, approvalId: number): boolean {
+    const phase: WorkflowRunPhase = active.phase
+    return phase.kind === 'awaiting_approval' && phase.approvalId === approvalId
+  }
+
+  function workflowMessage(active: ActiveWorkflowRun, content: string): void {
+    events(active.threadId).onMessage(insertMessage(db, { threadId: active.threadId, sender: active.botId, kind: 'text', content }))
+  }
+
+  async function requestWorkflowApproval(active: ActiveWorkflowRun, request: WorkflowApprovalRequest) {
+    const at = now().getTime()
+    const match = findMatchingRule(db, { botId: active.botId, kind: request.kind, target: request.target, now: at })
+    const rule = request.rulesAllowed ? match : null
+    const action = request.action
+    const detail = `Workflow step ${request.step} of ${request.steps}. The step will run once after approval.`
+    const approval = createApproval(db, {
+      threadId: active.threadId, botId: active.botId, action, detail, kind: request.kind, target: request.target, now: at,
+      workflowRunId: active.runId, ...(rule ? { ruleId: rule.id } : {}),
+    })
+    const reason = rememberReason({ kind: request.kind, target: request.target })
+    if (rule) {
+      recordAction(db, {
+        botId: active.botId, threadId: active.threadId, trigger: 'you', tool: 'approval',
+        summary: `allowed by your rule #${rule.id}: ${action}`, at,
+      })
+    } else {
+      active.phase = { kind: 'awaiting_approval', approvalId: approval.id, stepIndex: request.step - 1 }
+    }
+    events(active.threadId).onMessage(insertMessage(db, {
+      threadId: active.threadId, sender: active.botId, kind: 'approval_request',
+      payload: {
+        approvalId: approval.id, action, detail, kind: request.kind, target: request.target,
+        status: rule ? 'approved' : 'pending',
+        ...(rule ? { rule: { id: rule.id, kind: rule.kind, target: rule.target, expiresAt: rule.expires_at } }
+          : { canRemember: request.rulesAllowed && canRemember({ kind: request.kind, target: request.target }) }),
+        ...(!rule && reason ? { rememberBlocked: blockText(reason), rememberReason: reason } : {}),
+      },
+    }))
+    return rule ? { status: 'approved' as const } : { status: 'waiting' as const, approvalId: approval.id }
+  }
+
+  async function continueWorkflowRun(active: ActiveWorkflowRun, startIndex = 0, approvedStepIndex?: number): Promise<void> {
+    if (workflowRuns.get(active.botId) !== active || active.phase.kind === 'finished') return
+    active.phase = { kind: 'running', ...(approvedStepIndex === undefined ? {} : { approvedStepIndex }) }
+    try {
+      const computer = await pool?.get(active.botId)
+      if (!computer?.workflowPage) {
+        if (workflowRuns.get(active.botId) !== active) return
+        workflowMessage(active, `Workflow "${active.trace.title}" stopped: the current computer cannot provide a browser page.`)
+        releaseWorkflowRun(active)
+        return
+      }
+      const result = await runWorkflow(active.trace, {
+        getPage: () => computer.workflowPage!(),
+        bindings: active.bindings,
+        rulesAllowed: active.rulesAllowed,
+        authorize: (request) => requestWorkflowApproval(active, request),
+        startIndex,
+        ...(approvedStepIndex === undefined ? {} : { approvedStepIndex }),
+        signal: active.controller.signal,
+        async onStep(event) {
+          if (workflowRuns.get(active.botId) !== active) return
+          try {
+            recordAction(db, {
+              botId: active.botId, threadId: active.threadId, trigger: 'you', tool: 'workflow',
+              summary: `step ${event.index} of ${active.trace.steps.length}: ${event.type}`,
+              ok: event.ok, ms: event.durationMs, at: now().getTime(),
+            })
+          } catch {
+            // A gateway shutdown may close the database while a browser action is unwinding.
+          }
+        },
+      })
+      if (workflowRuns.get(active.botId) !== active) return
+      if (result.status === 'waiting') {
+        if (!isAwaitingWorkflowApproval(active, result.approvalId)) {
+          workflowMessage(active, `Workflow "${active.trace.title}" stopped because its approval continuation could not be retained.`)
+          releaseWorkflowRun(active, true)
+        }
+        return
+      }
+      if (result.status === 'completed') {
+        workflowMessage(active, `Workflow "${active.trace.title}" completed (${result.stepsCompleted} steps).`)
+        releaseWorkflowRun(active)
+        return
+      }
+      if (result.code === 'cancelled') {
+        workflowMessage(active, `Workflow "${active.trace.title}" was stopped. No later steps were run.`)
+      } else {
+        const reasons: Record<string, string> = {
+          browser_unavailable: 'the browser is unavailable',
+          unsupported_browser: 'the current browser does not support a required action',
+          target_not_found: 'no recorded locator was visible',
+          action_failed: 'the browser action failed',
+          url_mismatch: 'the page did not reach the expected URL',
+          popup_opened: 'the action opened an unrecorded popup',
+        }
+        workflowMessage(active, `Workflow "${active.trace.title}" stopped at step ${result.step} of ${active.trace.steps.length}: ${reasons[result.code] ?? 'the step failed'}. Later steps were not run.`)
+      }
+      releaseWorkflowRun(active, true)
+    } catch {
+      if (workflowRuns.get(active.botId) !== active) return
+      workflowMessage(active, `Workflow "${active.trace.title}" stopped because the browser runner could not continue.`)
+      releaseWorkflowRun(active, true)
+    }
+  }
+
   /**
-   * 放行/驳回：翻转 chip、留一条决定记录、再用不可见 seed 让 bot 续跑。
-   * remember：放行的同时留一条规则（这位同事 · 这一类 · 这个去向），在时限内同样的审批不再问。
+   * Resolve an approval. Ordinary agent approvals resume through the LLM; workflow approvals resume
+   * their exact in-memory step and fail closed if a gateway restart lost that continuation.
    */
   async function settleApproval(
     id: number,
@@ -622,9 +762,15 @@ export function createApp(deps: AppDeps): GatewayApp {
     remember?: RuleDuration,
     /** 一批对象里操作者勾留下的下标；不传 = 全部 */
     keep?: unknown,
-  ): Promise<'ok' | 'gone' | 'settled' | 'unrememberable' | 'bad-items'> {
+  ): Promise<'ok' | 'gone' | 'settled' | 'unrememberable' | 'bad-items' | 'workflow-lost'> {
     const existing = getApproval(db, id)
     if (!existing) return 'gone'
+    const workflowApproval = Boolean(existing.workflow_run_id)
+    const activeRun = workflowApproval ? workflowRuns.get(existing.bot_id) : undefined
+    const continuation = activeRun?.runId === existing.workflow_run_id && activeRun.phase.kind === 'awaiting_approval'
+      && activeRun.phase.approvalId === id ? activeRun : undefined
+    if (workflowApproval && existing.status === 'pending' && decision === 'approve' && !continuation) return 'workflow-lost'
+    if (workflowApproval && existing.status === 'pending' && remember && !continuation?.rulesAllowed) return 'unrememberable'
     const items = itemsOf(existing)
     if (remember && (decision !== 'approve' || items || !canRemember(existing))) return 'unrememberable'
     let picked: number[] | null = null
@@ -674,17 +820,27 @@ export function createApp(deps: AppDeps): GatewayApp {
         + (count ? ` (${count.approved} of ${count.of} items)` : '') + (rule ? ` · rule #${rule.id} saved` : ''),
     })
 
-    const bot = botById(approval.bot_id)
-    if (bot) {
-      const seed = decision !== 'approve'
-        ? `Your operator discarded: ${approval.action}. Do not do it. Acknowledge in one line and move on.`
-        : items && picked
-          ? batchSeed(approval.action, items, picked)
-          : `Your operator approved: ${approval.action}. Carry it out now and report what actually happened.`
-      // 放行的响应不等 bot 干完
-      void startTurn(bot, approval.thread_id, seed, {
-        origin: 'operator', persistUserMessage: false, prewarm: decision === 'approve', trigger: 'approval',
-      })
+    if (workflowApproval) {
+      if (decision === 'approve' && continuation?.phase.kind === 'awaiting_approval') {
+        const stepIndex = continuation.phase.stepIndex
+        continuation.phase = { kind: 'running', approvedStepIndex: stepIndex }
+        void continueWorkflowRun(continuation, stepIndex, stepIndex)
+      } else if (decision === 'discard' && continuation) {
+        releaseWorkflowRun(continuation, true)
+      }
+    } else {
+      const bot = botById(approval.bot_id)
+      if (bot) {
+        const seed = decision !== 'approve'
+          ? `Your operator discarded: ${approval.action}. Do not do it. Acknowledge in one line and move on.`
+          : items && picked
+            ? batchSeed(approval.action, items, picked)
+            : `Your operator approved: ${approval.action}. Carry it out now and report what actually happened.`
+        // 放行的响应不等 bot 干完
+        void startTurn(bot, approval.thread_id, seed, {
+          origin: 'operator', persistUserMessage: false, prewarm: decision === 'approve', trigger: 'approval',
+        })
+      }
     }
     return 'ok'
   }
@@ -977,6 +1133,82 @@ export function createApp(deps: AppDeps): GatewayApp {
     }
   })
 
+  app.post('/api/bots/:botId/workflows/:workflowId/run', async (c) => {
+    const botId = c.req.param('botId')
+    if (!botById(botId)) return c.json({ error: 'unknown bot' }, 404)
+    if (!pool) return c.json({ error: 'workflow replay requires a browser computer' }, 503)
+    if (workflowRuns.has(botId)) return c.json({ error: 'a workflow is already running for this teammate' }, 409)
+    if (routineBotsInFlight.has(botId)) return c.json({ error: 'the teammate is busy' }, 409)
+
+    let trace: WorkflowTrace | null
+    try {
+      trace = readWorkflowTrace(db, botId, c.req.param('workflowId'))
+    } catch {
+      return c.json({ error: 'invalid workflow id' }, 400)
+    }
+    if (!trace) return c.json({ error: 'unknown workflow' }, 404)
+
+    const requestBytes = await readBodyUpTo(c.req.raw.body, MAX_WORKFLOW_RUN_REQUEST_BYTES).catch(() => null)
+    if (!requestBytes) return c.json({ error: 'workflow run request is too large or unreadable' }, 413)
+    let body: unknown
+    try {
+      body = requestBytes.length ? JSON.parse(requestBytes.toString('utf8')) : {}
+    } catch {
+      return c.json({ error: 'workflow run request must be valid JSON' }, 400)
+    }
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      return c.json({ error: 'workflow run request must be an object' }, 400)
+    }
+    if (Object.keys(body).some((key) => key !== 'bindings')) {
+      return c.json({ error: 'workflow run request only accepts bindings' }, 400)
+    }
+
+    let bindings: Map<string, string>
+    let rulesAllowed: boolean
+    try {
+      assertWorkflowReplayable(trace)
+      const parsed = parseWorkflowBindings(trace, (body as { bindings?: unknown }).bindings)
+      bindings = parsed.bindings
+      // A binding can change an approval destination at run time, so a standing rule must not guess it.
+      rulesAllowed = !parsed.hasDynamicValues
+    } catch (error) {
+      if (!(error instanceof WorkflowReplayValidationError)) return c.json({ error: 'workflow cannot be replayed' }, 400)
+      const validation: Record<WorkflowReplayValidationError['code'], { status: 400 | 409; message: string }> = {
+        invalid_bindings: { status: 400, message: 'workflow bindings must be strings within the size limit' },
+        missing_bindings: { status: 400, message: 'required workflow input bindings are missing' },
+        unexpected_bindings: { status: 400, message: 'workflow bindings include unused keys' },
+        trace_truncated: { status: 409, message: 'truncated workflows cannot be replayed' },
+        unsupported_reference: { status: 409, message: 'page and frame references are not supported by this runner' },
+        unrecorded_popup: { status: 409, message: 'workflows with unrecorded popups cannot be replayed' },
+      }
+      const problem = validation[error.code]
+      return c.json({ error: problem.message }, problem.status)
+    }
+
+    const releaseTurns = turns.hold(botId)
+    if (!releaseTurns) return c.json({ error: 'the teammate is busy' }, 409)
+    const active: ActiveWorkflowRun = {
+      runId: randomUUID(), workflowId: c.req.param('workflowId'), botId, threadId: ensureDmThread(db, botId), trace,
+      bindings, rulesAllowed, releaseTurns, controller: new AbortController(), phase: { kind: 'running' }, released: false,
+    }
+    workflowRuns.set(botId, active)
+    void continueWorkflowRun(active)
+    return c.json({ runId: active.runId, status: 'running' }, 202)
+  })
+
+  app.delete('/api/bots/:botId/workflows/runs/:runId', async (c) => {
+    const botId = c.req.param('botId')
+    if (!botById(botId)) return c.json({ error: 'unknown bot' }, 404)
+    const active = workflowRuns.get(botId)
+    if (!active || active.runId !== c.req.param('runId')) return c.json({ error: 'unknown workflow run' }, 404)
+    if (active.phase.kind === 'awaiting_approval') {
+      const result = await settleApproval(active.phase.approvalId, 'discard')
+      return result === 'ok' ? c.body(null, 204) : c.json({ error: 'workflow approval could not be discarded' }, 409)
+    }
+    active.controller.abort()
+    return c.json({ runId: active.runId, status: 'stopping_after_current_step' }, 202)
+  })
+
   app.delete('/api/bots/:botId/workflows/:workflowId', (c) => {
     const botId = c.req.param('botId')
     if (!botById(botId)) return c.json({ error: 'unknown bot' }, 404)
@@ -1232,6 +1464,9 @@ export function createApp(deps: AppDeps): GatewayApp {
     const outcome = await settleApproval(Number(c.req.param('id')), body.decision, remember, body.items)
     if (outcome === 'gone') return c.json({ error: 'unknown approval' }, 404)
     if (outcome === 'settled') return c.json({ error: 'already decided' }, 409)
+    if (outcome === 'workflow-lost') {
+      return c.json({ error: 'workflow continuation was lost after a gateway restart; discard this approval and start a new run' }, 409)
+    }
     if (outcome === 'bad-items') {
       return c.json({ error: 'items must list one or more distinct item positions of a batch you are approving' }, 400)
     }
@@ -1304,6 +1539,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     stopAll: () => {
       rounds.stopAll()
       turns.stopAll()
+      for (const active of workflowRuns.values()) releaseWorkflowRun(active, true)
       waiting.clear()
     },
   }

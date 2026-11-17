@@ -5,7 +5,22 @@ import type { BotComputer, PageLink, Shot } from './computer.js'
  * 还是本机直接拉起来的。两种后端（computer-docker、computer-local）都拼这一套。
  */
 
-type Fillable = { first(): { fill(text: string, opts?: unknown): Promise<void> } }
+export type WorkflowLocatorLike = {
+  first(): WorkflowElementLike
+}
+
+export type WorkflowElementLike = {
+  waitFor?(opts: { state: 'visible'; timeout: number }): Promise<void>
+  click?(opts?: unknown): Promise<void>
+  fill?(text: string, opts?: unknown): Promise<void>
+  selectOption?(value: string, opts?: unknown): Promise<unknown>
+  check?(opts?: unknown): Promise<void>
+  uncheck?(opts?: unknown): Promise<void>
+  press?(key: string, opts?: unknown): Promise<void>
+}
+
+type Clickable = { first(): WorkflowElementLike & { click(opts?: unknown): Promise<void> } }
+type Fillable = { first(): WorkflowElementLike & { fill(text: string, opts?: unknown): Promise<void> } }
 
 export type PageLike = {
   goto(url: string, opts?: unknown): Promise<unknown>
@@ -14,10 +29,13 @@ export type PageLike = {
   innerText(selector: string): Promise<string>
   screenshot(opts?: unknown): Promise<Buffer>
   click(selector: string, opts?: unknown): Promise<void>
-  getByText?(text: string): { first(): { click(opts?: unknown): Promise<void> } }
+  getByText?(text: string, opts?: { exact?: boolean }): Clickable
   fill?(selector: string, text: string, opts?: unknown): Promise<void>
-  getByLabel?(text: string): Fillable
-  getByPlaceholder?(text: string): Fillable
+  getByRole?(role: string, opts?: { name?: string; exact?: boolean }): WorkflowLocatorLike
+  getByLabel?(text: string, opts?: { exact?: boolean }): Fillable
+  getByPlaceholder?(text: string, opts?: { exact?: boolean }): Fillable
+  getByTestId?(text: string): WorkflowLocatorLike
+  locator?(selector: string): WorkflowLocatorLike
   keyboard?: { press(key: string): Promise<void> }
   mouse?: { wheel(dx: number, dy: number): Promise<void> }
   goBack?(opts?: unknown): Promise<unknown>
@@ -40,6 +58,7 @@ export type CdpSessionLike = {
 
 export type PageContextLike = {
   newCDPSession?(page: unknown): Promise<CdpSessionLike>
+  pages?(): PageLike[]
 }
 
 export type ContextLike = PageContextLike & {

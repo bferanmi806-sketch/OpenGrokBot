@@ -32,6 +32,8 @@ export type ApprovalRow = {
   items: string | null
   /** 操作者勾留下的那几项的下标（JSON 数组）；还没拍板或单个动作是 null */
   approved_items: string | null
+  /** A deterministic workflow approval must resume its in-memory continuation, never an LLM turn. */
+  workflow_run_id: string | null
 }
 
 /** 一批最多这么多项；每项一行，超长截断 */
@@ -209,18 +211,21 @@ export function createApproval(
     ruleId?: number
     /** 一批对象；有它的审批永远一件一问，不走规则 */
     items?: string[]
+    /** Identifies deterministic workflow approvals so they cannot fall through to the LLM. */
+    workflowRunId?: string
     now?: number
   },
 ): ApprovalRow {
   const at = input.now ?? Date.now()
   const auto = input.ruleId !== undefined && !input.items
   const info = db.prepare(
-    `INSERT INTO approvals (thread_id, bot_id, action, detail, kind, target, status, rule_id, created_at, resolved_at, items)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO approvals (thread_id, bot_id, action, detail, kind, target, status, rule_id, created_at, resolved_at, items, workflow_run_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     input.threadId, input.botId, input.action, input.detail ?? '', input.kind ?? 'other', input.target ?? '',
     auto ? 'approved' : 'pending', auto ? input.ruleId! : null, at, auto ? at : null,
     input.items ? JSON.stringify(input.items) : null,
+    input.workflowRunId ?? null,
   )
   return getApproval(db, Number(info.lastInsertRowid))!
 }
