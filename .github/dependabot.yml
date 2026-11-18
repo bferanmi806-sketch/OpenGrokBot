@@ -5,6 +5,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # 显式写明 3 天冷却期（与 pnpm-workspace.yaml 的 minimumReleaseAge: 4320 一致）
+    cooldown:
+      default-days: 3
     groups:
       minor-and-patch:
         update-types: [minor, patch]

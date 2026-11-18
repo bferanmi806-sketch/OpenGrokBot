@@ -2,3 +2,6 @@ packages:
   - gateway
   - web
   - desktop
+
+# 与 Dependabot 默认 3 天冷却期（4320 分钟）对齐：避免本地更新把刚发不到 3 天的传递依赖写进锁文件，导致周更任务报错。
+minimumReleaseAge: 4320
