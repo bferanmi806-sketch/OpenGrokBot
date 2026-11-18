@@ -7,6 +7,7 @@ import type { PageLike } from '../src/browser-page.js'
 import { createFakeComputer } from '../src/computer.js'
 import { createRule, getApproval } from '../src/approvals.js'
 import { ensureDmThread, openDb, upsertBot } from '../src/db.js'
+import type { GatewayEvent, Hub } from '../src/hub.js'
 import type { LLM } from '../src/llm.js'
 import { createPool } from '../src/pool.js'
 import { createApp } from '../src/server.js'
@@ -14,7 +15,7 @@ import { saveWorkflowTrace } from '../src/workflows.js'
 
 const bot = { id: 'researcher', name: 'Scout', role: 'research', emoji: '🔎', soul_path: '' }
 
-function setup(options: { click?: (label: string) => Promise<void> } = {}) {
+function setup(options: { click?: (label: string) => Promise<void>; hub?: Hub } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'osb-workflow-runner-'))
   const db = openDb(':memory:')
   upsertBot(db, bot)
@@ -46,8 +47,16 @@ function setup(options: { click?: (label: string) => Promise<void> } = {}) {
   const pool = createPool({ dataDir, makeComputer: async () => computer })
   const chat = vi.fn(async () => ({ content: 'ok', toolCalls: [], raw: { role: 'assistant' as const, content: 'ok' } }))
   const llm: LLM = { chat }
-  const app = createApp({ db, llm, pool })
+  const app = createApp({ db, llm, pool, ...(options.hub ? { hub: options.hub } : {}) })
   return { dataDir, db, pool, app, calls, chat, llm }
+}
+
+function collectingHub(events: GatewayEvent[]): Hub {
+  return { add: () => {}, remove: () => {}, broadcast: (event) => events.push(event), size: () => 0 }
+}
+
+function statusStates(events: GatewayEvent[]): string[] {
+  return events.flatMap((event) => event.type === 'status' && event.botId === bot.id ? [event.state] : [])
 }
 
 const send = (app: ReturnType<typeof createApp>['app'], method: string, path: string, body?: unknown) => app.request(path, {
@@ -86,24 +95,18 @@ describe('workflow replay API', () => {
     expect(await started.json()).toMatchObject({ status: 'running' })
 
     await vi.waitFor(() => expect(state.db.prepare("SELECT count(*) AS n FROM approvals WHERE status = 'pending'").get()).toMatchObject({ n: 1 }))
-    const first = state.db.prepare("SELECT id FROM approvals WHERE status = 'pending'").get() as { id: number }
-    expect(state.calls.some((call) => call.startsWith('fill:'))).toBe(false)
+    const approval = state.db.prepare("SELECT id FROM approvals WHERE status = 'pending'").get() as { id: number }
+    expect(state.calls).toContain(`fill:Recipient:${runtimeValue}`)
+    expect(state.calls.some((call) => call.startsWith('click:'))).toBe(false)
     expect(state.chat).not.toHaveBeenCalled()
     const queuedTurn = await send(state.app.app, 'POST', `/api/threads/dm:${bot.id}/messages`, { text: 'wait until the workflow ends' })
     expect(queuedTurn.status).toBe(202)
     expect(state.chat).not.toHaveBeenCalled()
 
-    const firstDecision = await send(state.app.app, 'POST', `/api/approvals/${first.id}`, { decision: 'approve' })
-    expect(firstDecision.status).toBe(202)
-    await vi.waitFor(() => expect(state.calls).toContain(`fill:Recipient:${runtimeValue}`))
-    await vi.waitFor(() => expect(state.db.prepare("SELECT count(*) AS n FROM approvals WHERE status = 'pending'").get()).toMatchObject({ n: 1 }))
-    const second = state.db.prepare("SELECT id FROM approvals WHERE status = 'pending'").get() as { id: number }
     // Even with a standing rule for the reviewed destination, a dynamic recipient is never auto-approved.
-    expect(getApproval(state.db, second.id)?.status).toBe('pending')
-    expect(state.calls.some((call) => call.startsWith('click:'))).toBe(false)
-
-    const secondDecision = await send(state.app.app, 'POST', `/api/approvals/${second.id}`, { decision: 'approve' })
-    expect(secondDecision.status).toBe(202)
+    expect(getApproval(state.db, approval.id)?.status).toBe('pending')
+    const decision = await send(state.app.app, 'POST', `/api/approvals/${approval.id}`, { decision: 'approve' })
+    expect(decision.status).toBe(202)
     await vi.waitFor(() => expect(state.calls.filter((call) => call === 'click:Send')).toHaveLength(1))
     await vi.waitFor(() => expect(state.chat).toHaveBeenCalledTimes(1)) // The queued operator turn runs only after replay releases the lane.
 
@@ -126,7 +129,10 @@ describe('workflow replay API', () => {
     })
     const saved = saveWorkflowTrace(state.db, bot.id, {
       format: 'opensuperbot.workflow', version: 1, title: 'Fill form', steps: [
-        { type: 'fill', target: { candidates: [{ label: 'Password' }] }, value: { kind: 'placeholder', key: 'password' } },
+        {
+          type: 'fill', target: { candidates: [{ label: 'Password' }] }, value: { kind: 'placeholder', key: 'password' },
+          approval: { kind: 'other', target: 'Password field', action: 'Fill the password field' },
+        },
       ],
     })
     const started = await send(state.app.app, 'POST', `/api/bots/${bot.id}/workflows/${saved.id}/run`, { bindings: { password: 'memory-only' } })
@@ -149,6 +155,115 @@ describe('workflow replay API', () => {
     expect(stopped.status).toBe(204)
     expect(getApproval(state.db, pending.id)?.status).toBe('discarded')
     expect(state.app.isBusy(bot.id)).toBe(false)
+    expect(state.chat).not.toHaveBeenCalled()
+  })
+
+  it('broadcasts workflow presence while running, waiting for approval, resuming, and finishing', async () => {
+    const events: GatewayEvent[] = []
+    const state = setup({ hub: collectingHub(events) })
+    cleanups.push(async () => {
+      state.app.stopAll()
+      await state.pool.disposeAll()
+      state.db.close()
+      await rm(state.dataDir, { recursive: true, force: true })
+    })
+    const saved = saveWorkflowTrace(state.db, bot.id, {
+      format: 'opensuperbot.workflow', version: 1, title: 'Submit form', steps: [
+        {
+          type: 'click', target: { candidates: [{ label: 'Submit' }] },
+          approval: { kind: 'email', target: 'recipient@example.test', action: 'Submit the form' },
+        },
+      ],
+    })
+
+    const started = await send(state.app.app, 'POST', `/api/bots/${bot.id}/workflows/${saved.id}/run`)
+    expect(started.status).toBe(202)
+    expect(state.app.hello()).toEqual({ type: 'hello', statuses: { [bot.id]: 'thinking' } })
+    await vi.waitFor(() => expect(state.db.prepare("SELECT count(*) AS n FROM approvals WHERE status = 'pending'").get()).toMatchObject({ n: 1 }))
+    expect(statusStates(events)).toEqual(['thinking', 'waiting'])
+    expect(state.app.hello()).toEqual({ type: 'hello', statuses: { [bot.id]: 'waiting' } })
+
+    const approval = state.db.prepare("SELECT id FROM approvals WHERE status = 'pending'").get() as { id: number }
+    const approved = await send(state.app.app, 'POST', `/api/approvals/${approval.id}`, { decision: 'approve' })
+    expect(approved.status).toBe(202)
+    await vi.waitFor(() => expect(state.app.isBusy(bot.id)).toBe(false))
+
+    expect(statusStates(events)).toEqual(['thinking', 'waiting', 'thinking', 'idle'])
+    expect(state.app.hello()).toEqual({ type: 'hello', statuses: {} })
+  })
+
+  it('Thread Stop discards a pending workflow approval and releases its lane', async () => {
+    const events: GatewayEvent[] = []
+    const state = setup({ hub: collectingHub(events) })
+    cleanups.push(async () => {
+      state.app.stopAll()
+      await state.pool.disposeAll()
+      state.db.close()
+      await rm(state.dataDir, { recursive: true, force: true })
+    })
+    const saved = saveWorkflowTrace(state.db, bot.id, {
+      format: 'opensuperbot.workflow', version: 1, title: 'Submit form', steps: [
+        {
+          type: 'click', target: { candidates: [{ label: 'Submit' }] },
+          approval: { kind: 'email', target: 'recipient@example.test', action: 'Submit the form' },
+        },
+      ],
+    })
+    const started = await send(state.app.app, 'POST', `/api/bots/${bot.id}/workflows/${saved.id}/run`)
+    expect(started.status).toBe(202)
+    await vi.waitFor(() => expect(state.db.prepare("SELECT count(*) AS n FROM approvals WHERE status = 'pending'").get()).toMatchObject({ n: 1 }))
+    const approval = state.db.prepare("SELECT id FROM approvals WHERE status = 'pending'").get() as { id: number }
+
+    const stopped = await send(state.app.app, 'POST', `/api/threads/dm:${bot.id}/stop`)
+    expect(stopped.status).toBe(200)
+    expect(await stopped.json()).toEqual({ stopped: 1 })
+    expect(getApproval(state.db, approval.id)?.status).toBe('discarded')
+    expect(state.app.isBusy(bot.id)).toBe(false)
+    expect(state.calls).not.toContain('click:Submit')
+    expect(statusStates(events)).toEqual(['thinking', 'waiting', 'idle'])
+    expect(state.chat).not.toHaveBeenCalled()
+  })
+
+  it('Thread Stop aborts a running workflow and keeps presence until the current action unwinds', async () => {
+    let actionStarted!: () => void
+    let finishAction!: () => void
+    const startedAction = new Promise<void>((resolve) => { actionStarted = resolve })
+    const pendingAction = new Promise<void>((resolve) => { finishAction = resolve })
+    const events: GatewayEvent[] = []
+    const state = setup({
+      hub: collectingHub(events),
+      click: async (label) => { if (label === 'Continue') { actionStarted(); await pendingAction } },
+    })
+    cleanups.push(async () => {
+      finishAction()
+      state.app.stopAll()
+      await state.pool.disposeAll()
+      state.db.close()
+      await rm(state.dataDir, { recursive: true, force: true })
+    })
+    createRule(state.db, { botId: bot.id, kind: 'email', target: 'recipient@example.test', duration: 'always', now: Date.now() })
+    const saved = saveWorkflowTrace(state.db, bot.id, {
+      format: 'opensuperbot.workflow', version: 1, title: 'Continue form', steps: [
+        {
+          type: 'click', target: { candidates: [{ label: 'Continue' }] },
+          approval: { kind: 'email', target: 'recipient@example.test', action: 'Continue the form' },
+        },
+      ],
+    })
+    const started = await send(state.app.app, 'POST', `/api/bots/${bot.id}/workflows/${saved.id}/run`)
+    expect(started.status).toBe(202)
+    await startedAction
+    expect(state.app.isBusy(bot.id)).toBe(true)
+    expect(state.app.hello()).toEqual({ type: 'hello', statuses: { [bot.id]: 'thinking' } })
+    const summary = await send(state.app.app, 'GET', '/api/summary')
+    expect(await summary.json()).toMatchObject({ working: 1 })
+
+    const stopped = await send(state.app.app, 'POST', `/api/threads/dm:${bot.id}/stop`)
+    expect(await stopped.json()).toEqual({ stopped: 1 })
+    expect(state.app.isBusy(bot.id)).toBe(true)
+    finishAction()
+    await vi.waitFor(() => expect(state.app.isBusy(bot.id)).toBe(false))
+    expect(statusStates(events)).toEqual(['thinking', 'idle'])
     expect(state.chat).not.toHaveBeenCalled()
   })
 
@@ -202,7 +317,10 @@ describe('workflow replay API', () => {
     })
     const saved = saveWorkflowTrace(state.db, bot.id, {
       format: 'opensuperbot.workflow', version: 1, title: 'Send form', steps: [
-        { type: 'click', target: { candidates: [{ label: 'Submit' }] } },
+        {
+          type: 'click', target: { candidates: [{ label: 'Submit' }] },
+          approval: { kind: 'other', target: 'Submit button', action: 'Submit the form' },
+        },
       ],
     })
     const started = await send(state.app.app, 'POST', `/api/bots/${bot.id}/workflows/${saved.id}/run`)
@@ -211,18 +329,29 @@ describe('workflow replay API', () => {
     const approval = state.db.prepare("SELECT id FROM approvals WHERE status = 'pending'").get() as { id: number }
     state.app.stopAll() // Simulate process shutdown: release the lane and forget runtime continuation.
 
-    const restarted = createApp({ db: state.db, llm: state.llm, pool: state.pool })
+    const restartedEvents: GatewayEvent[] = []
+    const restarted = createApp({ db: state.db, llm: state.llm, pool: state.pool, hub: collectingHub(restartedEvents) })
     cleanups.push(async () => { restarted.stopAll() })
+    expect(restarted.hello()).toEqual({ type: 'hello', statuses: { [bot.id]: 'waiting' } })
     const resumed = await send(restarted.app, 'POST', `/api/approvals/${approval.id}`, { decision: 'approve' })
     expect(resumed.status).toBe(409)
-    expect(await resumed.json()).toMatchObject({ error: expect.stringContaining('gateway restart') })
+    const resumeError = await resumed.json()
+    expect(resumeError).toMatchObject({ error: expect.stringContaining('gateway restart') })
     expect(getApproval(state.db, approval.id)?.status).toBe('pending')
     expect(state.calls.some((call) => call.startsWith('click:'))).toBe(false)
+    expect(state.chat).not.toHaveBeenCalled()
+
+    const thumbsUp = await send(restarted.app, 'POST', `/api/threads/dm:${bot.id}/messages`, { text: '👍' })
+    expect(thumbsUp.status).toBe(409)
+    expect(await thumbsUp.json()).toEqual(resumeError)
+    expect(getApproval(state.db, approval.id)?.status).toBe('pending')
     expect(state.chat).not.toHaveBeenCalled()
 
     const discarded = await send(restarted.app, 'POST', `/api/approvals/${approval.id}`, { decision: 'discard' })
     expect(discarded.status).toBe(202)
     expect(getApproval(state.db, approval.id)?.status).toBe('discarded')
+    expect(restarted.hello()).toEqual({ type: 'hello', statuses: {} })
+    expect(statusStates(restartedEvents)).toEqual(['idle'])
     expect(state.chat).not.toHaveBeenCalled()
   })
 })

@@ -72,6 +72,8 @@ export type AppDeps = {
   computers?: ComputersInfo
   dataDir?: string
   scheduler?: Scheduler
+  /** Tests and embedders may observe gateway events without a WebSocket client. */
+  hub?: Hub
   chiefId?: string
   a2aRules?: A2ARules
   /** 网关令牌。main.ts 总会传；只有单元测试会省略它来跳过鉴权。 */
@@ -148,6 +150,7 @@ const MAX_HOOK_BYTES = 1_000_000
 
 /** 回合这样收场，这位同事就算「卡住了」，直到下一回合 */
 const BLOCKING: ReadonlySet<TurnOutcome> = new Set(['error', 'budget', 'limit'])
+const WORKFLOW_LOST_APPROVAL = 'workflow continuation was lost after a gateway restart; discard this approval and start a new run'
 
 function describeWebhookBody(raw: string, contentType: string | undefined): string {
   let body = raw.trim()
@@ -221,7 +224,7 @@ export function createApp(deps: AppDeps): GatewayApp {
   const chiefId = deps.chiefId ?? 'chief'
   const a2aRules = deps.a2aRules ?? { chiefId, pairs: [] }
   const now = deps.now ?? (() => new Date())
-  const hub = createHub()
+  const hub = deps.hub ?? createHub()
   const app = new Hono()
   // 车道只说「忙 / 不忙」；不忙的时候是在等你、卡住了，还是真的闲着，由 presenceOf 看库和上一回合的收场来定
   const turns = createTurnQueue((botId) => publishPresence(botId))
@@ -399,7 +402,7 @@ export function createApp(deps: AppDeps): GatewayApp {
   }
 
   function presenceOf(botId: string): Presence {
-    if (turns.isWorking(botId)) return 'thinking'
+    if (turns.isWorking(botId) || workflowRuns.get(botId)?.phase.kind === 'running') return 'thinking'
     if (waitsOnOperator(db, botId)) return 'waiting'
     const outcome = lastOutcome.get(botId)
     return outcome && BLOCKING.has(outcome) ? 'blocked' : 'idle'
@@ -643,6 +646,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       active.released = true
       active.releaseTurns()
     }
+    publishPresence(active.botId)
   }
 
   function isAwaitingWorkflowApproval(active: ActiveWorkflowRun, approvalId: number): boolean {
@@ -683,12 +687,14 @@ export function createApp(deps: AppDeps): GatewayApp {
         ...(!rule && reason ? { rememberBlocked: blockText(reason), rememberReason: reason } : {}),
       },
     }))
+    if (!rule) publishPresence(active.botId)
     return rule ? { status: 'approved' as const } : { status: 'waiting' as const, approvalId: approval.id }
   }
 
   async function continueWorkflowRun(active: ActiveWorkflowRun, startIndex = 0, approvedStepIndex?: number): Promise<void> {
     if (workflowRuns.get(active.botId) !== active || active.phase.kind === 'finished') return
     active.phase = { kind: 'running', ...(approvedStepIndex === undefined ? {} : { approvedStepIndex }) }
+    publishPresence(active.botId)
     try {
       const computer = await pool?.get(active.botId)
       if (!computer?.workflowPage) {
@@ -842,6 +848,7 @@ export function createApp(deps: AppDeps): GatewayApp {
         })
       }
     }
+    publishPresence(approval.bot_id)
     return 'ok'
   }
 
@@ -1192,6 +1199,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       bindings, rulesAllowed, releaseTurns, controller: new AbortController(), phase: { kind: 'running' }, released: false,
     }
     workflowRuns.set(botId, active)
+    publishPresence(botId)
     void continueWorkflowRun(active)
     return c.json({ runId: active.runId, status: 'running' }, 202)
   })
@@ -1428,10 +1436,20 @@ export function createApp(deps: AppDeps): GatewayApp {
 
   app.get('/api/threads/:threadId/messages', (c) => c.json(listMessages(db, c.req.param('threadId'))))
 
-  app.post('/api/threads/:threadId/stop', (c) => {
+  app.post('/api/threads/:threadId/stop', async (c) => {
     const threadId = c.req.param('threadId')
     // 先停轮次（群里剩下的人不再发言），再停正在跑和排着队的回合；排着队的消息也不再回答
-    const stopped = rounds.stopThread(threadId) + turns.stopThread(threadId)
+    let stopped = rounds.stopThread(threadId) + turns.stopThread(threadId)
+    for (const active of workflowRuns.values()) {
+      if (active.threadId !== threadId || active.phase.kind === 'finished') continue
+      if (active.phase.kind === 'awaiting_approval') {
+        const outcome = await settleApproval(active.phase.approvalId, 'discard')
+        if (outcome === 'ok') stopped++
+      } else if (!active.controller.signal.aborted) {
+        active.controller.abort()
+        stopped++
+      }
+    }
     waiting.delete(threadId)
     return c.json({ stopped })
   })
@@ -1465,7 +1483,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     if (outcome === 'gone') return c.json({ error: 'unknown approval' }, 404)
     if (outcome === 'settled') return c.json({ error: 'already decided' }, 409)
     if (outcome === 'workflow-lost') {
-      return c.json({ error: 'workflow continuation was lost after a gateway restart; discard this approval and start a new run' }, 409)
+      return c.json({ error: WORKFLOW_LOST_APPROVAL }, 409)
     }
     if (outcome === 'bad-items') {
       return c.json({ error: 'items must list one or more distinct item positions of a batch you are approving' }, 400)
@@ -1514,7 +1532,8 @@ export function createApp(deps: AppDeps): GatewayApp {
     if (!files.length && isThumbsUp(text)) {
       const pending = latestPendingApproval(db, threadId)
       if (pending) {
-        await settleApproval(pending.id, 'approve')
+        const outcome = await settleApproval(pending.id, 'approve')
+        if (outcome === 'workflow-lost') return c.json({ error: WORKFLOW_LOST_APPROVAL }, 409)
         return c.json({ ok: true, approved: true }, 202)
       }
     }
@@ -1534,7 +1553,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     hub,
     hello: () => ({ type: 'hello', statuses: presenceSnapshot() }),
     runRoutine,
-    isBusy: (botId) => turns.isBusy(botId) || workflowRecordings.has(botId),
+    isBusy: (botId) => turns.isBusy(botId) || workflowRuns.has(botId) || workflowRecordings.has(botId),
     sweepUploads: async () => (uploads ? uploads.sweep(markUploadRemoved) : { orphans: 0, strays: 0, missing: 0 }),
     stopAll: () => {
       rounds.stopAll()

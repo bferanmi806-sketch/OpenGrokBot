@@ -7,6 +7,8 @@ import type { BotComputer, PageLink, Shot } from './computer.js'
 
 export type WorkflowLocatorLike = {
   first(): WorkflowElementLike
+  /** Playwright 1.51+ can select only visible matches before choosing the first one. */
+  filter?(opts: { visible: true }): WorkflowLocatorLike
 }
 
 export type WorkflowElementLike = {
@@ -19,8 +21,8 @@ export type WorkflowElementLike = {
   press?(key: string, opts?: unknown): Promise<void>
 }
 
-type Clickable = { first(): WorkflowElementLike & { click(opts?: unknown): Promise<void> } }
-type Fillable = { first(): WorkflowElementLike & { fill(text: string, opts?: unknown): Promise<void> } }
+type Clickable = WorkflowLocatorLike & { first(): WorkflowElementLike & { click(opts?: unknown): Promise<void> } }
+type Fillable = WorkflowLocatorLike & { first(): WorkflowElementLike & { fill(text: string, opts?: unknown): Promise<void> } }
 
 export type PageLike = {
   goto(url: string, opts?: unknown): Promise<unknown>
@@ -43,6 +45,8 @@ export type PageLike = {
   evaluate?(script: string): Promise<unknown>
   context?(): PageContextLike
   mainFrame?(): unknown
+  close?(): Promise<void>
+  isClosed?(): boolean
   on?(event: 'framenavigated' | 'close' | 'popup', listener: (value?: unknown) => void): void
   off?(event: 'framenavigated' | 'close' | 'popup', listener: (value?: unknown) => void): void
   viewportSize(): { width: number; height: number } | null
@@ -59,6 +63,8 @@ export type CdpSessionLike = {
 export type PageContextLike = {
   newCDPSession?(page: unknown): Promise<CdpSessionLike>
   pages?(): PageLike[]
+  on?(event: 'page', listener: (page: PageLike) => void): void
+  off?(event: 'page', listener: (page: PageLike) => void): void
 }
 
 export type ContextLike = PageContextLike & {
@@ -134,6 +140,8 @@ function missing(what: string): never {
  */
 export type BrowserSession = {
   page(): Promise<PageLike>
+  /** Replay uses the same selected page as ordinary computer calls; a popup cannot silently replace it. */
+  workflowPage(): Promise<PageLike>
   context(): Promise<ContextLike>
   /** idle = 还没开过；open = 连着；gone = 开过但浏览器没了（下次 page() 会重开）。不会去开新的。 */
   state(): 'idle' | 'open' | 'gone'
@@ -145,11 +153,13 @@ export function createBrowserSession(open: () => Promise<BrowserLike>): BrowserS
   let pending: Promise<BrowserLike> | null = null
   let everOpened = false
   let generation = 0
+  let selectedPage: PageLike | null = null
 
   function dropIfGone(): void {
     if (browser?.isConnected && !browser.isConnected()) {
       browser = null
       pending = null
+      selectedPage = null
     }
   }
 
@@ -179,9 +189,19 @@ export function createBrowserSession(open: () => Promise<BrowserLike>): BrowserS
     context,
     async page() {
       const ctx = await context()
-      // 点开新标签页之后，用户（和 bot）要接着看的就是最新的那个
       const pages = ctx.pages()
-      return pages[pages.length - 1] ?? (await ctx.newPage())
+      // Ordinary browser actions follow the most recently opened tab, preserving normal browsing.
+      selectedPage = [...pages].reverse().find((candidate) => !candidate.isClosed?.()) ?? await ctx.newPage()
+      return selectedPage
+    },
+    async workflowPage() {
+      const ctx = await context()
+      const pages = ctx.pages()
+      // A replay pins the page selected when it starts. Replace it only after it closes, such as
+      // when the local browser is relaunched; newly opened tabs are handled by the replay guard.
+      if (selectedPage && !selectedPage.isClosed?.() && pages.includes(selectedPage)) return selectedPage
+      selectedPage = [...pages].reverse().find((candidate) => !candidate.isClosed?.()) ?? await ctx.newPage()
+      return selectedPage
     },
     state() {
       dropIfGone()
@@ -194,6 +214,7 @@ export function createBrowserSession(open: () => Promise<BrowserLike>): BrowserS
       browser = null
       pending = null
       everOpened = false
+      selectedPage = null
       if (b) await b.close().catch(() => {}) // 断开失败不该拖垮调用方
       else if (p) await p.then((opened) => opened.close()).catch(() => {})
     },
@@ -229,7 +250,9 @@ export function pageOperations(page: () => Promise<PageLike>): PageOperations {
       const bySelector = () => p.click(target, { timeout: 5_000 })
       const byText = async () => {
         if (!p.getByText) throw new Error(`no element matches ${target}`)
-        await p.getByText(target).first().click({ timeout: 5_000 })
+        const first = p.getByText(target).first()
+        if (!first.click) throw new Error(`no element matches ${target}`)
+        await first.click({ timeout: 5_000 })
       }
       await firstThatWorks(looksLikeSelector(target) ? [bySelector, byText] : [byText, bySelector])
       await p.waitForLoadState?.('domcontentloaded', { timeout: 5_000 }).catch(() => {})
@@ -244,11 +267,15 @@ export function pageOperations(page: () => Promise<PageLike>): PageOperations {
       }
       const byLabel = async () => {
         if (!p.getByLabel) throw new Error(`no field labelled ${target}`)
-        await p.getByLabel(target).first().fill(text, { timeout: 3_000 })
+        const first = p.getByLabel(target).first()
+        if (!first.fill) throw new Error(`no field labelled ${target}`)
+        await first.fill(text, { timeout: 3_000 })
       }
       const byPlaceholder = async () => {
         if (!p.getByPlaceholder) throw new Error(`no field with placeholder ${target}`)
-        await p.getByPlaceholder(target).first().fill(text, { timeout: 3_000 })
+        const first = p.getByPlaceholder(target).first()
+        if (!first.fill) throw new Error(`no field with placeholder ${target}`)
+        await first.fill(text, { timeout: 3_000 })
       }
       await firstThatWorks(looksLikeSelector(target)
         ? [bySelector, byLabel, byPlaceholder]

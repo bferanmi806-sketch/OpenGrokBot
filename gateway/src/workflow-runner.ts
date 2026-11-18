@@ -1,4 +1,4 @@
-import type { PageLike, WorkflowElementLike } from './browser-page.js'
+import type { PageContextLike, PageLike, WorkflowElementLike } from './browser-page.js'
 import type { ApprovalKind } from './approvals.js'
 import { sanitizeWorkflowUrl, type WorkflowApproval, type WorkflowStep, type WorkflowTarget, type WorkflowTrace } from './workflows.js'
 
@@ -8,6 +8,10 @@ const MAX_WORKFLOW_BINDINGS = 1_000
 const MAX_WORKFLOW_BINDING_CHARS = 2_000
 const LOCATOR_TIMEOUT_MS = 3_000
 const ACTION_TIMEOUT_MS = 10_000
+// Keep this aligned with workflow-recorder's navigation expectation window.
+const EXPECTED_URL_TIMEOUT_MS = 5_000
+const URL_POLL_INTERVAL_MS = 25
+const POPUP_SETTLE_WINDOW_MS = 250
 
 export type WorkflowBindings = ReadonlyMap<string, string>
 
@@ -101,20 +105,42 @@ function targetLocator(page: PageLike, candidate: WorkflowTarget['candidates'][n
   else if ('text' in candidate) locator = page.getByText?.(candidate.text, { exact: true })
   else if ('testId' in candidate) locator = page.getByTestId?.(candidate.testId)
   else locator = page.locator?.(candidate.css)
-  return locator?.first() ?? null
+  return locator ? (locator.filter?.({ visible: true }) ?? locator).first() : null
 }
 
-async function firstVisibleTarget(page: PageLike, target: WorkflowTarget): Promise<WorkflowElementLike> {
+async function waitForVisible(locator: WorkflowElementLike, signal?: AbortSignal): Promise<void> {
+  if (!locator.waitFor) throw new RunnerError('unsupported_browser')
+  if (!signal) return locator.waitFor({ state: 'visible', timeout: LOCATOR_TIMEOUT_MS })
+
+  let onAbort: (() => void) | undefined
+  try {
+    await Promise.race([
+      locator.waitFor({ state: 'visible', timeout: LOCATOR_TIMEOUT_MS }),
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(new RunnerError('cancelled'))
+        if (signal.aborted) onAbort()
+        else signal.addEventListener('abort', onAbort, { once: true })
+      }),
+    ])
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort)
+  }
+}
+
+async function firstVisibleTarget(page: PageLike, target: WorkflowTarget, signal?: AbortSignal): Promise<WorkflowElementLike> {
   let hasLocator = false
   for (const candidate of target.candidates) {
+    if (signal?.aborted) throw new RunnerError('cancelled')
     const locator = targetLocator(page, candidate)
     if (!locator) continue
     hasLocator = true
-    if (!locator.waitFor) throw new RunnerError('unsupported_browser')
     try {
-      await locator.waitFor({ state: 'visible', timeout: LOCATOR_TIMEOUT_MS })
+      await waitForVisible(locator, signal)
+      if (signal?.aborted) throw new RunnerError('cancelled')
       return locator
-    } catch {
+    } catch (error) {
+      if (error instanceof RunnerError) throw error
+      if (signal?.aborted) throw new RunnerError('cancelled')
       // Visibility checks have no action side effects, so trying the next recorded strategy is safe.
     }
   }
@@ -128,33 +154,151 @@ class RunnerError extends Error {
 function approvalFor(step: WorkflowStep, index: number, total: number, rulesAllowed: boolean): WorkflowApprovalRequest | null {
   if (step.type === 'navigate' || step.type === 'unrecorded-popup') return null
   const metadata: WorkflowApproval | undefined = step.approval
+  if (!metadata) return null
   return {
     step: index + 1,
     steps: total,
-    action: metadata?.action ?? `run workflow step ${index + 1}: ${step.type}`,
-    kind: metadata?.kind ?? 'other',
-    target: metadata?.target ?? '',
-    rulesAllowed: rulesAllowed && metadata !== undefined,
+    action: metadata.action ?? `run workflow step ${index + 1}: ${step.type}`,
+    kind: metadata.kind,
+    target: metadata.target,
+    rulesAllowed,
+  }
+}
+
+type WorkflowPageGuard = {
+  getPage(): Promise<PageLike>
+  popupOpened(): boolean
+  dispose(): Promise<void>
+}
+
+function closePage(value: unknown): Promise<void> {
+  if (typeof value !== 'object' || value === null || !('close' in value) || typeof value.close !== 'function') return Promise.resolve()
+  return Promise.resolve(value.close.call(value)).then(() => {}, () => {})
+}
+
+function pageIsClosed(page: PageLike): boolean {
+  if (page.isClosed) return page.isClosed()
+  const pages = page.context?.().pages?.()
+  return pages !== undefined && !pages.includes(page)
+}
+
+/** Pin one page for a replay and quarantine any page opened while it runs. */
+function createWorkflowPageGuard(getPageFromSession: () => Promise<PageLike>): WorkflowPageGuard {
+  let currentPage: PageLike | null = null
+  let currentContext: PageContextLike | undefined
+  let baselinePages = new Set<PageLike>()
+  let popup = false
+  const closingPopups: Promise<void>[] = []
+  const closingPages = new Set<object>()
+  let pagePopupListener: ((value?: unknown) => void) | undefined
+  let contextPageListener: ((page: PageLike) => void) | undefined
+
+  const detach = () => {
+    if (currentPage && pagePopupListener) currentPage.off?.('popup', pagePopupListener)
+    if (currentContext && contextPageListener) currentContext.off?.('page', contextPageListener)
+    pagePopupListener = undefined
+    contextPageListener = undefined
+    currentContext = undefined
+    baselinePages = new Set()
+  }
+
+  const rejectPopup = (openedPage?: unknown) => {
+    popup = true
+    if (typeof openedPage === 'object' && openedPage !== null && !closingPages.has(openedPage)) {
+      closingPages.add(openedPage)
+      closingPopups.push(closePage(openedPage))
+    }
+  }
+
+  const attach = (page: PageLike) => {
+    currentContext = page.context?.()
+    baselinePages = new Set(currentContext?.pages?.() ?? [page])
+    pagePopupListener = (openedPage) => rejectPopup(openedPage)
+    contextPageListener = (openedPage) => {
+      if (!baselinePages.has(openedPage) && (!currentPage || !pageIsClosed(currentPage))) rejectPopup(openedPage)
+    }
+    page.on?.('popup', pagePopupListener)
+    currentContext?.on?.('page', contextPageListener)
+  }
+
+  return {
+    async getPage() {
+      if (popup) throw new RunnerError('popup_opened')
+      const nextPage = await getPageFromSession().catch(() => { throw new RunnerError('browser_unavailable') })
+      if (currentPage && nextPage !== currentPage) {
+        if (!pageIsClosed(currentPage)) {
+          rejectPopup(nextPage)
+          throw new RunnerError('popup_opened')
+        }
+        detach()
+        currentPage = nextPage
+        attach(nextPage)
+      } else if (!currentPage) {
+        currentPage = nextPage
+        attach(nextPage)
+      }
+
+      if (popup) throw new RunnerError('popup_opened')
+      const unexpectedPages = currentContext?.pages?.().filter((page) => !baselinePages.has(page) && !pageIsClosed(currentPage!)) ?? []
+      if (unexpectedPages.length > 0) {
+        for (const page of unexpectedPages) rejectPopup(page)
+        throw new RunnerError('popup_opened')
+      }
+      return currentPage
+    },
+    popupOpened: () => popup,
+    async dispose() {
+      detach()
+      await Promise.all(closingPopups)
+    },
+  }
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', finish)
+      resolve()
+    }
+    const timer = setTimeout(finish, ms)
+    signal?.addEventListener('abort', finish, { once: true })
+  })
+}
+
+async function waitForExpectedUrl(
+  expectedUrl: string,
+  deadline: number,
+  pageGuard: WorkflowPageGuard,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (;;) {
+    if (signal?.aborted) throw new RunnerError('cancelled')
+    if (pageGuard.popupOpened()) throw new RunnerError('popup_opened')
+    const page = await pageGuard.getPage()
+    if (Date.now() <= deadline && sanitizeWorkflowUrl(page.url()) === expectedUrl) return
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw new RunnerError('url_mismatch')
+    await delay(Math.min(URL_POLL_INTERVAL_MS, remaining), signal)
   }
 }
 
 async function executeStep(
   step: WorkflowStep,
   index: number,
-  getPage: () => Promise<PageLike>,
+  pageGuard: WorkflowPageGuard,
   bindings: WorkflowBindings,
   signal?: AbortSignal,
 ): Promise<void> {
   if (signal?.aborted) throw new RunnerError('cancelled')
-  const page = await getPage().catch(() => { throw new RunnerError('browser_unavailable') })
-  let popupOpened = false
-  const onPopup = () => { popupOpened = true }
-  page.on?.('popup', onPopup)
+  let expectedUrlDeadline: number | undefined
   try {
+    const page = await pageGuard.getPage()
     if (step.type === 'navigate') {
       await page.goto(step.url, { waitUntil: 'domcontentloaded', timeout: 45_000 })
     } else if (step.type !== 'unrecorded-popup') {
-      const target = await firstVisibleTarget(page, step.target)
+      const target = await firstVisibleTarget(page, step.target, signal)
       switch (step.type) {
         case 'click':
           if (!target.click) throw new RunnerError('unsupported_browser')
@@ -192,18 +336,27 @@ async function executeStep(
         }
       }
     }
-    if (signal?.aborted) throw new RunnerError('cancelled')
-    if (popupOpened) throw new RunnerError('popup_opened')
     if (step.type !== 'navigate' && step.type !== 'unrecorded-popup' && step.expect) {
-      const current = await getPage().catch(() => { throw new RunnerError('browser_unavailable') })
-      if (sanitizeWorkflowUrl(current.url()) !== step.expect.url) throw new RunnerError('url_mismatch')
+      expectedUrlDeadline = Date.now() + EXPECTED_URL_TIMEOUT_MS
     }
+    if (signal?.aborted) throw new RunnerError('cancelled')
+    // A click, key press, toggle, or navigation handler can schedule window.open after its
+    // promise resolves. Keep listeners attached briefly, including after the final step.
+    if (step.type === 'navigate' || step.type === 'click' || step.type === 'check'
+      || step.type === 'uncheck' || step.type === 'press') {
+      await delay(POPUP_SETTLE_WINDOW_MS, signal)
+      if (signal?.aborted) throw new RunnerError('cancelled')
+    }
+    if (pageGuard.popupOpened()) throw new RunnerError('popup_opened')
+    if (step.type !== 'navigate' && step.type !== 'unrecorded-popup' && step.expect) {
+      await waitForExpectedUrl(step.expect.url, expectedUrlDeadline!, pageGuard, signal)
+    }
+    if (pageGuard.popupOpened()) throw new RunnerError('popup_opened')
   } catch (error) {
+    // All runner errors preserve their typed failure; browser exceptions become action failures.
     if (error instanceof RunnerError) throw error
     if (signal?.aborted) throw new RunnerError('cancelled')
     throw new RunnerError('action_failed')
-  } finally {
-    page.off?.('popup', onPopup)
   }
 }
 
@@ -220,28 +373,46 @@ export async function runWorkflow(trace: WorkflowTrace, options: {
   assertWorkflowReplayable(trace)
   const startIndex = options.startIndex ?? 0
   let stepsCompleted = startIndex
-  for (let index = startIndex; index < trace.steps.length; index++) {
-    if (options.signal?.aborted) return { status: 'failed', step: index + 1, code: 'cancelled', stepsCompleted }
-    const step = trace.steps[index]!
-    const approval = approvalFor(step, index, trace.steps.length, options.rulesAllowed)
-    if (approval && index !== options.approvedStepIndex) {
-      const decision = await options.authorize(approval)
-      if (decision.status === 'waiting') {
-        return { status: 'waiting', approvalId: decision.approvalId, step: index + 1, stepsCompleted }
+  const pageGuard = createWorkflowPageGuard(options.getPage)
+  try {
+    for (let index = startIndex; index < trace.steps.length; index++) {
+      if (options.signal?.aborted) return { status: 'failed', step: index + 1, code: 'cancelled', stepsCompleted }
+      const step = trace.steps[index]!
+      const started = Date.now()
+      try {
+        // Attach popup tracking before asking for approval, and keep it until this run exits.
+        await pageGuard.getPage()
+      } catch (error) {
+        const code = error instanceof RunnerError ? error.code : 'action_failed'
+        await reportStep(options.onStep, { index: index + 1, type: step.type, ok: false, durationMs: Date.now() - started })
+        return { status: 'failed', step: index + 1, code, stepsCompleted }
+      }
+
+      const approval = approvalFor(step, index, trace.steps.length, options.rulesAllowed)
+      if (approval && index !== options.approvedStepIndex) {
+        const decision = await options.authorize(approval)
+        if (pageGuard.popupOpened()) {
+          await reportStep(options.onStep, { index: index + 1, type: step.type, ok: false, durationMs: Date.now() - started })
+          return { status: 'failed', step: index + 1, code: 'popup_opened', stepsCompleted }
+        }
+        if (decision.status === 'waiting') {
+          return { status: 'waiting', approvalId: decision.approvalId, step: index + 1, stepsCompleted }
+        }
+      }
+      try {
+        await executeStep(step, index, pageGuard, options.bindings, options.signal)
+        await reportStep(options.onStep, { index: index + 1, type: step.type, ok: true, durationMs: Date.now() - started })
+        stepsCompleted++
+      } catch (error) {
+        const code = error instanceof RunnerError ? error.code : 'action_failed'
+        await reportStep(options.onStep, { index: index + 1, type: step.type, ok: false, durationMs: Date.now() - started })
+        return { status: 'failed', step: index + 1, code, stepsCompleted }
       }
     }
-    const started = Date.now()
-    try {
-      await executeStep(step, index, options.getPage, options.bindings, options.signal)
-      await reportStep(options.onStep, { index: index + 1, type: step.type, ok: true, durationMs: Date.now() - started })
-      stepsCompleted++
-    } catch (error) {
-      const code = error instanceof RunnerError ? error.code : 'action_failed'
-      await reportStep(options.onStep, { index: index + 1, type: step.type, ok: false, durationMs: Date.now() - started })
-      return { status: 'failed', step: index + 1, code, stepsCompleted }
-    }
+    return { status: 'completed', stepsCompleted }
+  } finally {
+    await pageGuard.dispose()
   }
-  return { status: 'completed', stepsCompleted }
 }
 
 async function reportStep(callback: ((event: WorkflowStepEvent) => void | Promise<void>) | undefined, event: WorkflowStepEvent): Promise<void> {
