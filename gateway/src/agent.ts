@@ -6,10 +6,11 @@ import {
 } from './approvals.js'
 import { checkBrowserUrl } from './browser-page.js'
 import type { BotComputer, Shot } from './computer.js'
+import { CONNECTOR_READ_TOOL_NAMES, isConnectorTool } from './connectors/tools.js'
 import { limitText, noticeText, type BudgetHit, type Notice } from './notices.js'
 import { insertMessage, listMessages, updateMessagePayload, type BotRow, type Db, type MessageRow } from './db.js'
-import type { ChatMsg, LLM, ToolCall, Usage } from './llm.js'
-import { buildSystemPrompt, timeNote, withTimeNote, type PromptRoutine } from './prompts.js'
+import type { ChatMsg, LLM, ToolCall, ToolDef, Usage } from './llm.js'
+import { buildSystemPrompt, timeNote, withTimeNote, type PromptConnector, type PromptRoutine } from './prompts.js'
 import { validateReportPayload } from './report.js'
 import { normalizeMode, type RoutineMode } from './routines.js'
 import { buildTools, OPERATOR_ONLY_TOOL_NAMES, WATCH_TOOL_NAMES } from './tools.js'
@@ -99,6 +100,15 @@ export type AgentDeps = {
   origin?: TurnOrigin
   /** 操作者发来的文件：传进历史里的附件消息，回一份怎么给模型看的说明。不传 = 只报文件名 */
   attachments?: (rows: MessageRow[]) => Promise<AttachmentBrief>
+  /** 这位同事已获授权的连接器列表（进系统提示词）与动态工具清单 */
+  connectors?: PromptConnector[]
+  connectorTools?: ToolDef[]
+  onConnectorTool?: (input: {
+    name: string
+    args: Record<string, unknown>
+    ruleBlock: RuleBlock | null
+    events: AgentEvents
+  }) => Promise<{ text: string; ok: boolean; tainted?: boolean }>
 }
 
 /**
@@ -159,10 +169,14 @@ export async function runTurn(
   try {
     const canRelay = Boolean(deps.onMessageBot)
     const rows = orderHistory(listMessages(db, threadId, HISTORY_LIMIT), opts.pendingIds, opts.hiddenIds)
-    // 模型眼前还摆着 webhook 载荷时，就算是操作者开的头也不认规则：载荷里的话可能正是在诱导它
-    const ruleBlock: RuleBlock | null = deps.origin !== 'operator' ? (deps.origin ?? 'unknown')
-      : rows.some((m) => m.kind === 'webhook') ? 'outside-data' : null
-    const ctx: TurnContext = { ...deps, ruleBlock }
+    // 模型眼前还摆着 webhook 载荷或本回合读过外部连接器内容时，就算是操作者开的头也不认规则：外部文字可能正是在诱导它
+    const hasWebhookHistory = rows.some((m) => m.kind === 'webhook')
+    let taintedByOutsideData = false
+    const computeRuleBlock = (): RuleBlock | null =>
+      deps.origin !== 'operator'
+        ? (deps.origin ?? 'unknown')
+        : (hasWebhookHistory || taintedByOutsideData) ? 'outside-data' : null
+    const ctx: TurnContext = { ...deps, ruleBlock: computeRuleBlock() }
     const attached = rows.filter((m) => m.kind === 'attachment')
     // 查不出来（盘坏了、没有上传目录）不拦回合：模型仍然知道有这么个文件，只是拿不到
     const brief = attached.length ? await deps.attachments?.(attached).catch(() => undefined) : undefined
@@ -172,7 +186,7 @@ export async function runTurn(
         role: 'system',
         content: buildSystemPrompt(bot, soul, {
           hasComputer, computer: deps.computer, memory: deps.memory, group: deps.group, canRelay, manual: deps.manual, routines: deps.routines,
-          skills: deps.onReadSkill ? deps.skills : undefined, language: deps.language,
+          connectors: deps.connectors, skills: deps.onReadSkill ? deps.skills : undefined, language: deps.language,
         }),
       },
       ...rows.map((m) => toChatMsg(m, bot.id, brief)),
@@ -185,7 +199,7 @@ export async function runTurn(
     const hasSkills = Boolean(deps.skills?.length && deps.onReadSkill)
     const tools = buildTools({
       hasComputer, canRelay, hasSkills, watch: deps.watch === true, shell: deps.computer?.shell, kind: deps.computer?.kind,
-      operatorTurn: deps.origin === 'operator',
+      operatorTurn: deps.origin === 'operator', connectorTools: deps.connectorTools,
     })
     const maxSteps = deps.maxSteps && deps.maxSteps > 0 ? Math.floor(deps.maxSteps) : DEFAULT_MAX_STEPS
     const turnMs = deps.turnTimeoutMs ?? DEFAULT_TURN_MS
@@ -211,7 +225,10 @@ export async function runTurn(
         let latestImage: string | undefined
         for (const call of turn.toolCalls) {
           if (signal?.aborted) return stopped(notify)
-          const outcome = await execToolCall(ctx, call, events, activity)
+          const outcome = await execToolCall(ctx, call, events, activity, () => {
+            taintedByOutsideData = true
+            ctx.ruleBlock = computeRuleBlock()
+          })
           messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.text })
           latestImage = outcome.image ?? latestImage
         }
@@ -364,7 +381,13 @@ const WORKFLOW_TOOL_NAMES = new Set([
 const MAX_OPTIONS = 6
 const MAX_OPTION_CHARS = 80
 
-async function execToolCall(deps: TurnContext, call: ToolCall, events: AgentEvents, activity: Activity): Promise<ToolOutcome> {
+async function execToolCall(
+  deps: TurnContext,
+  call: ToolCall,
+  events: AgentEvents,
+  activity: Activity,
+  onOutsideDataRead?: () => void,
+): Promise<ToolOutcome> {
   const args = (call.args ?? {}) as Record<string, unknown>
   const started = Date.now()
   const log = (ok: boolean) =>
@@ -406,6 +429,21 @@ async function execToolCall(deps: TurnContext, call: ToolCall, events: AgentEven
       const text = truncate(await execWorkflowTool(deps, call.name, args, events))
       log(true)
       return { text }
+    } catch (err) {
+      return failed(err)
+    }
+  }
+  if (isConnectorTool(call.name)) {
+    if (CONNECTOR_READ_TOOL_NAMES.has(call.name)) onOutsideDataRead?.()
+    if (!deps.onConnectorTool) {
+      log(false)
+      return { text: 'Connectors are not available on this gateway.' }
+    }
+    try {
+      const res = await deps.onConnectorTool({ name: call.name, args, ruleBlock: deps.ruleBlock, events })
+      if (res.tainted) onOutsideDataRead?.()
+      log(res.ok)
+      return { text: res.text }
     } catch (err) {
       return failed(err)
     }
@@ -495,6 +533,43 @@ function summarize(tool: string, args: Record<string, unknown>): string {
       const closing = typeof payload?.closing === 'string' ? payload.closing : ''
       return closing.split('\n')[0]!.slice(0, 120) || `${payload?.lines?.length ?? 0} lines`
     }
+    case 'mail_list':
+      return [pick('folder') || 'inbox', args.unread === true ? 'unread' : '', pick('query')].filter(Boolean).join(' · ')
+    case 'mail_read':
+      return pick('messageId') || (pick('threadId') ? `thread ${pick('threadId')}` : '') || (pick('draftId') ? `draft ${pick('draftId')}` : 'mail')
+    case 'mail_draft': {
+      const to = Array.isArray(args.to) ? args.to.map((x) => String(x)).join(', ').slice(0, 80) : pick('to')
+      const subj = pick('subject').slice(0, 40)
+      return `to ${to}${subj ? ` — ${subj}` : ''}`
+    }
+    case 'mail_send':
+      return pick('draftId')
+        ? `draft ${pick('draftId')}`
+        : `to ${Array.isArray(args.to) ? args.to.map((x) => String(x)).join(', ').slice(0, 80) : pick('to')}`
+    case 'mail_reply':
+      return `reply to ${pick('messageId')}${args.replyAll === true ? ' (all)' : ''}`
+    case 'mail_archive':
+      return `archive ${pick('messageId')}`
+    case 'calendar_list':
+      return `${pick('start')} → ${pick('end')}`
+    case 'calendar_create_event':
+      return `${pick('title')} (${pick('start')})`
+    case 'calendar_update_event':
+      return `event ${pick('eventId')}`
+    case 'notion_search':
+      return pick('query') || 'pages'
+    case 'notion_read_page':
+      return pick('pageId')
+    case 'notion_create_page':
+      return `${pick('title')} in ${pick('parentPageId')}`
+    case 'notion_append':
+      return `page ${pick('pageId')}`
+    case 'slack_list_channels':
+      return 'channels'
+    case 'slack_read_messages':
+      return `channel ${pick('channelId')}${pick('threadTs') ? ` (${pick('threadTs')})` : ''}`
+    case 'slack_send_message':
+      return `to ${pick('channelId')}`
     default: return ''
   }
 }
@@ -784,11 +859,14 @@ function describeSteps(payload: unknown): string {
 function approvalForModel(payload: unknown): string {
   const p = (payload ?? {}) as {
     approvalId?: unknown; action?: unknown; detail?: unknown; status?: unknown; items?: unknown; approvedItems?: unknown
+    executionStatus?: unknown; executionDetail?: unknown
   }
   // 一批对象是 bot 自己列的，放行了哪几项是它接下来唯一能做的：这两样得留着
   return JSON.stringify({
     approvalId: p.approvalId, action: p.action, detail: p.detail, status: p.status,
     ...(p.items ? { items: p.items } : {}), ...(p.approvedItems ? { approvedItems: p.approvedItems } : {}),
+    ...(p.executionStatus ? { executionStatus: p.executionStatus } : {}),
+    ...(p.executionDetail ? { executionDetail: p.executionDetail } : {}),
   })
 }
 

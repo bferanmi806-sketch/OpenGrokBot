@@ -23,7 +23,7 @@ const TYPES: Record<string, string> = {
 }
 
 /** 这些前缀归网关自己：没匹配上就该是 404，而不是回落成前端页面 */
-const RESERVED = ['/api/', '/ws', '/auth', '/vnc/', '/screen/', '/hooks/']
+const RESERVED = ['/api/', '/ws', '/auth', '/vnc/', '/screen/', '/hooks/', '/oauth/']
 
 /**
  * 构建好的前端由网关直接托管：一个端口、一个进程，适合常驻（launchd/systemd）和隧道访问。

@@ -37,6 +37,8 @@ type PanelActions = {
   onWindowDone?: () => void | Promise<void>
   /** 本机模式：开关命令行（开之前网关要实测沙箱，得几秒）。失败就 reject */
   onShell?: (enabled: boolean) => void | Promise<void>
+  /** 开关某个已连接外部账号对这位同事的访问授权 */
+  onToggleConnector?: (connectorId: string, granted: boolean) => void | Promise<void>
 }
 
 /** webhook 地址带着密钥：给一个「复制」，不把它整串摊在面板上 */
@@ -149,7 +151,7 @@ export function ComputerPanel({ info, botName, onClose, ...actions }: {
   )
 }
 
-function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWindowDone, onShell }: {
+function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWindowDone, onShell, onToggleConnector }: {
   info: ComputerInfo
   botName: string
 } & PanelActions) {
@@ -157,10 +159,11 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
   const rules = info.rules ?? []
   const memory = info.memory ?? []
   const skills = info.skills ?? []
-  // 开关命令行、收回窗口都要等网关几秒：期间锁住控件，失败把原因写在旁边，不用 alert
-  const [busy, setBusy] = useState<'shell' | 'window' | null>(null)
+  const connectors = info.connectors ?? []
+  // 开关命令行、收回窗口、切连接器授权都要等网关响应：期间锁住控件，失败把原因写在旁边，不用 alert
+  const [busy, setBusy] = useState<'shell' | 'window' | `connector:${string}` | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
-  const act = async (what: 'shell' | 'window', run: () => void | Promise<void>) => {
+  const act = async (what: 'shell' | 'window' | `connector:${string}`, run: () => void | Promise<void>) => {
     setBusy(what)
     setProblem(null)
     try {
@@ -222,6 +225,44 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
         </div>
       ) : null}
       {problem ? <div className="panel-problem" role="alert">{problem}</div> : null}
+
+      {connectors.length > 0 ? (
+        <div className="panel-section">
+          <div className="panel-section-title">{t('panel.connectors')}</div>
+          <div className="panel-connectors-hint">{t('panel.connectorsHint')}</div>
+          <div className="panel-connectors-list">
+            {connectors.map((c) => {
+              const label = c.accountLabel || c.name
+              const appNote = c.accountLabel && c.accountLabel !== c.name ? c.name : null
+              const statusNote = c.status !== 'active' ? t(`connectors.status.${c.status}` as MessageKey) : null
+              return (
+                <label className="panel-connector" key={c.id}>
+                  <input
+                    type="checkbox"
+                    checked={c.granted}
+                    disabled={!onToggleConnector || busy !== null}
+                    aria-label={label}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                      void act(`connector:${c.id}`, () => onToggleConnector?.(c.id, next))
+                    }}
+                  />
+                  <span className="panel-connector-body">
+                    <span className="panel-connector-label">{label}</span>
+                    {appNote || statusNote ? (
+                      <span className="panel-connector-meta">
+                        {appNote ? <span>{appNote}</span> : null}
+                        {appNote && statusNote ? <span aria-hidden="true"> · </span> : null}
+                        {statusNote ? <span className={`panel-connector-status ${c.status}`}>{statusNote}</span> : null}
+                      </span>
+                    ) : null}
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+        </div>
+      ) : null}
 
       <div className={`panel-section${info.routines.length === 0 ? ' panel-section-compact' : ''}`}>
         <div className="panel-section-title">{t('panel.routines')}</div>

@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
 import type { Conversation } from '../types'
 import { Sidebar } from './Sidebar'
 
@@ -94,5 +95,42 @@ describe('Sidebar', () => {
     })
     render(<Sidebar conversations={[called]} selectedId={null} statuses={{}} onSelect={() => {}} onNewBot={() => {}} />)
     expect(screen.getByText('⇣ Webhook: Triage')).toBeInTheDocument()
+  })
+
+  it('renders Connectors beside AI models in the footer and shows an attention dot when needed', async () => {
+    const onModels = vi.fn()
+    const onConnectors = vi.fn()
+    const { container, rerender } = render(
+      <Sidebar
+        conversations={[conversation()]}
+        selectedId={null}
+        statuses={{}}
+        onSelect={() => {}}
+        onNewBot={() => {}}
+        onModels={onModels}
+        onConnectors={onConnectors}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'AI models' })).toBeInTheDocument()
+    const btn = screen.getByRole('button', { name: 'Connectors' })
+    expect(btn).toBeInTheDocument()
+    expect(container.querySelector('.sidebar-foot-dot')).toBeNull()
+    await userEvent.click(btn)
+    expect(onConnectors).toHaveBeenCalledTimes(1)
+
+    rerender(
+      <Sidebar
+        conversations={[conversation()]}
+        selectedId={null}
+        statuses={{}}
+        onSelect={() => {}}
+        onNewBot={() => {}}
+        onModels={onModels}
+        onConnectors={onConnectors}
+        connectorsAttention
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'Connectors (needs attention)' })).toBeInTheDocument()
+    expect(container.querySelector('.sidebar-foot-dot')).not.toBeNull()
   })
 })

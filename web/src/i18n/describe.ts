@@ -43,12 +43,24 @@ export function noticeText(t: T, n: NoticePayload): string {
     case 'error': return t('notice.error', n.params)
     case 'budget': return t('notice.budget', { name: n.params.name, used: count(n.params.used), budget: count(n.params.budget) })
     case 'paused': return t(`notice.paused.${n.params.limit}`, { count: n.params.count })
+    case 'connector_expired': return t('notice.connector_expired', n.params)
+    case 'connector_execution':
+      return n.params.status === 'uncertain'
+        ? t('notice.connector_uncertain', { action: n.params.action, detail: n.params.detail })
+        : t('notice.connector_failed', { action: n.params.action, detail: n.params.detail })
   }
 }
 
 export function isNotice(payload: unknown): payload is NoticePayload {
   const n = (payload as { notice?: unknown } | null)?.notice
-  return n === 'stopped' || n === 'error' || n === 'budget' || n === 'paused'
+  return (
+    n === 'stopped'
+    || n === 'error'
+    || n === 'budget'
+    || n === 'paused'
+    || n === 'connector_expired'
+    || n === 'connector_execution'
+  )
 }
 
 /**

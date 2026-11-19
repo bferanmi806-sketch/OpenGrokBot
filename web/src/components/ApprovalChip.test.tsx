@@ -128,4 +128,48 @@ describe('ApprovalChip', () => {
     expect(screen.getByText('A').closest('li')).toHaveClass('left-out')
     expect(screen.getByText('✓ B')).toBeInTheDocument()
   })
+
+  it('renders gateway execution status below the outcome on manual and rule-approved chips', () => {
+    const { rerender } = render(
+      <ApprovalChip
+        payload={{ ...pending, status: 'approved', executionStatus: 'succeeded', executionDetail: 'sent email to bob@acme.com' }}
+        onDecide={() => {}}
+      />,
+    )
+    expect(screen.getByText('✓ Executed')).toBeInTheDocument()
+    expect(screen.getByText(/sent email to bob@acme\.com/)).toBeInTheDocument()
+
+    rerender(
+      <ApprovalChip
+        payload={{ ...pending, status: 'approved', executionStatus: 'failed', executionDetail: '429 rate limited' }}
+        onDecide={() => {}}
+      />,
+    )
+    expect(screen.getByText('✕ Failed: 429 rate limited')).toBeInTheDocument()
+
+    rerender(
+      <ApprovalChip
+        payload={{ ...pending, status: 'approved', executionStatus: 'uncertain' }}
+        onDecide={() => {}}
+      />,
+    )
+    expect(screen.getByText('⚠️ Outcome unconfirmed — not retried')).toBeInTheDocument()
+
+    rerender(
+      <ApprovalChip
+        payload={{
+          ...pending,
+          status: 'approved',
+          kind: 'email',
+          target: 'bob@acme.com',
+          rule: { id: 3, kind: 'email', target: 'bob@acme.com', expiresAt: null },
+          executionStatus: 'succeeded',
+        }}
+        onDecide={() => {}}
+      />,
+    )
+    expect(screen.getByText('Allowed by your rule')).toBeInTheDocument()
+    expect(screen.getByText('✓ Executed')).toBeInTheDocument()
+    expect(screen.queryByRole('button')).toBeNull()
+  })
 })

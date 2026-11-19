@@ -26,6 +26,73 @@ describe('the Chinese dictionary', () => {
     const untranslated = (Object.keys(en) as MessageKey[]).filter((k) => !sameOnPurpose.has(k) && zhCN[k] === en[k])
     expect(untranslated).toEqual([])
   })
+
+  it('includes connector dialog, panel, approval execution, and notice keys in both languages', () => {
+    const requiredKeys: MessageKey[] = [
+      'sidebar.connectors',
+      'connectors.title',
+      'connectors.close',
+      'connectors.custodyNote',
+      'connectors.keyLabel',
+      'connectors.keyPlaceholder',
+      'connectors.keySave',
+      'connectors.keyTest',
+      'connectors.testing',
+      'connectors.testOk',
+      'connectors.testBad',
+      'connectors.keyLocked',
+      'connectors.keyFromEnv',
+      'connectors.keySet',
+      'connectors.keyUnset',
+      'connectors.keyChange',
+      'connectors.keyClear',
+      'connectors.needKeyHint',
+      'connectors.group.mail_calendar',
+      'connectors.group.productivity',
+      'connectors.group.messaging',
+      'connectors.status.active',
+      'connectors.status.pending',
+      'connectors.status.expired',
+      'connectors.status.failed',
+      'connectors.emptyAccounts',
+      'connectors.connect',
+      'connectors.authorizeBrowser',
+      'connectors.grantTo',
+      'connectors.grantedTo',
+      'connectors.noGrants',
+      'connectors.manageAccess',
+      'connectors.saveAccess',
+      'connectors.cancel',
+      'connectors.reconnect',
+      'connectors.refresh',
+      'connectors.disconnect',
+      'connectors.confirmDisconnect',
+      'connectors.error.unauthorized',
+      'connectors.error.bad_request',
+      'connectors.error.locked',
+      'panel.connectors',
+      'panel.connectorsHint',
+      'approval.exec.succeeded',
+      'approval.exec.failed',
+      'approval.exec.uncertain',
+      'notice.connector_expired',
+      'notice.connector_failed',
+      'notice.connector_uncertain',
+    ]
+    for (const key of requiredKeys) {
+      expect(en[key]).toBeTruthy()
+      expect(zhCN[key]).toBeTruthy()
+    }
+    expect(zhCN['sidebar.connectors']).toBe('连接器')
+    expect(zhCN['connectors.status.expired']).toBe('需重新授权')
+    expect(zhCN['connectors.noGrants']).toBe('未授权给任何同事')
+    expect(en['connectors.keyLocked']).toContain('OPENSUPERBOT_COMPOSIO_API_KEY')
+    expect(zhCN['connectors.keyLocked']).toContain('OPENSUPERBOT_COMPOSIO_API_KEY')
+    expect(en['connectors.error.locked']).toContain('OPENSUPERBOT_COMPOSIO_API_KEY')
+    expect(zhCN['connectors.error.locked']).toContain('OPENSUPERBOT_COMPOSIO_API_KEY')
+    expect(en['approval.exec.succeeded']).toBe('✓ Executed')
+    expect(zhCN['approval.exec.succeeded']).toBe('✓ 已执行')
+  })
 })
 
 describe('translate', () => {

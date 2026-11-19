@@ -18,6 +18,8 @@ export type NoticePayload =
   | { notice: 'error'; params: { name: string; detail: string } }
   | { notice: 'budget'; params: { name: string; used: number; budget: number } }
   | { notice: 'paused'; params: { limit: 'steps' | 'minutes' | 'seconds'; count: number }; lead?: string }
+  | { notice: 'connector_expired'; params: { app: string; account: string } }
+  | { notice: 'connector_execution'; params: { status: 'failed' | 'uncertain'; action: string; detail: string } }
 
 export type ApprovalPayload = {
   approvalId: number
@@ -43,6 +45,9 @@ export type ApprovalPayload = {
   items?: string[]
   /** 你勾留下、放行了的那几项的下标 */
   approvedItems?: number[]
+  /** 连接器写操作由网关在批准后直接执行：结果记在审批卡片上 */
+  executionStatus?: 'succeeded' | 'failed' | 'uncertain'
+  executionDetail?: string
 }
 export type ApprovalResolvedPayload = {
   approvalId: number
@@ -154,6 +159,8 @@ export type ComputerInfo = {
   skills?: Skill[]
   /** 最近做过的动作，最新的在前 */
   actions?: ActionEntry[]
+  /** 已连接的外部账号，以及这位同事有没有获得访问授权 */
+  connectors?: ComputerConnectorItem[]
 }
 
 export type RoutineAction = 'run' | 'pause' | 'resume' | 'delete'
@@ -230,6 +237,7 @@ export type GatewayEvent =
   | { type: 'hello'; statuses: Record<string, BotStatus> }
   /** 本机模式的浏览器：找到了、缺着、下载中（进度）、下载失败。向导里用 */
   | { type: 'setup.browser'; browser: BrowserStatus }
+  | { type: 'connectors_changed' }
 
 export type BrowserStatus =
   | { state: 'found'; executablePath: string; source: 'env' | 'system' | 'downloaded' }
@@ -334,3 +342,43 @@ export type CheckCode = 'bad_key' | 'quota' | 'rate_limited' | 'model_not_found'
 export type CheckResult =
   | { ok: true; models: string[]; modelListed: boolean | null }
   | { ok: false; code: CheckCode; status?: number; detail?: string; step?: 'models' | 'chat'; models?: string[] }
+
+export type AppKey = 'gmail' | 'outlook' | 'google_calendar' | 'outlook_calendar' | 'notion' | 'slack'
+export type AppGroupId = 'mail_calendar' | 'productivity' | 'messaging'
+export type ConnectorDomain = 'mail' | 'calendar' | 'notion' | 'slack'
+export type ConnectorStatus = 'pending' | 'active' | 'expired' | 'failed'
+
+export type CatalogApp = {
+  app: AppKey
+  name: string
+  group: AppGroupId
+  domain: ConnectorDomain
+  toolkitSlug: string
+  authScheme: 'OAUTH2'
+}
+
+export type ConnectorAccountView = {
+  id: string
+  app: AppKey
+  accountLabel: string
+  status: ConnectorStatus
+  lastError: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type ConnectorsSnapshot = {
+  key: { set: boolean; masked: string; source: 'env' | 'file' | 'none'; locked: boolean }
+  catalog: CatalogApp[]
+  accounts: ConnectorAccountView[]
+  botGrants: Record<string, string[]>
+}
+
+export type ComputerConnectorItem = {
+  id: string
+  app: AppKey
+  name: string
+  accountLabel: string
+  status: ConnectorStatus
+  granted: boolean
+}

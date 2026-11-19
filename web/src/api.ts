@@ -1,8 +1,10 @@
 import { fileToBase64 } from './attachments'
 import type {
-  AttachmentPayload, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, Conversation, FieldError, GatewayEvent, Message, ProviderPreset,
-  RoutineAction, RuleDuration, SettingsView, SetupInfo, AboutInfo,
+  AboutInfo, AppKey, AttachmentPayload, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
+  Conversation, FieldError, GatewayEvent, Message, ProviderPreset, RoutineAction, RuleDuration, SettingsView, SetupInfo,
 } from './types'
+
+export type { GatewayEvent } from './types'
 
 /** 网关说「先登录」：界面换成锁屏说明，而不是一片空白。 */
 export class SignedOut extends Error {
@@ -13,13 +15,21 @@ export class SignedOut extends Error {
 export class ApiError extends Error {
   readonly code: string | undefined
   readonly params: Record<string, string | number> | undefined
+  readonly detail: string | undefined
   readonly status: number
-  constructor(message: string, status: number, code?: string, params?: Record<string, string | number>) {
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    params?: Record<string, string | number>,
+    detail?: string,
+  ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.params = params
+    this.detail = detail
   }
 }
 
@@ -46,8 +56,13 @@ async function send(method: string, path: string, body?: unknown, opts: { strict
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })
   if (!res.ok && (opts.strict || res.status !== 409)) {
-    const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string; params?: Record<string, string | number> }
-    throw new ApiError(data.error ?? `${method} ${path} ${res.status}`, res.status, data.code, data.params)
+    const data = (await res.json().catch(() => ({}))) as {
+      error?: string
+      code?: string
+      params?: Record<string, string | number>
+      detail?: string
+    }
+    throw new ApiError(data.error ?? `${method} ${path} ${res.status}`, res.status, data.code, data.params, data.detail)
   }
   return res
 }
@@ -169,6 +184,57 @@ export const fetchConnectionModels = (id: string) =>
   getJson<{ ok: true; models: string[] } | { ok: false; code: string }>(`/api/connections/${encodeURIComponent(id)}/models`)
 export const setBotLlm = (botId: string, choice: { connectionId: string; model: string | null }) =>
   sendForm<BotLlm>('PUT', `/api/bots/${encodeURIComponent(botId)}/llm`, choice)
+
+/** 外部应用连接器与授权快照；老网关没有这个路由就是 null（界面不显示这一块） */
+export async function fetchConnectors(): Promise<ConnectorsSnapshot | null> {
+  const res = await request('/api/connectors')
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`GET /api/connectors ${res.status}`)
+  return res.json() as Promise<ConnectorsSnapshot>
+}
+
+export async function saveConnectorsKey(apiKey: string | null): Promise<ConnectorsSnapshot> {
+  const res = await send('PUT', '/api/connectors/key', { apiKey }, { strict: true })
+  return res.json() as Promise<ConnectorsSnapshot>
+}
+
+export async function testConnectorsKey(apiKey?: string): Promise<{ ok: boolean; code?: string; detail?: string }> {
+  const res = await send('POST', '/api/connectors/key/test', apiKey === undefined ? {} : { apiKey }, { strict: true })
+  return res.json() as Promise<{ ok: boolean; code?: string; detail?: string }>
+}
+
+export async function startConnectorOAuth(
+  app: AppKey,
+  botIds: string[],
+): Promise<{ connectorId: string; redirectUrl: string; callbackUrl: string; state: ConnectorsSnapshot }> {
+  const res = await send('POST', '/api/connectors/connect', { app, botIds }, { strict: true })
+  return res.json() as Promise<{ connectorId: string; redirectUrl: string; callbackUrl: string; state: ConnectorsSnapshot }>
+}
+
+export async function reconnectConnector(
+  id: string,
+): Promise<{ connectorId: string; redirectUrl: string; callbackUrl: string }> {
+  const res = await send('POST', `/api/connectors/${encodeURIComponent(id)}/reconnect`, undefined, { strict: true })
+  return res.json() as Promise<{ connectorId: string; redirectUrl: string; callbackUrl: string }>
+}
+
+export async function refreshConnector(id: string): Promise<ConnectorsSnapshot> {
+  const res = await send('POST', `/api/connectors/${encodeURIComponent(id)}/refresh`, undefined, { strict: true })
+  return res.json() as Promise<ConnectorsSnapshot>
+}
+
+export async function deleteConnector(id: string): Promise<ConnectorsSnapshot> {
+  const res = await send('DELETE', `/api/connectors/${encodeURIComponent(id)}`, undefined, { strict: true })
+  return res.json() as Promise<ConnectorsSnapshot>
+}
+
+export async function setBotConnectors(
+  botId: string,
+  connectorIds: string[],
+): Promise<{ botId: string; connectorIds: string[] }> {
+  const res = await send('PUT', `/api/bots/${encodeURIComponent(botId)}/connectors`, { connectorIds }, { strict: true })
+  return res.json() as Promise<{ botId: string; connectorIds: string[] }>
+}
 
 /** 首次启动要不要出向导；老网关没有这个路由（或出了错）就当不用，绝不因此挡住界面 */
 export async function fetchSetup(): Promise<SetupInfo | null> {

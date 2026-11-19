@@ -1,11 +1,22 @@
 import { render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, setComputerShell } from '../api'
+import {
+  ApiError,
+  deleteConnector,
+  fetchConnectors,
+  reconnectConnector,
+  refreshConnector,
+  saveConnectorsKey,
+  setBotConnectors,
+  setComputerShell,
+  startConnectorOAuth,
+  testConnectorsKey,
+} from '../api'
 import { ComputerPanel } from '../components/ComputerPanel'
 import { Sidebar } from '../components/Sidebar'
 import { Thread } from '../components/Thread'
-import type { ComputerInfo, Conversation, Message } from '../types'
-import { blockReasonText, describeSchedule, errorText, noticeText } from './describe'
+import type { ComputerInfo, Conversation, Message, NoticePayload } from '../types'
+import { blockReasonText, describeSchedule, errorText, isNotice, noticeText } from './describe'
 import { I18nProvider, makeT } from './index'
 
 const en = makeT('en')
@@ -20,6 +31,93 @@ describe('notices', () => {
       .toBe("⚠️ Scout hit today's token budget (200,500 of 200,000 tokens). It picks up again tomorrow — or raise OPENSUPERBOT_DAILY_TOKENS.")
     expect(noticeText(zh, { notice: 'error', params: { name: 'Scout', detail: 'upstream 502' } })).toBe('⚠️ Scout 出错了：upstream 502')
     expect(noticeText(zh, { notice: 'paused', params: { limit: 'minutes', count: 15 } })).toMatch(/15 分钟的上限.*说「继续」/)
+  })
+
+  it('recognizes and translates connector_expired and connector_execution notices', () => {
+    const expired: NoticePayload = { notice: 'connector_expired', params: { app: 'Gmail', account: 'alice@gmail.com' } }
+    const failed: NoticePayload = {
+      notice: 'connector_execution',
+      params: { status: 'failed', action: 'Send email to bob@acme.com', detail: '403 Forbidden' },
+    }
+    const uncertain: NoticePayload = {
+      notice: 'connector_execution',
+      params: { status: 'uncertain', action: 'Post to #general', detail: 'request timed out' },
+    }
+
+    expect(isNotice(expired)).toBe(true)
+    expect(isNotice(failed)).toBe(true)
+    expect(isNotice(uncertain)).toBe(true)
+    expect(isNotice({ notice: 'unknown_notice' })).toBe(false)
+
+    expect(noticeText(en, expired)).toBe('⚠️ Gmail (alice@gmail.com) needs reconnection. Open Connectors to sign in again.')
+    expect(noticeText(en, failed)).toBe('⚠️ Could not execute "Send email to bob@acme.com": 403 Forbidden')
+    expect(noticeText(en, uncertain)).toBe(
+      '⚠️ Outcome unconfirmed for "Post to #general": request timed out. The request was NOT retried automatically to prevent sending duplicates — please check the target app.',
+    )
+
+    expect(noticeText(zh, expired)).toMatch(/Gmail.*alice@gmail\.com.*重新授权.*连接器/)
+    expect(noticeText(zh, failed)).toMatch(/Send email to bob@acme\.com.*403 Forbidden/)
+    expect(noticeText(zh, uncertain)).toMatch(/Post to #general.*request timed out.*没有自动重试/)
+  })
+})
+
+describe('connector API client', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('returns null on 404 from fetchConnectors for older gateways and parses snapshot on 200', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('not found', { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        key: { set: false, masked: '', source: 'none', locked: false },
+        catalog: [],
+        accounts: [],
+        botGrants: {},
+      }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(await fetchConnectors()).toBeNull()
+    expect(await fetchConnectors()).toEqual({
+      key: { set: false, masked: '', source: 'none', locked: false },
+      catalog: [],
+      accounts: [],
+      botGrants: {},
+    })
+  })
+
+  it('calls connector management endpoints with expected methods, paths, and strict error handling', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'locked' }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        connectorId: 'ca-1', redirectUrl: 'https://composio.example/auth', callbackUrl: 'http://localhost/oauth/connector/n1',
+        state: { key: { set: true, masked: 'cmp…1', source: 'file', locked: false }, catalog: [], accounts: [], botGrants: {} },
+      }), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        connectorId: 'ca-1', redirectUrl: 'https://composio.example/reauth', callbackUrl: 'http://localhost/oauth/connector/n2',
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        key: { set: true, masked: 'cmp…1', source: 'file', locked: false }, catalog: [], accounts: [], botGrants: {},
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        key: { set: true, masked: 'cmp…1', source: 'file', locked: false }, catalog: [], accounts: [], botGrants: {},
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ botId: 'inbox keeper', connectorIds: ['ca-1'] }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(saveConnectorsKey('cmp_123')).rejects.toMatchObject({ status: 409, message: 'locked' })
+    expect(await testConnectorsKey()).toEqual({ ok: true })
+    expect(JSON.parse((fetchMock.mock.calls[1]![1] as RequestInit).body as string)).toEqual({})
+    await startConnectorOAuth('gmail', ['inbox-keeper'])
+    expect(fetchMock.mock.calls[2]![0]).toBe('/api/connectors/connect')
+    await reconnectConnector('ca-1')
+    expect(fetchMock.mock.calls[3]![0]).toBe('/api/connectors/ca-1/reconnect')
+    await refreshConnector('ca-1')
+    expect(fetchMock.mock.calls[4]![0]).toBe('/api/connectors/ca-1/refresh')
+    await deleteConnector('ca-1')
+    expect(fetchMock.mock.calls[5]![0]).toBe('/api/connectors/ca-1')
+    expect((fetchMock.mock.calls[5]![1] as RequestInit).method).toBe('DELETE')
+    await setBotConnectors('inbox keeper', ['ca-1'])
+    expect(fetchMock.mock.calls[6]![0]).toBe('/api/bots/inbox%20keeper/connectors')
   })
 })
 
@@ -95,6 +193,28 @@ describe('in Chinese, on screen', () => {
       <Sidebar conversations={[{ ...dm, last_message: stopped }]} selectedId={null} statuses={{}} onSelect={() => {}} onNewBot={() => {}} />
     </I18nProvider>)
     expect(screen.getByText('⏹ 停下了。要接着做就告诉我。')).toBeInTheDocument()
+  })
+
+  it('the thread and sidebar render connector_expired and connector_execution notices in Chinese', () => {
+    const expiredMsg: Message = {
+      ...paused,
+      id: 10,
+      content: '⚠️ Gmail (alice@gmail.com) needs reconnection. Open Connectors to sign in again.',
+      payload: { notice: 'connector_expired', params: { app: 'Gmail', account: 'alice@gmail.com' } },
+    }
+    const uncertainMsg: Message = {
+      ...paused,
+      id: 11,
+      content: '⚠️ Outcome unconfirmed for "Send reply": timeout. The request was NOT retried automatically to prevent sending duplicates — please check the target app.',
+      payload: { notice: 'connector_execution', params: { status: 'uncertain', action: 'Send reply', detail: 'timeout' } },
+    }
+    render(<I18nProvider lang="zh-CN">
+      <Sidebar conversations={[{ ...dm, last_message: expiredMsg }]} selectedId={null} statuses={{}} onSelect={() => {}} onNewBot={() => {}} />
+      <Thread conversation={dm} roster={{}} messages={[expiredMsg, uncertainMsg]} thinking={false} onSend={() => {}} onDecide={() => {}} />
+    </I18nProvider>)
+    expect(screen.getAllByText(/Gmail（alice@gmail\.com）需要重新授权/)).toHaveLength(2)
+    expect(screen.getByText(/「Send reply」结果未确认：timeout/)).toBeInTheDocument()
+    expect(screen.queryByText(/needs reconnection/)).toBeNull()
   })
 
   it('the computer panel says why there is no screen, no sandbox, and when routines run', () => {

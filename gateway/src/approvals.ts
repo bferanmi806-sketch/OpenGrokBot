@@ -34,6 +34,10 @@ export type ApprovalRow = {
   approved_items: string | null
   /** A deterministic workflow approval must resume its in-memory continuation, never an LLM turn. */
   workflow_run_id: string | null
+  execution_json: string | null
+  execution_status: 'succeeded' | 'failed' | 'uncertain' | null
+  execution_detail: string | null
+  operation_id: string | null
 }
 
 /** 一批最多这么多项；每项一行，超长截断 */
@@ -213,21 +217,35 @@ export function createApproval(
     items?: string[]
     /** Identifies deterministic workflow approvals so they cannot fall through to the LLM. */
     workflowRunId?: string
+    executionJson?: string
+    operationId?: string
     now?: number
   },
 ): ApprovalRow {
   const at = input.now ?? Date.now()
   const auto = input.ruleId !== undefined && !input.items
   const info = db.prepare(
-    `INSERT INTO approvals (thread_id, bot_id, action, detail, kind, target, status, rule_id, created_at, resolved_at, items, workflow_run_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO approvals (thread_id, bot_id, action, detail, kind, target, status, rule_id, created_at, resolved_at, items, workflow_run_id, execution_json, operation_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     input.threadId, input.botId, input.action, input.detail ?? '', input.kind ?? 'other', input.target ?? '',
     auto ? 'approved' : 'pending', auto ? input.ruleId! : null, at, auto ? at : null,
     input.items ? JSON.stringify(input.items) : null,
     input.workflowRunId ?? null,
+    input.executionJson ?? null,
+    input.operationId ?? null,
   )
   return getApproval(db, Number(info.lastInsertRowid))!
+}
+
+export function recordApprovalExecution(
+  db: Db,
+  id: number,
+  status: 'succeeded' | 'failed' | 'uncertain',
+  detail: string,
+): void {
+  db.prepare('UPDATE approvals SET execution_status = ?, execution_detail = ? WHERE id = ?')
+    .run(status, detail.slice(0, 2000), id)
 }
 
 export function attachApprovalMessage(db: Db, approvalId: number, messageId: number): void {

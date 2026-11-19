@@ -14,6 +14,7 @@ export default defineConfig({
       '/screen': { target: 'http://127.0.0.1:4747', ws: true },
       // routine 的 webhook：面板复制出来的地址在 dev 下也能直接用
       '/hooks': 'http://127.0.0.1:4747',
+      '/oauth': 'http://127.0.0.1:4747',
     },
   },
   build: {

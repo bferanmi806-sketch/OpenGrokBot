@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ApiError, SignedOut, answerQuestion, checkSession, connectEvents, createBot, fetchBots, fetchComputer, fetchConnections, fetchConversations,
-  fetchLanguage, fetchMessages, fetchProviders, fetchSetup, forgetMemoryRule, removeUpload, resolveApproval, revokeRule, sendMessage, setComputerShell, setComputerWindow,
+  ApiError, SignedOut, answerQuestion, checkSession, connectEvents, createBot, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
+  fetchLanguage, fetchMessages, fetchProviders, fetchSetup, forgetMemoryRule, removeUpload, resolveApproval, revokeRule, sendMessage, setBotConnectors, setComputerShell, setComputerWindow,
   stopThread, updateRoutine, uploadFile,
 } from './api'
 import { BotModelChip, BotModelPicker, botModel, botSeesImages } from './components/BotModelPicker'
 import { ConfirmDialog, useEscape } from './components/ConfirmDialog'
+import { ConnectorsDialog } from './components/ConnectorsDialog'
 import { DemoBanner } from './components/DemoBanner'
 import { ComputerPanel } from './components/ComputerPanel'
 import { SidebarIcon, XIcon } from './components/Icons'
@@ -19,7 +20,7 @@ import { desktopApi } from './desktop'
 import { I18nProvider, browserLanguages, pickLang, useT, type Lang } from './i18n'
 import { errorText } from './i18n/describe'
 import { applyHello, applyStatus, clearDone } from './presence'
-import type { BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, Conversation, Message, ProviderPreset, RoutineAction, SetupInfo } from './types'
+import type { BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, Message, ProviderPreset, RoutineAction, SetupInfo } from './types'
 
 /** 网关锁着：告诉人去哪拿登录链接，而不是一片空白。 */
 function SignIn() {
@@ -82,8 +83,11 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
   /** 模型连接和每位同事的选择；老网关没有这块就一直是 null */
   const [llms, setLlms] = useState<ConnectionsState | null>(null)
   const [providers, setProviders] = useState<ProviderPreset[]>([])
-  /** 开着的是哪个窗口：「AI 模型」总表，或给某位同事选模型 */
+  /** 外部应用连接器快照；老网关没有这块就一直是 null */
+  const [connectors, setConnectors] = useState<ConnectorsSnapshot | null>(null)
+  /** 开着的是哪个窗口：「AI 模型」总表、「连接器」总表，或给某位同事选模型 */
   const [modelsOpen, setModelsOpen] = useState(false)
+  const [connectorsOpen, setConnectorsOpen] = useState(false)
   const [pickerFor, setPickerFor] = useState<string | null>(null)
   /** 首次启动向导：网关说要（needsSetup）才出；走完之前一直开着，哪怕中途已经存好了 key */
   const [setup, setSetup] = useState<SetupInfo | null>(null)
@@ -196,16 +200,25 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
     }
   }, [])
 
+  /** 外部应用连接器快照；老网关没有这个路由就返回 null，界面上不显示这一块 */
+  const loadConnectors = useCallback(async () => {
+    try {
+      setConnectors(await fetchConnectors())
+    } catch (err) {
+      if (err instanceof SignedOut) throw err
+    }
+  }, [])
+
   /** 首次加载和每次重连都走这里：断线期间错过的消息、审批数、名册一次补齐。 */
   const resync = useCallback(async () => {
     try {
-      await Promise.all([refreshConversations(), loadRoster(), loadLlms()])
+      await Promise.all([refreshConversations(), loadRoster(), loadLlms(), loadConnectors()])
       const current = threadIdRef.current
       if (current) await loadMessages(current)
     } catch (err) {
       guard(err)
     }
-  }, [guard, loadLlms, loadMessages, loadRoster, refreshConversations])
+  }, [guard, loadConnectors, loadLlms, loadMessages, loadRoster, refreshConversations])
 
   useEffect(() => {
     checkSession()
@@ -262,6 +275,11 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
         setSetupBrowser(e.browser)
         return
       }
+      if (e.type === 'connectors_changed') {
+        void loadConnectors().catch(guard)
+        if (panelFor.current) void loadPanel(panelFor.current)
+        return
+      }
       if (e.type !== 'message') return // 更新的网关发来不认识的事件，不归这里管
       if (e.message.sender !== 'user' && e.message.kind !== 'activity') postedRef.current.add(e.message.sender)
       // 就地更新的旧消息（activity 卡片收尾、审批 chip 翻转）不该顶掉更新的那条预览；没变就不换数组引用
@@ -292,7 +310,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
         })
       }
     }, { onSignedOut: signOut })
-  }, [signedOut, resync, refreshConversations, loadPanel, guard, signOut])
+  }, [signedOut, resync, refreshConversations, loadConnectors, loadPanel, guard, signOut])
 
   const waiting = conversations.reduce((sum, c) => sum + (c.pending ?? 0), 0)
   useEffect(() => {
@@ -376,6 +394,16 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
   }
   const onWindowDone = () => panelAction((botId) => setComputerWindow(botId, false))
   const onShell = (enabled: boolean) => panelAction((botId) => setComputerShell(botId, enabled))
+  const onToggleConnector = (connectorId: string, granted: boolean) => panelAction(async (botId) => {
+    const current = panel?.botId === botId && panel.info?.connectors
+      ? panel.info.connectors.filter((c) => c.granted).map((c) => c.id)
+      : (connectors?.botGrants[botId] ?? [])
+    const nextIds = granted
+      ? (current.includes(connectorId) ? current : [...current, connectorId])
+      : current.filter((id) => id !== connectorId)
+    const res = await setBotConnectors(botId, nextIds)
+    setConnectors((prev) => (prev ? { ...prev, botGrants: { ...prev.botGrants, [botId]: res.connectorIds } } : prev))
+  })
 
   const hire = async (name: string, role: string) => {
     try {
@@ -384,7 +412,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
       setHireError(undefined)
       await refreshConversations()
       setSelectedId(`dm:${bot.id}`)
-      await Promise.all([loadRoster(), loadLlms()])
+      await Promise.all([loadRoster(), loadLlms(), loadConnectors()])
     } catch (err) {
       if (err instanceof SignedOut) setSignedOut(true)
       else setHireError(err instanceof ApiError ? errorText(t, err) : err instanceof Error ? err.message : String(err))
@@ -439,6 +467,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
     )
   }
 
+  const connectorsAttention = Boolean(connectors?.accounts.some((a) => a.status === 'expired' || a.status === 'failed'))
   const thinking = selected ? selected.members.some((id) => statuses[id] === 'thinking') : false
   // 单聊里才说得出「这位同事看不看得了图」；群里各人各样，不提
   const seesImages = llms && selected?.kind === 'dm' && selected.members[0] ? botSeesImages(llms, selected.members[0]) : undefined
@@ -464,6 +493,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         {...(llms ? { onModels: () => setModelsOpen(true) } : {})}
+        {...(connectors ? { onConnectors: () => setConnectorsOpen(true), connectorsAttention } : {})}
         {...(setup ? { onSettings: () => setSettingsOpen(true) } : {})}
       />
       {selected ? (
@@ -524,9 +554,10 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
           onForgetRule={onForgetRule}
           onWindowDone={onWindowDone}
           onShell={onShell}
+          onToggleConnector={onToggleConnector}
         />
       ) : null}
-      {settingsOpen && !modelsOpen ? (
+      {settingsOpen && !modelsOpen && !connectorsOpen ? (
         <SettingsDialog
           llms={llms}
           providers={providers}
@@ -543,7 +574,19 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
       {llms && modelsOpen ? (
         <ModelsDialog state={llms} providers={providers} roster={roster} onChange={setLlms} onSignedOut={signOut} onClose={() => setModelsOpen(false)} />
       ) : null}
-      {llms && pickerFor && !modelsOpen ? (
+      {connectors && connectorsOpen ? (
+        <ConnectorsDialog
+          state={connectors}
+          roster={roster}
+          onChange={(next) => {
+            setConnectors(next)
+            if (panelFor.current) void loadPanel(panelFor.current)
+          }}
+          onSignedOut={signOut}
+          onClose={() => setConnectorsOpen(false)}
+        />
+      ) : null}
+      {llms && pickerFor && !modelsOpen && !connectorsOpen ? (
         <BotModelPicker
           botId={pickerFor}
           botName={roster[pickerFor]?.name ?? pickerFor}

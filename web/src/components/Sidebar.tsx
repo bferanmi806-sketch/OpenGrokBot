@@ -6,7 +6,7 @@ import { useT, type MessageKey, type T } from '../i18n'
 import { isNotice, noticeText } from '../i18n/describe'
 import { BotAvatar, conversationSeed } from './BotAvatar'
 import { useEscape } from './ConfirmDialog'
-import { CpuSparkleIcon, PlusIcon, SettingsIcon } from './Icons'
+import { CpuSparkleIcon, PlugIcon, PlusIcon, SettingsIcon } from './Icons'
 
 /**
  * 单聊就是那位同事的状态。群只说「有人在干活」：等你、卡住、刚干完说的是某一位同事，
@@ -87,7 +87,19 @@ function preview(c: Conversation, t: T): string {
   }
 }
 
-export function Sidebar({ conversations, selectedId, statuses, onSelect, onNewBot, onModels, onSettings, open, onClose }: {
+export function Sidebar({
+  conversations,
+  selectedId,
+  statuses,
+  onSelect,
+  onNewBot,
+  onModels,
+  onConnectors,
+  connectorsAttention,
+  onSettings,
+  open,
+  onClose,
+}: {
   conversations: Conversation[]
   selectedId: string | null
   statuses: Record<string, BotStatus>
@@ -95,6 +107,10 @@ export function Sidebar({ conversations, selectedId, statuses, onSelect, onNewBo
   onNewBot: () => void
   /** 打开「AI 模型」；老网关没有这块就不传，按钮也不出现 */
   onModels?: () => void
+  /** 打开「连接器」；老网关没有这块就不传，按钮也不出现 */
+  onConnectors?: () => void
+  /** 有连接器账号过期或异常需处理 */
+  connectorsAttention?: boolean
   /** 打开设置页；老网关没有设置路由就不传 */
   onSettings?: () => void
   /** 窄窗口下侧栏抽屉是否展开 */
@@ -178,7 +194,7 @@ export function Sidebar({ conversations, selectedId, statuses, onSelect, onNewBo
           ) : null}
         </div>
 
-        {onModels || onSettings ? (
+        {onModels || onConnectors || onSettings ? (
           <div className="sidebar-footer">
             {onModels ? (
               <button
@@ -191,7 +207,21 @@ export function Sidebar({ conversations, selectedId, statuses, onSelect, onNewBo
                 <CpuSparkleIcon size={14} />
                 <span>{t('sidebar.models')}</span>
               </button>
-            ) : <span className="spacer" />}
+            ) : null}
+            {onConnectors ? (
+              <button
+                type="button"
+                className="sidebar-foot-btn sidebar-connectors"
+                onClick={() => { onClose?.(); onConnectors() }}
+                aria-label={t(connectorsAttention ? 'sidebar.connectorsAttention' : 'sidebar.connectors')}
+                title={t(connectorsAttention ? 'sidebar.connectorsAttention' : 'sidebar.connectors')}
+              >
+                <PlugIcon size={14} />
+                <span>{t('sidebar.connectors')}</span>
+                {connectorsAttention ? <span className="sidebar-foot-dot" aria-hidden="true" /> : null}
+              </button>
+            ) : null}
+            {!onModels && !onConnectors ? <span className="spacer" /> : null}
             {onSettings ? (
               <button
                 type="button"

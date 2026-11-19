@@ -13,6 +13,8 @@ export type Notice =
     /** 模型收尾时交代的那几行（它自己的话，不翻） */
     lead?: string
   }
+  | { notice: 'connector_expired'; params: { app: string; account: string } }
+  | { notice: 'connector_execution'; params: { status: 'failed' | 'uncertain'; action: string; detail: string } }
 
 /** checkBudget 可以只回一句话（老写法），也可以连数字一起回，界面才翻得了 */
 export type BudgetHit = { text: string; name: string; used: number; budget: number }
@@ -30,6 +32,12 @@ export function noticeText(n: Notice): string {
       const notice = `⏸ Paused at ${limitText(n.params.limit, n.params.count)}. Say "continue" to pick it up.`
       return n.lead ? `${n.lead}\n\n${notice}` : notice
     }
+    case 'connector_expired':
+      return `⚠️ ${n.params.app} (${n.params.account}) needs reconnection. Open Connectors to sign in again.`
+    case 'connector_execution':
+      return n.params.status === 'uncertain'
+        ? `⚠️ Outcome unconfirmed for "${n.params.action}": ${n.params.detail}. The request was NOT retried automatically to prevent sending duplicates — please check the target app.`
+        : `⚠️ Could not execute "${n.params.action}": ${n.params.detail}`
   }
 }
 

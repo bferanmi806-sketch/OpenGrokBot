@@ -49,10 +49,11 @@ describe('serveWeb', () => {
     expect(await res.text()).not.toContain('root:')
   })
 
-  it('leaves the API alone: unknown API routes still 404', async () => {
+  it('leaves the API and reserved gateway prefixes alone: unknown routes still 404', async () => {
     const app = setup()
     expect((await app.request('/api/known')).status).toBe(200)
     expect((await app.request('/api/nope')).status).toBe(404)
+    expect((await app.request('/oauth/unknown')).status).toBe(404)
   })
 
   it('does nothing when there is no built UI (dev mode uses Vite)', async () => {

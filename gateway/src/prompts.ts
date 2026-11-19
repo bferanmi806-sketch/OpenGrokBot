@@ -83,6 +83,21 @@ Present: ${group.members.join(', ')}, plus your operator.
 }
 
 export type PromptRoutine = { id: number; name: string; human: string; enabled: boolean; watch?: boolean }
+export type PromptConnector = { id: string; app: string; label: string; status: string }
+
+function connectorsSection(connectors: PromptConnector[]): string {
+  const active = connectors.filter((c) => c.status === 'active')
+  const broken = connectors.filter((c) => c.status === 'expired' || c.status === 'failed')
+  if (!active.length && !broken.length) return ''
+  const lines = [
+    ...active.map((c) => `- ${c.app}: ${c.label || c.id} [id: ${c.id}]`),
+    ...broken.map((c) => `- ${c.app}: ${c.label || c.id} [id: ${c.id}] — needs reconnection (ask your operator to reconnect it in Connectors)`),
+  ]
+  const footer = active.length
+    ? '\n\nUse the matching mail_*, calendar_*, notion_*, or slack_* tools for active accounts. Connector write tools are held by the gateway for operator approval automatically — call the write tool directly rather than wrapping it in hold_for_approval.'
+    : ''
+  return `## Connected apps\n\n${lines.join('\n')}${footer}`
+}
 
 function skillsSection(skills: { name: string; description: string }[]): string {
   if (!skills.length) return ''
@@ -127,6 +142,7 @@ export function buildSystemPrompt(
     /** AGENTS.md：同事的操作手册，硬边界写在这里 */
     manual?: string
     routines?: PromptRoutine[]
+    connectors?: PromptConnector[]
     skills?: { name: string; description: string }[]
     /** 电脑是什么做的、有没有命令行 */
     computer?: ComputerBriefingOptions
@@ -149,6 +165,7 @@ export function buildSystemPrompt(
     manual ? `## Operating manual\n\n${manual}` : '',
     skillsSection(opts.skills ?? []),
     memory ? `## Standing rules your operator gave you\n\n${memory}` : '',
+    connectorsSection(opts.connectors ?? []),
     routinesSection(opts.routines ?? []),
     opts.group ? groupBriefing(opts.group) : '',
   ]

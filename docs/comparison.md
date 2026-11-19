@@ -16,7 +16,7 @@ ships almost daily, so this table ages fast. Corrections welcome via PR — it o
 | Work on your own machine | ✅ "Your computer" in the desktop app; web traffic can leave through your desktop | ✅ local computers: a browser profile and a folder of its own on your machine, commands off until you allow them and sandboxed then | macOS, Linux and Windows (commands stay off on Windows; see [local-computers.md](local-computers.md)) |
 | Named bots, persistent memory | ✅ | ✅ | Rules live in `MEMORY.md` outside the bot's computer; every change is a diff chip |
 | Forget a rule | ✅ | ✅ `forget_memory`, or remove it in the panel | |
-| Approval gate on outward actions | ✅ draft cards, Auto-review by a separate model | ✅ Approve / Discard, or a bare 👍 | Ours is held by instruction, not a sandbox — see [security.md](security.md) |
+| Approval gate on outward actions | ✅ draft cards, Auto-review by a separate model | ✅ Approve / Discard, or a bare 👍 | Gateway-enforced for connectors; held by instruction in the browser and shell — see [security.md](security.md) |
 | Standing approvals | ✅ Custom Rules: Always allow / Ask first | ✅ *Always allow…* per teammate, kind and exact destination, for 1 h, 24 h or until revoked | Money and bookings always ask here |
 | Question cards | ✅ single and multi-select | ✅ `ask_operator`, single and multi-select | |
 | Presence on the roster | ✅ animated avatars: idle, thinking, working, waiting, blocked, done | ✅ animated face avatars and status labels: working, needs you, stuck, done | |
@@ -34,12 +34,12 @@ ships almost daily, so this table ages fast. Corrections welcome via PR — it o
 | Its own email address | ✅ with `name+tag@` routing to routines | ❌ | |
 | Learn a routine by watching you | ✅ "follow along" | Partly: typed browser workflow recorder (API); replay and UI on the roadmap | See [workflows.md](workflows.md) and [#1](https://github.com/wolfqing/OpenSuperBot/issues/1) |
 | Shared team bots, Slack | ✅ Team Bots, Slack threads, per-person memory | ❌ | This stack is built for one operator |
-| Connectors | Marketplace of plugins (GitHub, Gmail, Outlook, Notion, Figma, QuickBooks, Stripe…) | The browser and the shell | Anything with a website works here, but nothing is pre-wired |
+| Connectors | Marketplace of plugins (GitHub, Gmail, Outlook, Notion, Figma, QuickBooks, Stripe…) | Built-in OAuth connectors (Gmail, Outlook, Google/Outlook Calendar, Notion, Slack via Composio, per-teammate grants, gateway-held writes), plus the browser and the shell | Composio holds OAuth tokens for connected apps when enabled; browser and shell work with any site with zero third-party middleman — see [security.md](security.md) |
 | Voice | ✅ voice chat and calls | ❌ | |
 | Apps | macOS, Windows and Linux desktop; iOS | macOS and Linux desktop apps (`.dmg`, `.deb`, `.AppImage`), plus the web UI in any browser | Windows desktop installer and phone layout still ahead |
 | Model choice | Grok only | Claude, OpenAI, Gemini, Grok, DeepSeek, Kimi, Qwen, GLM, MiniMax, local Ollama, or any compatible endpoint — per teammate | `stub` demo mode runs with no key |
 | Setup | Zero (their infra) | Desktop installer + first-run wizard (no Node or Docker needed), or `pnpm install` from source | This is the price of custody |
-| Your credentials live | xAI's cloud | Your disk | The actual point |
+| Your credentials live | xAI's cloud | Your disk (Composio vaults OAuth tokens only if you opt in to Connectors) | The actual point |
 
 ## The other two: Meta Muse and OpenAI dots
 
@@ -79,7 +79,7 @@ today they cannot act, but they can still load any page.
 ## What Grok Bot genuinely does better
 
 Zero-setup onboarding; managed, patched infrastructure; polished desktop and phone apps with voice; sign-in
-from a form instead of a takeover; a marketplace of connectors; a primary bot that finds work for you;
+from a form instead of a takeover; a broader marketplace of connectors; a primary bot that finds work for you;
 teach-by-demonstration; Team Bots in Slack; first-party Grok models the day they ship; one throat to choke when
 something breaks. If those are worth it to you and you're comfortable with the custody trade, it's a good
 product. This repo exists for everyone who isn't.
