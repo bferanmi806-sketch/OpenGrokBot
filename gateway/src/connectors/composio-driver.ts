@@ -513,6 +513,18 @@ function toGoogleEventTime(iso: string): { date: string } | { dateTime: string }
   return /^\d{4}-\d{2}-\d{2}$/.test(iso.trim()) ? { date: iso.trim() } : { dateTime: iso.trim() }
 }
 
+function toGraphEventTime(iso: string): string {
+  const trimmed = iso.trim()
+  if (/(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(trimmed)) {
+    const normalized = trimmed.replace(/([+-]\d{2})(\d{2})$/, '$1:$2')
+    const ms = Date.parse(normalized)
+    if (!Number.isNaN(ms)) {
+      return new Date(ms).toISOString().slice(0, 19)
+    }
+  }
+  return trimmed
+}
+
 function normalizeGraphEventTime(raw: unknown): string {
   if (!isRecord(raw) || typeof raw.dateTime !== 'string') return ''
   const dt = raw.dateTime.trim()
@@ -1831,8 +1843,8 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
                 method: 'POST',
                 body: {
                   subject: title,
-                  start: { dateTime: start, timeZone: 'UTC' },
-                  end: { dateTime: end, timeZone: 'UTC' },
+                  start: { dateTime: toGraphEventTime(start), timeZone: 'UTC' },
+                  end: { dateTime: toGraphEventTime(end), timeZone: 'UTC' },
                   ...(typeof args.location === 'string' ? { location: { displayName: args.location } } : {}),
                   ...(typeof args.description === 'string'
                     ? { body: { contentType: 'Text', content: args.description } }
@@ -1859,9 +1871,9 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
 
           if (app === 'google_calendar') {
             const patch: JsonRecord = {}
-            if (typeof args.title === 'string') patch.summary = args.title
-            if (typeof args.start === 'string') patch.start = toGoogleEventTime(args.start)
-            if (typeof args.end === 'string') patch.end = toGoogleEventTime(args.end)
+            if (typeof args.title === 'string' && args.title.trim()) patch.summary = args.title.trim()
+            if (typeof args.start === 'string' && args.start.trim()) patch.start = toGoogleEventTime(args.start)
+            if (typeof args.end === 'string' && args.end.trim()) patch.end = toGoogleEventTime(args.end)
             if (typeof args.location === 'string') patch.location = args.location
             if (typeof args.description === 'string') patch.description = args.description
             if (Array.isArray(args.attendees)) {
@@ -1883,9 +1895,13 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
 
           if (app === 'outlook_calendar') {
             const patch: JsonRecord = {}
-            if (typeof args.title === 'string') patch.subject = args.title
-            if (typeof args.start === 'string') patch.start = { dateTime: args.start, timeZone: 'UTC' }
-            if (typeof args.end === 'string') patch.end = { dateTime: args.end, timeZone: 'UTC' }
+            if (typeof args.title === 'string' && args.title.trim()) patch.subject = args.title.trim()
+            if (typeof args.start === 'string' && args.start.trim()) {
+              patch.start = { dateTime: toGraphEventTime(args.start), timeZone: 'UTC' }
+            }
+            if (typeof args.end === 'string' && args.end.trim()) {
+              patch.end = { dateTime: toGraphEventTime(args.end), timeZone: 'UTC' }
+            }
             if (typeof args.location === 'string') patch.location = { displayName: args.location }
             if (typeof args.description === 'string') patch.body = { contentType: 'Text', content: args.description }
             if (Array.isArray(args.attendees)) {

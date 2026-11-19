@@ -230,6 +230,43 @@ describe('ConnectorsDialog', () => {
     await waitFor(() => expect(onChange).toHaveBeenCalledWith(afterDeleteState))
   })
 
+  it('clears the authorizing hint immediately when a reconnecting account becomes active via WS update', async () => {
+    mockFetch({
+      'POST /api/connectors/ca-33334444/reconnect': () => ({
+        body: {
+          connectorId: 'ca-33334444',
+          redirectUrl: 'https://composio.example/oauth/slack-reauth',
+          callbackUrl: 'http://127.0.0.1:4319/oauth/connector/nonce3',
+        },
+      }),
+    })
+    vi.spyOn(window, 'open').mockImplementation(() => null)
+
+    const { rerender } = render(
+      <ConnectorsDialog state={snapshot} roster={roster} onChange={() => {}} onClose={() => {}} />,
+    )
+
+    const slackAccount = screen.getByText('Acme Slack').closest('.connector-account') as HTMLElement
+    expect(within(slackAccount).queryByText(/Finish signing in inside the browser tab/)).toBeNull()
+
+    await userEvent.click(within(slackAccount).getByRole('button', { name: 'Reconnect' }))
+    expect(await within(slackAccount).findByText(/Finish signing in inside the browser tab/)).toBeInTheDocument()
+
+    // Simulate WS connectors_changed pushing status: 'active' without clicking Refresh
+    const wsActiveState: ConnectorsSnapshot = {
+      ...snapshot,
+      accounts: snapshot.accounts.map((a) =>
+        a.id === 'ca-33334444' ? { ...a, status: 'active' as const, lastError: '' } : a,
+      ),
+    }
+    rerender(<ConnectorsDialog state={wsActiveState} roster={roster} onChange={() => {}} onClose={() => {}} />)
+    expect(within(slackAccount).queryByText(/Finish signing in inside the browser tab/)).toBeNull()
+
+    // If the account later expires again while the dialog stays open, the hint stays hidden until Reconnect is clicked again
+    rerender(<ConnectorsDialog state={snapshot} roster={roster} onChange={() => {}} onClose={() => {}} />)
+    expect(within(slackAccount).queryByText(/Finish signing in inside the browser tab/)).toBeNull()
+  })
+
   it('closes on Escape key', () => {
     const onClose = vi.fn()
     render(<ConnectorsDialog state={snapshot} roster={roster} onChange={() => {}} onClose={onClose} />)

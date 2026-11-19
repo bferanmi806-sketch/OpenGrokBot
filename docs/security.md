@@ -162,7 +162,7 @@ If a job needs a Linux of its own, software installed, or stronger isolation, gi
 | Risk | Hosted (Grok Bot) | Self-hosted (this repo) |
 |---|---|---|
 | Where your sessions live | the vendor's cloud VM | your disk (browser profiles); Composio only for apps you opt in to via Connectors |
-| Who can subpoena, breach or train on them | the vendor | you |
+| Who can subpoena, breach or train on them | the vendor | you (plus Composio for opted-in Connectors) |
 | Kill switch | a support ticket | the stop button, `docker stop`, or the power cable |
 | Audit trail | what the vendor shows you | every message and every action in SQLite on your disk |
 

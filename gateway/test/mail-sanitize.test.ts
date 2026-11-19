@@ -162,4 +162,28 @@ describe('mail-sanitize', () => {
     expect(sanitizeMailBody({ text: '   ', html: '<p>abcdefghij</p>', maxChars: 5 })).toBe('abcde\n…(truncated)')
     expect(sanitizeMailBody({})).toBe('')
   })
+
+  it('completes in <50ms without quadratic backtracking on adversarial whitespace and oversized payloads', () => {
+    const adversarial = 'Verification code: invoice ' + ' '.repeat(50_000) + 'x 1234'
+    const t0 = performance.now()
+    const out = sanitizeMailBody({
+      subject: 'Your verification code',
+      text: adversarial,
+      maxChars: 60_000,
+    })
+    const elapsed = performance.now() - t0
+
+    expect(elapsed).toBeLessThan(50)
+    expect(out.endsWith('x [redacted-otp]')).toBe(true)
+
+    // Oversized raw HTML / text is bounded before regex and entity passes
+    const hugeStart = performance.now()
+    const hugeOut = sanitizeMailBody({
+      subject: 'Security code',
+      html: `<p>${'a'.repeat(500_000)} verification code 918273</p>`,
+      maxChars: 1_000,
+    })
+    expect(performance.now() - hugeStart).toBeLessThan(50)
+    expect(hugeOut.endsWith('\n…(truncated)')).toBe(true)
+  })
 })

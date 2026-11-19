@@ -617,16 +617,27 @@ describe('composio-driver', () => {
     expect((await driver.executeWrite({
       version: 1, connectorId: ocalAcc.id, remoteId: ocalAcc.remote_id, app: 'outlook_calendar',
       accountLabel: ocalAcc.account_label, tool: 'calendar_create_event',
-      args: { title: 'Review', start: '2026-11-21T11:00:00Z', end: '2026-11-21T11:30:00Z', location: 'Zoom' },
+      args: {
+        title: 'Review',
+        start: '2026-11-20T15:00:00-08:00',
+        end: '2026-11-20T15:30:00-08:00',
+        location: 'Zoom',
+      },
       operationId: 'op-oc1',
     })).status).toBe('succeeded')
+    const ocalCreate = proxyRequests.find((r) => r.endpoint === '/v1.0/me/events' && r.method === 'POST')
+    expect(ocalCreate.body.start).toEqual({ dateTime: '2026-11-20T23:00:00', timeZone: 'UTC' })
+    expect(ocalCreate.body.end).toEqual({ dateTime: '2026-11-20T23:30:00', timeZone: 'UTC' })
 
     expect((await driver.executeWrite({
       version: 1, connectorId: ocalAcc.id, remoteId: ocalAcc.remote_id, app: 'outlook_calendar',
       accountLabel: ocalAcc.account_label, tool: 'calendar_update_event',
-      args: { eventId: 'oe1', location: 'Room 5A' },
+      args: { eventId: 'oe1', start: '2026-11-20T16:00:00-08:00', end: '   ', location: 'Room 5A' },
       operationId: 'op-oc2',
     })).status).toBe('succeeded')
+    const ocalPatch = proxyRequests.find((r) => r.endpoint === '/v1.0/me/events/oe1' && r.method === 'PATCH')
+    expect(ocalPatch.body.start).toEqual({ dateTime: '2026-11-21T00:00:00', timeZone: 'UTC' })
+    expect(ocalPatch.body.end).toBeUndefined()
   })
 
   it('searches, reads, creates, and appends Notion pages with Markdown <-> block conversion', async () => {

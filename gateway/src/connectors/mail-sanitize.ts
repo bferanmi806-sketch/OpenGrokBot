@@ -46,7 +46,7 @@ function shouldKeepDigits(before: string, after: string): boolean {
     return true
   }
   // Hash-prefixed or explicit invoice / order / ticket numbers (e.g. "Invoice #482910", "订单号：88442211")
-  if (/(?:#|\b(?:invoice|order|receipt|ticket|po)\s+#?|(?:发票|订单|账单|单据)(?:号|号码|编号)?\s*[:：#]?)\s*$/i.test(before)) {
+  if (/(?:#\s*|\b(?:invoice|order|receipt|ticket|po)\s+(?:#\s*)?|(?:发票|订单|账单|单据)(?:号码|编号|号)?\s*(?:[:：#]\s*)?)$/i.test(before)) {
     return true
   }
   // ISO dates (e.g. "2026-11-19") and standard phone numbers (e.g. "800-555-0199")
@@ -92,11 +92,21 @@ export function isAutomatedMail(input: {
   return false
 }
 
+function splitTrailingPunct(raw: string): { clean: string; trail: string } {
+  let end = raw.length
+  while (end > 0) {
+    const ch = raw.charCodeAt(end - 1)
+    if (ch !== 46 && ch !== 44 && ch !== 59 && ch !== 58 && ch !== 33 && ch !== 63) break
+    end--
+  }
+  return end === raw.length
+    ? { clean: raw, trail: '' }
+    : { clean: raw.slice(0, end), trail: raw.slice(end) }
+}
+
 export function stripTrackingLinks(text: string): string {
   return text.replace(URL_RE, (raw) => {
-    const trailMatch = raw.match(/[.,;:!?]+$/)
-    const trail = trailMatch ? trailMatch[0] : ''
-    const clean = trail ? raw.slice(0, -trail.length) : raw
+    const { clean, trail } = splitTrailingPunct(raw)
     const hashIdx = clean.indexOf('#')
     const withoutHash = hashIdx === -1 ? clean : clean.slice(0, hashIdx)
     const hashPart = hashIdx === -1 ? undefined : clean.slice(hashIdx + 1)
@@ -143,16 +153,20 @@ export function htmlToPlainText(html: string): string {
   )
   return decoded
     .replace(/\r\n?/g, '\n')
-    .replace(/[ \t]+\n/g, '\n')
+    .split('\n')
+    .map((line) => {
+      let end = line.length
+      while (end > 0 && (line.charCodeAt(end - 1) === 32 || line.charCodeAt(end - 1) === 9)) end--
+      return end === line.length ? line : line.slice(0, end)
+    })
+    .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
 
 export function redactAuthSecrets(text: string, subject = ''): string {
   const linkRedacted = text.replace(URL_RE, (raw) => {
-    const trailMatch = raw.match(/[.,;:!?]+$/)
-    const trail = trailMatch ? trailMatch[0] : ''
-    const clean = trail ? raw.slice(0, -trail.length) : raw
+    const { clean, trail } = splitTrailingPunct(raw)
     return SECURITY_URL_RE.test(clean) ? `[redacted-security-link]${trail}` : raw
   })
   const subjectIsAuth = hasAuthContext(subject)
@@ -188,12 +202,17 @@ export function sanitizeMailBody(raw: {
   subject?: string
   maxChars?: number
 }): string {
-  const max = raw.maxChars ?? 12_000
-  const base = raw.text?.trim()
-    ? raw.text.replace(/\r\n?/g, '\n').trim()
-    : raw.html
-      ? htmlToPlainText(raw.html)
+  const max = Math.max(0, raw.maxChars ?? 12_000)
+  const rawCap = Math.max(max * 6, 200_000)
+  const baseCap = Math.max(max * 3, 100_000)
+  const rawText = raw.text ? raw.text.slice(0, rawCap) : ''
+  const rawHtml = raw.html ? raw.html.slice(0, rawCap) : ''
+  const rawBase = rawText.trim()
+    ? rawText.replace(/\r\n?/g, '\n').trim()
+    : rawHtml
+      ? htmlToPlainText(rawHtml)
       : ''
-  const cleaned = stripTrackingLinks(redactAuthSecrets(base, raw.subject ?? ''))
+  const base = rawBase.length > baseCap ? rawBase.slice(0, baseCap) : rawBase
+  const cleaned = stripTrackingLinks(redactAuthSecrets(base, (raw.subject ?? '').slice(0, 4_000)))
   return cleaned.length > max ? `${cleaned.slice(0, max)}\n…(truncated)` : cleaned
 }

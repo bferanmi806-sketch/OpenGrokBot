@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import {
   ApiError,
   SignedOut,
@@ -84,6 +84,19 @@ export function ConnectorsDialog({ state, roster, onChange, onSignedOut, onClose
   const [managingId, setManagingId] = useState<string | null>(null)
   const [accessBots, setAccessBots] = useState<Set<string>>(() => new Set())
   const [reconnectingIds, setReconnectingIds] = useState<Set<string>>(() => new Set())
+
+  useEffect(() => {
+    setReconnectingIds((prev) => {
+      if (prev.size === 0) return prev
+      const keep = new Set<string>()
+      for (const acc of state.accounts) {
+        if (acc.status !== 'active' && prev.has(acc.id)) {
+          keep.add(acc.id)
+        }
+      }
+      return keep.size === prev.size ? prev : keep
+    })
+  }, [state.accounts])
 
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -420,7 +433,7 @@ export function ConnectorsDialog({ state, roster, onChange, onSignedOut, onClose
                               const grantedBotIds = botOrder.filter((botId) => (state.botGrants[botId] ?? []).includes(acc.id))
                               const grantedNames = grantedBotIds.map((botId) => roster[botId]?.name ?? botId)
                               const isManaging = managingId === acc.id
-                              const showHint = acc.status === 'pending' || reconnectingIds.has(acc.id)
+                              const showHint = acc.status === 'pending' || (acc.status !== 'active' && reconnectingIds.has(acc.id))
                               return (
                                 <div className="connector-account" key={acc.id}>
                                   <div className="connector-account-head">
