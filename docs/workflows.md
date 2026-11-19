@@ -76,29 +76,30 @@ written to the trace, approval, message, action-log, or run response. They are c
 or is discarded. A gateway restart loses the in-memory continuation: approving a pending workflow step then returns
 `409`; discard it and start a new run with fresh bindings.
 
-To stop an active run, send `DELETE /api/bots/{botId}/workflows/runs/{runId}`. If a step is awaiting approval, this
-discards that approval and releases the teammate. If a browser operation is in progress, the response is `202` and
-the runner finishes that operation before stopping; it will not start another step.
+To stop an active run, send `DELETE /api/bots/{botId}/workflows/runs/{runId}` (or `POST /api/threads/dm:{botId}/stop`).
+If a step is awaiting approval, stopping discards that approval and releases the teammate. If a browser operation is in
+progress, the run finishes that operation before stopping and will not start another step.
 
-Each state-changing browser action asks for approval before it runs. Navigation itself is not gated. A step can include
-explicit metadata during trace review/save:
+Steps run without asking unless an action step declares explicit `approval` metadata during trace review/save:
 
 ```json
 {"type":"click","target":{"candidates":[{"role":{"role":"button","name":"Send"}}]},"approval":{"kind":"email","target":"person@example.test","action":"Send the invoice"}}
 ```
 
-Without metadata, the step is classified as `other` and always asks. Metadata for `email`, `message`, or `post` can
-use an existing exact standing rule only when the operator supplies no runtime bindings. Workflows with dynamic
-values always ask, so a saved rule cannot silently approve a different runtime destination. Approval resumes the
-exact held step without asking the language model to reconstruct it. A discarded approval stops the run.
+Steps with `approval` pause at the existing approval gate before executing (`purchase`, `booking`, and `other` always
+ask; `email`, `message`, and `post` can match an existing exact standing rule only when the operator supplies no
+runtime bindings). Workflows with dynamic values always ask, so a saved rule cannot silently approve a different
+runtime destination. Approval resumes the exact held step without asking the language model to reconstruct it. A
+discarded approval stops the run.
 
 The v1 runner rejects a trace before any browser action if it is truncated, has an unrecorded popup, or references a
 page/frame. It resolves locator candidates in order, but once an action is attempted it never retries another
-candidate; this avoids repeating an action whose completion is uncertain. An expected-URL mismatch or browser error
-stops the workflow before later steps run.
+candidate; this avoids repeating an action whose completion is uncertain. An expected-URL mismatch (polled for up to
+five seconds), an unrecorded popup (which is closed immediately), or a browser error stops the workflow before later
+steps run.
 
 The computer status response includes `workflowRecording` during capture and `workflowDraft` while review is
-pending. An active recording prevents idle computer cleanup until it is stopped.
+pending. An active workflow run or recording prevents idle computer cleanup until it finishes or is stopped.
 
 ## Trace format v1
 
