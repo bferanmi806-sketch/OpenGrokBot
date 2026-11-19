@@ -768,6 +768,7 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
     const key = init.apiKey ?? requireApiKey()
     const url = `${baseUrl()}${path}`
     let res: Response
+    let data: unknown
     try {
       res = await fetchFn(url, {
         method: init.method ?? 'GET',
@@ -775,6 +776,7 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
         ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
         signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
       })
+      data = await parseResponseBody(res)
     } catch (err) {
       if (isTimeoutOrAbortError(err)) {
         throw new ConnectorDriverError('timeout', 'Composio request timed out')
@@ -782,7 +784,6 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
       throw new ConnectorDriverError('upstream', err instanceof Error ? err.message : String(err))
     }
 
-    const data = await parseResponseBody(res)
     if (res.ok || init.allowStatuses?.includes(res.status)) {
       return { status: res.status, data }
     }
@@ -814,6 +815,7 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
 
     for (let attempt = 0; attempt < 2; attempt++) {
       let res: Response
+      let rawParsed: unknown
       try {
         res = await fetchFn(url, {
           method: 'POST',
@@ -821,6 +823,7 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
           body: JSON.stringify(payload),
           signal: AbortSignal.timeout(READ_TIMEOUT_MS),
         })
+        rawParsed = await parseResponseBody(res)
       } catch (err) {
         if (isTimeoutOrAbortError(err)) {
           throw new ConnectorDriverError('timeout', `Upstream request timed out (${req.endpoint})`)
@@ -828,7 +831,6 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
         throw new ConnectorDriverError('upstream', err instanceof Error ? err.message : String(err))
       }
 
-      const rawParsed = await parseResponseBody(res)
       const unwrapped = unwrapProxyEnvelope(res.status, res.ok, rawParsed)
 
       if (unwrapped.status === 429 && retryOn429 && attempt === 0) {
@@ -876,13 +878,17 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
       return { kind: 'uncertain', detail: UNCERTAIN_WRITE_DETAIL }
     }
 
-    let rawParsed: unknown = {}
+    let rawParsed: unknown
     try {
       rawParsed = await parseResponseBody(res)
     } catch {
-      if (!res.ok && res.status >= 500) {
-        return { kind: 'uncertain', detail: UNCERTAIN_WRITE_DETAIL }
+      if (!res.ok && res.status >= 400 && res.status < 500) {
+        if (res.status === 401 || res.status === 403 || res.status === 410) {
+          return { kind: 'failed', error: 'authorization expired', authExpired: true }
+        }
+        return { kind: 'failed', error: `Upstream rejected write (${res.status})` }
       }
+      return { kind: 'uncertain', detail: UNCERTAIN_WRITE_DETAIL }
     }
 
     const unwrapped = unwrapProxyEnvelope(res.status, res.ok, rawParsed)
@@ -1155,17 +1161,22 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
             in: 'query',
           },
         ]
-        if (listOpts.query?.trim()) {
-          params.push({ name: '$search', value: `"${listOpts.query.trim().replace(/"/g, '')}"`, in: 'query' })
+        const dateField = folder === 'sent' ? 'sentDateTime' : 'receivedDateTime'
+        const cleanQuery = listOpts.query?.trim().replace(/"/g, '') ?? ''
+        if (cleanQuery) {
+          const searchExpr = listOpts.unread !== undefined
+            ? `${cleanQuery} isread:${listOpts.unread ? 'false' : 'true'}`
+            : cleanQuery
+          params.push({ name: '$search', value: `"${searchExpr}"`, in: 'query' })
         } else {
-          params.push({
-            name: '$orderby',
-            value: folder === 'sent' ? 'sentDateTime desc' : 'receivedDateTime desc',
-            in: 'query',
-          })
-        }
-        if (listOpts.unread !== undefined) {
-          params.push({ name: '$filter', value: `isRead eq ${listOpts.unread ? 'false' : 'true'}`, in: 'query' })
+          params.push({ name: '$orderby', value: `${dateField} desc`, in: 'query' })
+          if (listOpts.unread !== undefined) {
+            params.push({
+              name: '$filter',
+              value: `${dateField} ge 1900-01-01T00:00:00Z and isRead eq ${listOpts.unread ? 'false' : 'true'}`,
+              in: 'query',
+            })
+          }
         }
         if (listOpts.cursor?.trim()) {
           const cur = listOpts.cursor.trim()
@@ -1177,7 +1188,7 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
         const rawItems = Array.isArray(obj.value) ? obj.value : []
         const messages = rawItems
           .map(parseGraphSummary)
-          .filter((m) => includeAutomated || !m.automated)
+          .filter((m) => (includeAutomated || !m.automated) && (listOpts.unread === undefined || m.unread === listOpts.unread))
 
         let nextCursor: string | undefined
         if (typeof obj['@odata.nextLink'] === 'string') {

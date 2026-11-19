@@ -898,4 +898,137 @@ describe('composio-driver', () => {
     })
     expect(slackWriteRevoked).toEqual({ status: 'failed', error: 'authorization expired', authExpired: true })
   })
+
+  it('handles mid-stream response body timeouts/resets safely across write, read, and control requests', async () => {
+    const brokenBodyResponse = (status = 200, err: unknown = new DOMException('Body stream timed out', 'TimeoutError')) => {
+      const stream = new ReadableStream<Uint8Array>({
+        pull() {
+          return Promise.reject(err)
+        },
+      })
+      return new Response(stream, { status })
+    }
+
+    let writeAttempts = 0
+    let writeStatus = 200
+    const writeDriver = createComposioDriver({
+      getApiKey: () => 'cmp_test',
+      fetchImpl: async () => {
+        writeAttempts++
+        return brokenBodyResponse(writeStatus)
+      },
+    })
+
+    // Outer 200 with mid-stream body timeout MUST return uncertain (never false succeeded) without retrying
+    const resMidStream200 = await writeDriver.executeWrite({
+      version: 1, connectorId: slackAcc.id, remoteId: slackAcc.remote_id, app: 'slack',
+      accountLabel: slackAcc.account_label, tool: 'slack_send_message',
+      args: { channelId: 'C01', text: 'Critical update' }, operationId: 'op-body-timeout-1',
+    })
+    expect(writeAttempts).toBe(1)
+    expect(resMidStream200.status).toBe('uncertain')
+
+    // Outer 401 with mid-stream body error still classifies as 401 authExpired failure
+    writeStatus = 401
+    writeAttempts = 0
+    const resMidStream401 = await writeDriver.executeWrite({
+      version: 1, connectorId: gmailAcc.id, remoteId: gmailAcc.remote_id, app: 'gmail',
+      accountLabel: gmailAcc.account_label, tool: 'mail_send',
+      args: { to: ['bob@acme.com'], subject: 'Hi', body: 'Hello' }, operationId: 'op-body-timeout-401',
+    })
+    expect(writeAttempts).toBe(1)
+    expect(resMidStream401).toEqual({ status: 'failed', error: 'authorization expired', authExpired: true })
+
+    // Outer 400 with mid-stream body error classifies as non-auth failed
+    writeStatus = 400
+    writeAttempts = 0
+    const resMidStream400 = await writeDriver.executeWrite({
+      version: 1, connectorId: gmailAcc.id, remoteId: gmailAcc.remote_id, app: 'gmail',
+      accountLabel: gmailAcc.account_label, tool: 'mail_send',
+      args: { to: ['bob@acme.com'], subject: 'Hi', body: 'Hello' }, operationId: 'op-body-timeout-400',
+    })
+    expect(writeAttempts).toBe(1)
+    expect(resMidStream400).toEqual({ status: 'failed', error: 'Upstream rejected write (400)' })
+
+    // proxyRead and controlRequest wrap mid-stream body TimeoutError / socket reset into ConnectorDriverError
+    const readTimeoutDriver = createComposioDriver({
+      getApiKey: () => 'cmp_test',
+      fetchImpl: async () => brokenBodyResponse(200),
+    })
+    await expect(readTimeoutDriver.listMail(gmailAcc, {})).rejects.toSatisfy(
+      (err: unknown) => err instanceof ConnectorDriverError && err.code === 'timeout',
+    )
+    await expect(readTimeoutDriver.startOAuth({
+      app: 'gmail', callbackUrl: 'http://127.0.0.1:4747/oauth/connector/n1', userKey: 'opensuperbot',
+    })).rejects.toSatisfy(
+      (err: unknown) => err instanceof ConnectorDriverError && err.code === 'timeout',
+    )
+
+    const readResetDriver = createComposioDriver({
+      getApiKey: () => 'cmp_test',
+      fetchImpl: async () => brokenBodyResponse(200, new TypeError('terminated')),
+    })
+    await expect(readResetDriver.listMail(gmailAcc, {})).rejects.toSatisfy(
+      (err: unknown) => err instanceof ConnectorDriverError && err.code === 'upstream',
+    )
+  })
+
+  it('formats Microsoft Graph Outlook listMail queries to avoid InefficientFilter and SearchWithFilter 400 errors', async () => {
+    const seenParams: { endpoint: string; params: Record<string, string> }[] = []
+    const fakeFetch: typeof fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}'))
+      const map: Record<string, string> = {}
+      for (const p of body.parameters ?? []) {
+        if (p.in === 'query') map[p.name] = p.value
+      }
+      seenParams.push({ endpoint: body.endpoint, params: map })
+      return Response.json({
+        status: 200,
+        data: {
+          value: [
+            {
+              id: 'om_u1',
+              subject: 'Quote request',
+              bodyPreview: 'Need quote',
+              isRead: false,
+              receivedDateTime: '2026-11-19T12:00:00Z',
+              from: { emailAddress: { address: 'bob@client.com' } },
+              toRecipients: [{ emailAddress: { address: 'alice@outlook.com' } }],
+            },
+            {
+              id: 'om_r2',
+              subject: 'Old quote',
+              bodyPreview: 'Read quote',
+              isRead: true,
+              receivedDateTime: '2026-11-18T12:00:00Z',
+              from: { emailAddress: { address: 'bob@client.com' } },
+              toRecipients: [{ emailAddress: { address: 'alice@outlook.com' } }],
+            },
+          ],
+        },
+        headers: {},
+      })
+    }
+
+    const driver = createComposioDriver({ getApiKey: () => 'cmp_test', fetchImpl: fakeFetch })
+
+    // 1. unread without query: prefixes $orderby date property in $filter so Graph never throws 400 InefficientFilter
+    const unreadOnly = await driver.listMail(outlookAcc, { folder: 'inbox', unread: true })
+    expect(unreadOnly.messages.map((m) => m.id)).toEqual(['om_u1'])
+    expect(seenParams[0]!.params['$orderby']).toBe('receivedDateTime desc')
+    expect(seenParams[0]!.params['$filter']).toBe('receivedDateTime ge 1900-01-01T00:00:00Z and isRead eq false')
+    expect(seenParams[0]!.params['$search']).toBeUndefined()
+
+    // Sent folder with unread: false prefixes sentDateTime to match sentDateTime desc
+    await driver.listMail(outlookAcc, { folder: 'sent', unread: false })
+    expect(seenParams[1]!.params['$orderby']).toBe('sentDateTime desc')
+    expect(seenParams[1]!.params['$filter']).toBe('sentDateTime ge 1900-01-01T00:00:00Z and isRead eq true')
+
+    // 2. unread + query together: folds isread:<bool> into $search, omits $filter and $orderby, and filters unread client-side
+    const searchUnread = await driver.listMail(outlookAcc, { folder: 'inbox', unread: true, query: 'quote' })
+    expect(searchUnread.messages.map((m) => m.id)).toEqual(['om_u1'])
+    expect(seenParams[2]!.params['$search']).toBe('"quote isread:false"')
+    expect(seenParams[2]!.params['$filter']).toBeUndefined()
+    expect(seenParams[2]!.params['$orderby']).toBeUndefined()
+  })
 })
