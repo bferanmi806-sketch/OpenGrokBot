@@ -1,4 +1,5 @@
 import { APPROVAL_KINDS } from './approvals.js'
+import { CONNECTOR_READ_TOOL_NAMES } from './connectors/tools.js'
 import type { ToolDef } from './llm.js'
 
 export const MESSAGE_USER_TOOL: ToolDef = {
@@ -338,6 +339,7 @@ const SKILL_TOOL: ToolDef = {
 export const WATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
   'message_user', 'hold_for_approval', 'ask_operator', 'read_skill', 'read_file',
   'browser_goto', 'browser_extract', 'browser_scroll', 'browser_back', 'browser_screenshot', 'ask_for_login',
+  ...CONNECTOR_READ_TOOL_NAMES,
 ])
 
 const RELAY_TOOL: ToolDef = {
@@ -377,6 +379,8 @@ export function buildTools(opts: {
   shell?: boolean
   /** 本机电脑的 shell 说明不一样（没有 /workspace 这个目录） */
   kind?: 'docker' | 'local'
+  /** 这位同事已获授权的外部应用连接器工具 */
+  connectorTools?: ToolDef[]
 }): ToolDef[] {
   const computerTools = COMPUTER_TOOLS
     .filter((t) => opts.shell !== false || t.function.name !== 'shell')
@@ -403,6 +407,7 @@ export function buildTools(opts: {
     ...(opts.hasSkills ? [SKILL_TOOL] : []),
     ...(opts.canRelay ? [RELAY_TOOL] : []),
     ...(opts.hasComputer ? computerTools : []),
+    ...(opts.connectorTools ?? []),
   ].filter((t) => opts.operatorTurn !== false || !OPERATOR_ONLY_TOOL_NAMES.has(t.function.name))
   return opts.watch ? tools.filter((t) => WATCH_TOOL_NAMES.has(t.function.name)) : tools
 }

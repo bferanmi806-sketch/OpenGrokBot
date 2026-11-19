@@ -2,12 +2,12 @@ import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { listActions, recordAction, type ActionTrigger } from './actions.js'
 import { runTurn, type AttachmentBrief, type TurnOrigin, type TurnOutcome } from './agent.js'
 import {
   attachApprovalMessage, canRemember, createApproval, createRule, findMatchingRule, getApproval, getRule, isRuleDuration,
-  blockText, isThumbsUp, itemsOf, latestPendingApproval, listActiveRules, pickItems, rememberBlock, rememberReason, resolveApproval, revokeRule,
+  blockText, isThumbsUp, itemsOf, latestPendingApproval, listActiveRules, pickItems, recordApprovalExecution, rememberBlock, rememberReason, resolveApproval, revokeRule,
   setApprovedItems, type ApprovalRuleRow, type RuleDuration,
 } from './approvals.js'
 import { canMessage, denyReason, type A2ARules } from './a2a.js'
@@ -23,7 +23,7 @@ import type { BotComputer, ComputerKind } from './computer.js'
 import type { BackendWhy } from './backend.js'
 import { errorBody } from './coded-error.js'
 import { resolveMentions } from './mentions.js'
-import { noticeText, type BudgetHit } from './notices.js'
+import { noticeText, type BudgetHit, type Notice } from './notices.js'
 import type { SandboxMissing } from './sandbox.js'
 import { readSavedSettings, resolveSettings } from './settings.js'
 import type { Pool } from './pool.js'
@@ -41,8 +41,14 @@ import { mountConnectors } from './connectors/api.js'
 import { catalogByApp } from './connectors/catalog.js'
 import { createComposioDriver } from './connectors/composio-driver.js'
 import { composioBaseUrl, resolveComposioKey } from './connectors/keys.js'
-import { listBotConnectorIds, listConnectorAccounts } from './connectors/store.js'
-import type { ConnectorDriver } from './connectors/types.js'
+import {
+  getConnectorAccount,
+  listBotConnectorIds,
+  listBotConnectorsAllStatuses,
+  listConnectorAccounts,
+} from './connectors/store.js'
+import { buildConnectorTools, handleConnectorAuthExpired, runConnectorToolCall } from './connectors/tools.js'
+import type { ConnectorDriver, FrozenExecution } from './connectors/types.js'
 import { mountSettings, type SettingsDeps } from './settings-api.js'
 import { mountSetup, type SetupDeps } from './setup-api.js'
 import { createTurnQueue } from './turns.js'
@@ -497,16 +503,39 @@ export function createApp(deps: AppDeps): GatewayApp {
       const memory = dataDir ? await readMemory(dataDir, bot.id) : ''
       const routines = listRoutines(db, bot.id)
         .map((r) => ({ id: r.id, name: r.name, human: describeRoutine(r), enabled: r.enabled === 1, watch: r.mode === 'watch' }))
+      const botConnectors = listBotConnectorsAllStatuses(db, bot.id)
+      const activeConnectors = botConnectors.filter((c) => c.status === 'active')
+      const promptConnectors = botConnectors.map((c) => ({
+        id: c.id,
+        app: c.app,
+        label: c.account_label || c.id,
+        status: c.status,
+      }))
+      const connectorTools = buildConnectorTools(activeConnectors, { watch: opts.watch })
       const skills = dataDir ? await listSkills(skillsDir(dataDir)) : []
       const trigger = opts.trigger ?? 'you'
       // 这位同事此刻用的模型：回合开始时定下，回合中途改了设置从下一回合起生效
       const own = deps.llmFor?.(bot.id)
       const vision = own ? own.vision : (typeof deps.vision === 'function' ? deps.vision() : deps.vision) === true
       const outcome = await runTurn({
-        db, llm: own?.llm ?? llm, bot, soul, manual, memory, routines, threadId, signal, now,
+        db, llm: own?.llm ?? llm, bot, soul, manual, memory, routines, connectors: promptConnectors, connectorTools, threadId, signal, now,
         origin: opts.origin,
         hop: opts.hop ?? 0,
         vision,
+        onConnectorTool: ({ name, args, ruleBlock, events: turnEvents }) =>
+          runConnectorToolCall({
+            db,
+            driver: connectorDriver,
+            hub,
+            botId: bot.id,
+            threadId,
+            trigger,
+            name,
+            args,
+            ruleBlock,
+            events: turnEvents,
+            now: now().getTime(),
+          }),
         ...(uploads ? { attachments: (rows: MessageRow[]) => briefAttachments(bot, vision, rows) } : {}),
         ...(deps.timeZone ? { timeZone: deps.timeZone } : {}),
         ...(deps.maxSteps ? { maxSteps: deps.maxSteps } : {}),
@@ -668,7 +697,8 @@ export function createApp(deps: AppDeps): GatewayApp {
       : null
     const remembered = rule ? { id: rule.id, expiresAt: rule.expires_at } : undefined
 
-    if (approval.message_id) {
+    const patchChip = (extra: Record<string, unknown> = {}) => {
+      if (!approval.message_id) return
       // 按 id 直接取：chip 可能早就不在最近 200 条里了；保留 chip 上原有的字段（类别、去向）
       const chip = getMessage(db, approval.message_id)
       updateMessagePayload(db, approval.message_id, {
@@ -676,10 +706,12 @@ export function createApp(deps: AppDeps): GatewayApp {
         approvalId: approval.id, action: approval.action, detail: approval.detail, status: approval.status,
         ...(remembered ? { remembered } : {}),
         ...(picked ? { approvedItems: picked } : {}),
+        ...extra,
       })
       const updated = getMessage(db, approval.message_id)
       if (updated) hub.broadcast({ type: 'message', threadId: approval.thread_id, message: updated })
     }
+    patchChip()
 
     const resolved = insertMessage(db, {
       threadId: approval.thread_id, sender: 'user', kind: 'approval_resolved',
@@ -697,6 +729,128 @@ export function createApp(deps: AppDeps): GatewayApp {
     })
 
     const bot = botById(approval.bot_id)
+    if (approval.execution_json && decision === 'approve') {
+      const postNotice = (n: Notice) => {
+        const msg = insertMessage(db, {
+          threadId: approval.thread_id,
+          sender: approval.bot_id,
+          kind: 'text',
+          content: noticeText(n),
+          payload: n,
+        })
+        hub.broadcast({ type: 'message', threadId: approval.thread_id, message: msg })
+      }
+      let frozen: FrozenExecution | null = null
+      try {
+        frozen = JSON.parse(approval.execution_json) as FrozenExecution
+      } catch {
+        frozen = null
+      }
+      if (!frozen) {
+        const failDetail = 'Invalid frozen connector execution payload.'
+        recordApprovalExecution(db, approval.id, 'failed', failDetail)
+        patchChip({ executionStatus: 'failed', executionDetail: failDetail })
+        postNotice({ notice: 'connector_execution', params: { status: 'failed', action: approval.action, detail: failDetail } })
+        return 'ok'
+      }
+
+      const currentAcc = getConnectorAccount(db, frozen.connectorId)
+      const grantedIds = listBotConnectorIds(db, approval.bot_id)
+      if (!currentAcc || currentAcc.status !== 'active' || !grantedIds.includes(frozen.connectorId)) {
+        const failDetail = 'Connector is no longer active or authorized for this teammate.'
+        recordApprovalExecution(db, approval.id, 'failed', failDetail)
+        patchChip({ executionStatus: 'failed', executionDetail: failDetail })
+        recordAction(db, {
+          botId: approval.bot_id,
+          threadId: approval.thread_id,
+          trigger: 'approval',
+          tool: frozen.tool,
+          summary: `blocked: ${failDetail}`,
+          ok: false,
+          ms: 0,
+          at: now().getTime(),
+        })
+        postNotice({ notice: 'connector_execution', params: { status: 'failed', action: approval.action, detail: failDetail } })
+        return 'ok'
+      }
+
+      const execStarted = Date.now()
+      const execRes = await connectorDriver.executeWrite({
+        ...frozen,
+        remoteId: currentAcc.remote_id,
+        accountLabel: currentAcc.account_label || frozen.accountLabel,
+      })
+      const execMs = Date.now() - execStarted
+      const execAt = now().getTime()
+
+      if (execRes.status === 'succeeded') {
+        recordApprovalExecution(db, approval.id, 'succeeded', execRes.summary)
+        patchChip({ executionStatus: 'succeeded', executionDetail: execRes.summary })
+        recordAction(db, {
+          botId: approval.bot_id,
+          threadId: approval.thread_id,
+          trigger: 'approval',
+          tool: frozen.tool,
+          summary: execRes.summary,
+          ok: true,
+          ms: execMs,
+          at: execAt,
+        })
+        if (bot) {
+          void startTurn(
+            bot,
+            approval.thread_id,
+            `Your operator approved #${approval.id} and the gateway executed ${frozen.tool}: ${execRes.summary}.`,
+            { origin: 'operator', persistUserMessage: false, prewarm: false, trigger: 'approval' },
+          )
+        }
+        return 'ok'
+      }
+
+      if (execRes.status === 'failed') {
+        recordApprovalExecution(db, approval.id, 'failed', execRes.error)
+        patchChip({ executionStatus: 'failed', executionDetail: execRes.error })
+        recordAction(db, {
+          botId: approval.bot_id,
+          threadId: approval.thread_id,
+          trigger: 'approval',
+          tool: frozen.tool,
+          summary: execRes.error,
+          ok: false,
+          ms: execMs,
+          at: execAt,
+        })
+        if (execRes.authExpired) {
+          handleConnectorAuthExpired({
+            db,
+            hub,
+            threadId: approval.thread_id,
+            botId: approval.bot_id,
+            account: currentAcc,
+            error: execRes.error,
+            now: execAt,
+          })
+        }
+        postNotice({ notice: 'connector_execution', params: { status: 'failed', action: approval.action, detail: execRes.error } })
+        return 'ok'
+      }
+
+      recordApprovalExecution(db, approval.id, 'uncertain', execRes.detail)
+      patchChip({ executionStatus: 'uncertain', executionDetail: execRes.detail })
+      recordAction(db, {
+        botId: approval.bot_id,
+        threadId: approval.thread_id,
+        trigger: 'approval',
+        tool: frozen.tool,
+        summary: `uncertain: ${execRes.detail}`,
+        ok: false,
+        ms: execMs,
+        at: execAt,
+      })
+      postNotice({ notice: 'connector_execution', params: { status: 'uncertain', action: approval.action, detail: execRes.detail } })
+      return 'ok'
+    }
+
     if (bot) {
       const seed = decision !== 'approve'
         ? `Your operator discarded: ${approval.action}. Do not do it. Acknowledge in one line and move on.`
@@ -1251,7 +1405,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     return c.json({ error: 'not found' }, 404)
   })
 
-  app.post('/api/approvals/:id', async (c) => {
+  const decideApproval = async (c: Context) => {
     const body = (await c.req.json().catch(() => null)) as { decision?: string; remember?: unknown; items?: unknown } | null
     if (body?.decision !== 'approve' && body?.decision !== 'discard') {
       return c.json({ error: 'decision must be "approve" or "discard"' }, 400)
@@ -1272,7 +1426,9 @@ export function createApp(deps: AppDeps): GatewayApp {
       return c.json({ error: `this always asks: ${why ?? 'it cannot become a rule'}` }, 400)
     }
     return c.json({ ok: true }, 202)
-  })
+  }
+  app.post('/api/approvals/:id', decideApproval)
+  app.post('/api/approvals/:id/decide', decideApproval)
 
   mountUploads(app, { uploads, onRemoved: markUploadRemoved })
 
