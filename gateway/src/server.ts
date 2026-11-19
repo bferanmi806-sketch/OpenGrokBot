@@ -37,6 +37,12 @@ import { listSkills, readSkill, skillsDir } from './skills.js'
 import type { Scheduler } from './scheduler.js'
 import { readBodyUpTo } from './body.js'
 import { mountConnections } from './connections-api.js'
+import { mountConnectors } from './connectors/api.js'
+import { catalogByApp } from './connectors/catalog.js'
+import { createComposioDriver } from './connectors/composio-driver.js'
+import { composioBaseUrl, resolveComposioKey } from './connectors/keys.js'
+import { listBotConnectorIds, listConnectorAccounts } from './connectors/store.js'
+import type { ConnectorDriver } from './connectors/types.js'
 import { mountSettings, type SettingsDeps } from './settings-api.js'
 import { mountSetup, type SetupDeps } from './setup-api.js'
 import { createTurnQueue } from './turns.js'
@@ -89,6 +95,8 @@ export type AppDeps = {
   setup?: SetupDeps
   /** 操作者发来的文件总共最多占多少 MB；0 或不传 = 不限 */
   uploadsMaxMb?: number
+  connectorDriver?: ConnectorDriver
+  env?: Record<string, string | undefined>
 }
 
 export type GatewayApp = {
@@ -200,6 +208,11 @@ export function createApp(deps: AppDeps): GatewayApp {
   const chiefId = deps.chiefId ?? 'chief'
   const a2aRules = deps.a2aRules ?? { chiefId, pairs: [] }
   const now = deps.now ?? (() => new Date())
+  const env = deps.env ?? deps.settings?.env ?? process.env
+  const connectorDriver = deps.connectorDriver ?? createComposioDriver({
+    getApiKey: () => resolveComposioKey(env, dataDir).key,
+    getBaseUrl: () => composioBaseUrl(env),
+  })
   const hub = createHub()
   const app = new Hono()
   // 车道只说「忙 / 不忙」；不忙的时候是在等你、卡住了，还是真的闲着，由 presenceOf 看库和上一回合的收场来定
@@ -361,6 +374,15 @@ export function createApp(deps: AppDeps): GatewayApp {
   if (deps.settings && deps.setup) {
     mountSetup(app, { ...deps.settings, ...deps.setup, db, hub, chiefId, ...(deps.computers ? { computers: deps.computers } : {}) })
   }
+  mountConnectors(app, {
+    db,
+    dataDir,
+    env,
+    driver: connectorDriver,
+    hub,
+    now: () => now().getTime(),
+    ...(deps.allowedOrigins ? { allowedOrigins: deps.allowedOrigins } : {}),
+  })
 
   const botById = (id: string) => db.prepare('SELECT * FROM bots WHERE id = ?').get(id) as BotRow | undefined
   const computerKind: ComputerKind = deps.computers?.kind ?? 'docker'
@@ -788,8 +810,17 @@ export function createApp(deps: AppDeps): GatewayApp {
     const memory = dataDir ? await listMemoryRules(dataDir, botId) : []
     const skills = dataDir ? await listSkills(skillsDir(dataDir)) : []
     const actions = listActions(db, botId, 30)
+    const botGrantSet = new Set(listBotConnectorIds(db, botId))
+    const connectors = listConnectorAccounts(db).map((a) => ({
+      id: a.id,
+      app: a.app,
+      name: catalogByApp(a.app)?.name ?? a.app,
+      accountLabel: a.account_label,
+      status: a.status,
+      granted: botGrantSet.has(a.id),
+    }))
     const base = {
-      botId, routines, usage, rules, memory, skills, actions,
+      botId, routines, usage, rules, memory, skills, actions, connectors,
       workflowRecording: workflowRecordings.has(botId), workflowDraft: workflowDrafts.has(botId),
     }
     if (!pool) return c.json({ ...base, running: false, vncUrl: null })
