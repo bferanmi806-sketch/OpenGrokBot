@@ -67,6 +67,9 @@ describe('the Chinese dictionary', () => {
       'connectors.refresh',
       'connectors.disconnect',
       'connectors.confirmDisconnect',
+      'connectors.error.unauthorized',
+      'connectors.error.bad_request',
+      'connectors.error.locked',
       'panel.connectors',
       'panel.connectorsHint',
       'approval.exec.succeeded',
@@ -83,6 +86,12 @@ describe('the Chinese dictionary', () => {
     expect(zhCN['sidebar.connectors']).toBe('连接器')
     expect(zhCN['connectors.status.expired']).toBe('需重新授权')
     expect(zhCN['connectors.noGrants']).toBe('未授权给任何同事')
+    expect(en['connectors.keyLocked']).toContain('OPENSUPERBOT_COMPOSIO_API_KEY')
+    expect(zhCN['connectors.keyLocked']).toContain('OPENSUPERBOT_COMPOSIO_API_KEY')
+    expect(en['connectors.error.locked']).toContain('OPENSUPERBOT_COMPOSIO_API_KEY')
+    expect(zhCN['connectors.error.locked']).toContain('OPENSUPERBOT_COMPOSIO_API_KEY')
+    expect(en['approval.exec.succeeded']).toBe('✓ Executed')
+    expect(zhCN['approval.exec.succeeded']).toBe('✓ 已执行')
   })
 })
 
