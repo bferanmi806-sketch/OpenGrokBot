@@ -249,6 +249,37 @@ const MIGRATIONS: Migration[] = [
     CREATE INDEX IF NOT EXISTS idx_messages_login_req ON messages(sender, thread_id, id)
       WHERE kind = 'login_request';
   `),
+  // v11：第三方应用连接器（账号表 + 按同事显式授权表），以及网关代执行连接器写操作的冻结载荷与结果列
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS connector_accounts (
+        id TEXT PRIMARY KEY,
+        app TEXT NOT NULL,
+        driver TEXT NOT NULL DEFAULT 'composio',
+        remote_id TEXT NOT NULL,
+        auth_config_id TEXT NOT NULL DEFAULT '',
+        account_label TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        last_error TEXT NOT NULL DEFAULT '',
+        notified_expired INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_connector_accounts_app ON connector_accounts(app, status);
+      CREATE TABLE IF NOT EXISTS bot_connectors (
+        bot_id TEXT NOT NULL,
+        connector_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (bot_id, connector_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_bot_connectors_connector ON bot_connectors(connector_id);
+    `)
+    const have = new Set((db.pragma('table_info(approvals)') as { name: string }[]).map((c) => c.name))
+    if (!have.has('execution_json')) db.exec('ALTER TABLE approvals ADD COLUMN execution_json TEXT')
+    if (!have.has('execution_status')) db.exec('ALTER TABLE approvals ADD COLUMN execution_status TEXT')
+    if (!have.has('execution_detail')) db.exec('ALTER TABLE approvals ADD COLUMN execution_detail TEXT')
+    if (!have.has('operation_id')) db.exec('ALTER TABLE approvals ADD COLUMN operation_id TEXT')
+  },
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

@@ -32,6 +32,10 @@ export type ApprovalRow = {
   items: string | null
   /** 操作者勾留下的那几项的下标（JSON 数组）；还没拍板或单个动作是 null */
   approved_items: string | null
+  execution_json: string | null
+  execution_status: 'succeeded' | 'failed' | 'uncertain' | null
+  execution_detail: string | null
+  operation_id: string | null
 }
 
 /** 一批最多这么多项；每项一行，超长截断 */
@@ -209,20 +213,34 @@ export function createApproval(
     ruleId?: number
     /** 一批对象；有它的审批永远一件一问，不走规则 */
     items?: string[]
+    executionJson?: string
+    operationId?: string
     now?: number
   },
 ): ApprovalRow {
   const at = input.now ?? Date.now()
   const auto = input.ruleId !== undefined && !input.items
   const info = db.prepare(
-    `INSERT INTO approvals (thread_id, bot_id, action, detail, kind, target, status, rule_id, created_at, resolved_at, items)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO approvals (thread_id, bot_id, action, detail, kind, target, status, rule_id, created_at, resolved_at, items, execution_json, operation_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     input.threadId, input.botId, input.action, input.detail ?? '', input.kind ?? 'other', input.target ?? '',
     auto ? 'approved' : 'pending', auto ? input.ruleId! : null, at, auto ? at : null,
     input.items ? JSON.stringify(input.items) : null,
+    input.executionJson ?? null,
+    input.operationId ?? null,
   )
   return getApproval(db, Number(info.lastInsertRowid))!
+}
+
+export function recordApprovalExecution(
+  db: Db,
+  id: number,
+  status: 'succeeded' | 'failed' | 'uncertain',
+  detail: string,
+): void {
+  db.prepare('UPDATE approvals SET execution_status = ?, execution_detail = ? WHERE id = ?')
+    .run(status, detail.slice(0, 2000), id)
 }
 
 export function attachApprovalMessage(db: Db, approvalId: number, messageId: number): void {
