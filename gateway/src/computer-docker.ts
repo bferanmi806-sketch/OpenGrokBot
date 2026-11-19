@@ -98,6 +98,7 @@ export function createDockerComputer(endpoints: Endpoints, deps: DockerComputerD
     async startWorkflowRecording(title, intent) {
       return createWorkflowRecorder(await session.page(), title, intent)
     },
+    workflowPage: () => session.workflowPage(),
     ...pageOperations(() => session.page()),
     dispose: () => session.dispose(),
   }

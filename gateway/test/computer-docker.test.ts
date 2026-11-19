@@ -357,17 +357,22 @@ describe('DockerComputer typing, keys, scrolling and tabs', () => {
     expect(await c.click('#go')).toEqual({ clicked: '#go', url: 'https://example.com/results', title: 'Results' })
   })
 
-  it('follows the newest tab, where a click that opened one left the user', async () => {
+  it('follows a newly opened tab for ordinary computer calls', async () => {
     const old = richPage({ url: () => 'https://old.example' })
     const fresh = richPage({ url: () => 'https://new.example' })
+    const pages = [old.page]
     const browser = {
-      contexts: () => [{ pages: () => [old.page, fresh.page], newPage: async () => fresh.page }],
+      contexts: () => [{ pages: () => pages, newPage: async () => fresh.page }],
       close: async () => {},
     }
     const c = createDockerComputer(endpoints, { connect: async () => browser })
+    await c.goto('https://first.example')
+    expect(old.log).toEqual(['goto:https://first.example'])
+
+    pages.push(fresh.page)
     await c.goto('https://x.example')
     expect(fresh.log).toEqual(['goto:https://x.example'])
-    expect(old.log).toEqual([])
+    expect(old.log).toEqual(['goto:https://first.example'])
   })
 })
 

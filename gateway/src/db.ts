@@ -249,6 +249,12 @@ const MIGRATIONS: Migration[] = [
     CREATE INDEX IF NOT EXISTS idx_messages_login_req ON messages(sender, thread_id, id)
       WHERE kind = 'login_request';
   `),
+  // v11: approval rows from deterministic workflow replays must not resume as ordinary LLM turns. Some
+  // pre-merge v5 databases already have later columns despite their older user_version; keep this additive step safe.
+  (db) => {
+    const have = new Set((db.pragma('table_info(approvals)') as { name: string }[]).map((c) => c.name))
+    if (!have.has('workflow_run_id')) db.exec('ALTER TABLE approvals ADD COLUMN workflow_run_id TEXT')
+  },
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

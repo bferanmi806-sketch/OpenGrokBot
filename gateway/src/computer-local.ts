@@ -282,6 +282,7 @@ export function createLocalComputer(opts: LocalComputerOptions): BotComputer {
       activeWorkflowRecording = active
       return active
     },
+    workflowPage: () => session.workflowPage(),
     ...pageOperations(() => session.page()),
     async dispose() {
       await session.dispose()

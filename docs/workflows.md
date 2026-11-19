@@ -1,8 +1,8 @@
 # Recorded workflow traces
 
-This first teach-mode slice records a browser trace for a later deterministic workflow runner. It does not replay,
-schedule, or hand steps to the agent when a page changes. The slice exposes API controls only; it adds no start/stop
-buttons or workflow editor to the product UI.
+Recorded workflows can be replayed deterministically through the teammate's existing browser. This slice exposes API
+controls only; it adds no start/stop buttons or workflow editor to the product UI. Replay does not schedule a workflow
+or hand changed pages to the agent.
 
 Recordings attach to the page already owned by the teammate's shared `BrowserSession`. They do not launch a second
 browser or replace its logged-in context. In local-computer mode, `showWindow()` and `hideWindow()` relaunch
@@ -58,6 +58,45 @@ GET /api/bots/{botId}/workflows/{workflowId}
 DELETE /api/bots/{botId}/workflows/{workflowId}
 ```
 
+## Replay a saved workflow
+
+Replay is operator-only and runs through the teammate's existing browser session. A workflow step with a placeholder
+uses its key in `bindings`; a redacted field uses the one-based step name `step:N`. Supply every required value in the
+request body:
+
+```http
+POST /api/bots/{botId}/workflows/{workflowId}/run
+Content-Type: application/json
+
+{"bindings":{"customerEmail":"person@example.test","step:4":"value entered at run time"}}
+```
+
+The gateway returns `202` with a run ID and does not echo bindings. Values stay in memory for the run; they are not
+written to the trace, approval, message, action-log, or run response. They are cleared when the run completes, fails,
+or is discarded. A gateway restart loses the in-memory continuation: approving a pending workflow step then returns
+`409`; discard it and start a new run with fresh bindings.
+
+To stop an active run, send `DELETE /api/bots/{botId}/workflows/runs/{runId}`. If a step is awaiting approval, this
+discards that approval and releases the teammate. If a browser operation is in progress, the response is `202` and
+the runner finishes that operation before stopping; it will not start another step.
+
+Each state-changing browser action asks for approval before it runs. Navigation itself is not gated. A step can include
+explicit metadata during trace review/save:
+
+```json
+{"type":"click","target":{"candidates":[{"role":{"role":"button","name":"Send"}}]},"approval":{"kind":"email","target":"person@example.test","action":"Send the invoice"}}
+```
+
+Without metadata, the step is classified as `other` and always asks. Metadata for `email`, `message`, or `post` can
+use an existing exact standing rule only when the operator supplies no runtime bindings. Workflows with dynamic
+values always ask, so a saved rule cannot silently approve a different runtime destination. Approval resumes the
+exact held step without asking the language model to reconstruct it. A discarded approval stops the run.
+
+The v1 runner rejects a trace before any browser action if it is truncated, has an unrecorded popup, or references a
+page/frame. It resolves locator candidates in order, but once an action is attempted it never retries another
+candidate; this avoids repeating an action whose completion is uncertain. An expected-URL mismatch or browser error
+stops the workflow before later steps run.
+
 The computer status response includes `workflowRecording` during capture and `workflowDraft` while review is
 pending. An active recording prevents idle computer cleanup until it is stopped.
 
@@ -81,7 +120,10 @@ type WorkflowStepContext = {
   frame?: string
 }
 
-type WorkflowActionContext = WorkflowStepContext & { expect?: { url: string } }
+type WorkflowActionContext = WorkflowStepContext & {
+  expect?: { url: string }
+  approval?: { kind: 'email' | 'message' | 'post' | 'purchase' | 'booking' | 'other'; target: string; action?: string }
+}
 
 type WorkflowStep = WorkflowStepContext & (
   | { type: 'navigate'; url: string }

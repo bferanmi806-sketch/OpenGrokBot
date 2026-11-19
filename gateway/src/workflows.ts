@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { APPROVAL_KINDS, normalizeTarget, type ApprovalKind } from './approvals.js'
 import type { Db } from './db.js'
 
 export type WorkflowLocator =
@@ -17,7 +18,8 @@ export type WorkflowValue =
   | { kind: 'redacted'; reason: 'sensitive-input' }
 
 type WorkflowStepContext = { intent?: string; page?: string; frame?: string }
-type WorkflowActionContext = WorkflowStepContext & { expect?: { url: string } }
+export type WorkflowApproval = { kind: ApprovalKind; target: string; action?: string }
+type WorkflowActionContext = WorkflowStepContext & { expect?: { url: string }; approval?: WorkflowApproval }
 
 export type WorkflowStep = WorkflowStepContext & (
   | { type: 'navigate'; url: string }
@@ -206,13 +208,38 @@ function parseWorkflowValue(value: unknown, target: WorkflowTarget): WorkflowVal
 }
 
 function parseActionContext(context: WorkflowStepContext, value: unknown): WorkflowActionContext {
-  if (value === undefined) return context
-  if (!isRecord(value) || Object.keys(value).length !== 1 || !Object.hasOwn(value, 'url')) {
-    throw new TypeError('invalid workflow expectation')
+  const actionContext: WorkflowActionContext = { ...context }
+  if (value !== undefined) {
+    if (!isRecord(value) || Object.keys(value).length !== 1 || !Object.hasOwn(value, 'url')) {
+      throw new TypeError('invalid workflow expectation')
+    }
+    const url = sanitizeWorkflowUrl(readString(value.url, 'URL', MAX_URL_LENGTH))
+    if (!url) throw new TypeError('invalid workflow URL')
+    actionContext.expect = { url }
   }
-  const url = sanitizeWorkflowUrl(readString(value.url, 'URL', MAX_URL_LENGTH))
-  if (!url) throw new TypeError('invalid workflow URL')
-  return { ...context, expect: { url } }
+  return actionContext
+}
+
+function parseWorkflowApproval(value: unknown): WorkflowApproval {
+  if (!isRecord(value) || Object.keys(value).some((key) => !['kind', 'target', 'action'].includes(key))) {
+    throw new TypeError('invalid workflow approval metadata')
+  }
+  if (typeof value.kind !== 'string' || !(APPROVAL_KINDS as readonly string[]).includes(value.kind)) {
+    throw new TypeError('invalid workflow approval kind')
+  }
+  const target = readString(value.target, 'approval target', 200, true)
+  if (SECRET_PATTERN.test(target) || looksLikeHighEntropySecret(target)) {
+    throw new TypeError('workflow approval target may not contain secrets')
+  }
+  const approval: WorkflowApproval = { kind: value.kind as ApprovalKind, target: normalizeTarget(target) }
+  if (value.action !== undefined) {
+    const action = readString(value.action, 'approval action', 200).trim()
+    if (SECRET_PATTERN.test(action) || looksLikeHighEntropySecret(action)) {
+      throw new TypeError('workflow approval action may not contain secrets')
+    }
+    if (action) approval.action = action
+  }
+  return approval
 }
 
 export function parseWorkflowStep(value: unknown): WorkflowStep {
@@ -226,18 +253,30 @@ export function parseWorkflowStep(value: unknown): WorkflowStep {
       return { ...context, type: 'navigate', url }
     }
     case 'click':
-      return { ...parseActionContext(context, value.expect), type: 'click', target: parseTarget(value.target) }
+      return {
+        ...parseActionContext(context, value.expect), type: 'click', target: parseTarget(value.target),
+        ...(value.approval === undefined ? {} : { approval: parseWorkflowApproval(value.approval) }),
+      }
     case 'check':
     case 'uncheck':
-      return { ...parseActionContext(context, value.expect), type: value.type, target: parseTarget(value.target) }
+      return {
+        ...parseActionContext(context, value.expect), type: value.type, target: parseTarget(value.target),
+        ...(value.approval === undefined ? {} : { approval: parseWorkflowApproval(value.approval) }),
+      }
     case 'press': {
       if (value.key !== 'Enter') throw new TypeError('unsupported workflow key')
-      return { ...parseActionContext(context, value.expect), type: 'press', key: 'Enter', target: parseTarget(value.target) }
+      return {
+        ...parseActionContext(context, value.expect), type: 'press', key: 'Enter', target: parseTarget(value.target),
+        ...(value.approval === undefined ? {} : { approval: parseWorkflowApproval(value.approval) }),
+      }
     }
     case 'fill':
     case 'select': {
       const target = parseTarget(value.target)
-      return { ...parseActionContext(context, value.expect), type: value.type, target, value: parseWorkflowValue(value.value, target) }
+      return {
+        ...parseActionContext(context, value.expect), type: value.type, target, value: parseWorkflowValue(value.value, target),
+        ...(value.approval === undefined ? {} : { approval: parseWorkflowApproval(value.approval) }),
+      }
     }
     default:
       throw new TypeError('unsupported workflow step')

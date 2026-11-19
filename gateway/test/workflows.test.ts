@@ -68,6 +68,19 @@ describe('workflow trace schema', () => {
     ] } })
   })
 
+  it('validates approval metadata without weakening the default-ask behavior', () => {
+    const target = { candidates: [{ role: { role: 'button', name: 'Send' } }] }
+    expect(parseWorkflowStep({
+      type: 'click', target, approval: { kind: 'email', target: 'Bob@Example.org', action: 'Send invoice' },
+    })).toEqual({
+      type: 'click', target, approval: { kind: 'email', target: 'bob@example.org', action: 'Send invoice' },
+    })
+    expect(() => parseWorkflowStep({ type: 'click', target, approval: { kind: 'unknown', target: 'x' } }))
+      .toThrow(/approval kind/)
+    expect(() => parseWorkflowStep({ type: 'click', target, approval: { kind: 'email', target: 'Bearer secret-value' } }))
+      .toThrow(/may not contain secrets/)
+  })
+
   it('validates action outcomes, Enter presses, checkbox state, and incomplete popup markers', () => {
     const target = { candidates: [{ label: 'Accept terms' }] }
     expect(parseWorkflowStep({
