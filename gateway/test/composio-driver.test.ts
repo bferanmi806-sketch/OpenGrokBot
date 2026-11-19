@@ -223,6 +223,7 @@ describe('composio-driver', () => {
             payload: {
               headers: [
                 { name: 'From', value: 'Bob <bob@client.com>' },
+                { name: 'Reply-To', value: 'Billing <billing@client.com>' },
                 { name: 'To', value: 'alice@gmail.com' },
                 { name: 'Cc', value: 'carol@client.com' },
                 { name: 'Subject', value: 'Your verification code & Revised quote' },
@@ -322,10 +323,11 @@ describe('composio-driver', () => {
     const listedAll = await driver.listMail(gmailAcc, { folder: 'inbox', includeAutomated: true })
     expect(listedAll.messages).toHaveLength(2)
 
-    // Read message (sanitizes HTML, strips utm_source, redacts OTP, extracts attachment)
+    // Read message (sanitizes HTML, strips utm_source, redacts OTP, extracts attachment & Reply-To)
     const detail = await driver.readMail(gmailAcc, { messageId: 'm1' })
     expect(detail.messages[0]).toMatchObject({
       id: 'm1',
+      replyTo: ['Billing <billing@client.com>'],
       body: 'Code: [redacted-otp]. Visit https://acme.com/quote?id=7',
       attachments: [{ id: 'att_1', name: 'quote.pdf', size: 2048 }],
     })
@@ -434,6 +436,7 @@ describe('composio-driver', () => {
             subject: 'Contract review',
             receivedDateTime: '2026-11-19T10:00:00Z',
             from: { emailAddress: { name: 'Dana', address: 'dana@partner.com' } },
+            replyTo: [{ emailAddress: { name: 'Legal Desk', address: 'legal@partner.com' } }],
             toRecipients: [{ emailAddress: { address: 'alice@outlook.com' } }],
             ccRecipients: [],
             body: { contentType: 'html', content: '<p>See https://partner.com/doc?fbclid=123</p>' },
@@ -470,6 +473,7 @@ describe('composio-driver', () => {
     expect(listed.messages[0]).toMatchObject({ id: 'om1', from: 'Dana <dana@partner.com>', unread: true })
 
     const read = await driver.readMail(outlookAcc, { messageId: 'om1' })
+    expect(read.messages[0]!.replyTo).toEqual(['Legal Desk <legal@partner.com>'])
     expect(read.messages[0]!.body).toBe('See https://partner.com/doc')
     expect(read.messages[0]!.attachments).toEqual([{ id: 'oa1', name: 'contract.docx', size: 1024 }])
 

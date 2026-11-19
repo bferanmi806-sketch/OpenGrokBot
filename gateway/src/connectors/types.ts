@@ -43,6 +43,7 @@ export type MailDetail = {
   id: string
   threadId?: string
   from: string
+  replyTo?: string[]
   to: string[]
   cc: string[]
   bcc?: string[]
@@ -78,6 +79,14 @@ export type ConnectorWriteToolName =
   | 'notion_append'
   | 'slack_send_message'
 
+export type ResolvedDraftSnapshot = {
+  to: string[]
+  cc: string[]
+  bcc: string[]
+  subject: string
+  body: string
+}
+
 export type FrozenExecution = {
   version: 1
   connectorId: string
@@ -86,6 +95,7 @@ export type FrozenExecution = {
   accountLabel: string
   tool: ConnectorWriteToolName
   args: Record<string, unknown>
+  resolvedDraftSnapshot?: ResolvedDraftSnapshot
   operationId: string
 }
 

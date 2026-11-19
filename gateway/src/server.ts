@@ -47,8 +47,15 @@ import {
   listBotConnectorsAllStatuses,
   listConnectorAccounts,
 } from './connectors/store.js'
-import { buildConnectorTools, handleConnectorAuthExpired, runConnectorToolCall } from './connectors/tools.js'
-import type { ConnectorDriver, FrozenExecution } from './connectors/types.js'
+import {
+  buildConnectorTools,
+  buildDraftSnapshot,
+  draftSnapshotsMatch,
+  handleConnectorAuthExpired,
+  runConnectorToolCall,
+  safeExecuteWrite,
+} from './connectors/tools.js'
+import { ConnectorDriverError, type ConnectorDriver, type FrozenExecution } from './connectors/types.js'
 import { mountSettings, type SettingsDeps } from './settings-api.js'
 import { mountSetup, type SetupDeps } from './setup-api.js'
 import { createTurnQueue } from './turns.js'
@@ -751,6 +758,7 @@ export function createApp(deps: AppDeps): GatewayApp {
         recordApprovalExecution(db, approval.id, 'failed', failDetail)
         patchChip({ executionStatus: 'failed', executionDetail: failDetail })
         postNotice({ notice: 'connector_execution', params: { status: 'failed', action: approval.action, detail: failDetail } })
+        publishPresence(approval.bot_id)
         return 'ok'
       }
 
@@ -771,11 +779,81 @@ export function createApp(deps: AppDeps): GatewayApp {
           at: now().getTime(),
         })
         postNotice({ notice: 'connector_execution', params: { status: 'failed', action: approval.action, detail: failDetail } })
+        publishPresence(approval.bot_id)
         return 'ok'
       }
 
+      const pendingDraftId =
+        frozen.tool === 'mail_send' && typeof frozen.args?.draftId === 'string' ? frozen.args.draftId.trim() : ''
+      if (pendingDraftId) {
+        if (!frozen.resolvedDraftSnapshot) {
+          const failDetail = `Draft "${pendingDraftId}" is missing its approval snapshot; nothing was sent.`
+          recordApprovalExecution(db, approval.id, 'failed', failDetail)
+          patchChip({ executionStatus: 'failed', executionDetail: failDetail })
+          postNotice({ notice: 'connector_execution', params: { status: 'failed', action: approval.action, detail: failDetail } })
+          publishPresence(approval.bot_id)
+          return 'ok'
+        }
+        let reread: Awaited<ReturnType<typeof connectorDriver.readMail>>
+        try {
+          reread = await connectorDriver.readMail(currentAcc, { draftId: pendingDraftId })
+        } catch (err) {
+          const checkAt = now().getTime()
+          const failDetail = `Could not verify draft "${pendingDraftId}" before sending: ${err instanceof Error ? err.message : String(err)}`
+          recordApprovalExecution(db, approval.id, 'failed', failDetail)
+          patchChip({ executionStatus: 'failed', executionDetail: failDetail })
+          recordAction(db, {
+            botId: approval.bot_id,
+            threadId: approval.thread_id,
+            trigger: 'approval',
+            tool: frozen.tool,
+            summary: `blocked: ${failDetail}`,
+            ok: false,
+            ms: 0,
+            at: checkAt,
+          })
+          if (err instanceof ConnectorDriverError && err.code === 'auth_expired') {
+            handleConnectorAuthExpired({
+              db,
+              hub,
+              threadId: approval.thread_id,
+              botId: approval.bot_id,
+              account: currentAcc,
+              error: err.message,
+              now: checkAt,
+            })
+          }
+          postNotice({ notice: 'connector_execution', params: { status: 'failed', action: approval.action, detail: failDetail } })
+          publishPresence(approval.bot_id)
+          return 'ok'
+        }
+
+        const currentMsg = reread.messages[0]
+        if (!currentMsg || !draftSnapshotsMatch(frozen.resolvedDraftSnapshot, buildDraftSnapshot(currentMsg))) {
+          const checkAt = now().getTime()
+          const failDetail = !currentMsg
+            ? `Draft "${pendingDraftId}" is missing or unreadable; nothing was sent.`
+            : `Draft "${pendingDraftId}" changed after it was held for approval; refusing to send modified draft.`
+          recordApprovalExecution(db, approval.id, 'failed', failDetail)
+          patchChip({ executionStatus: 'failed', executionDetail: failDetail })
+          recordAction(db, {
+            botId: approval.bot_id,
+            threadId: approval.thread_id,
+            trigger: 'approval',
+            tool: frozen.tool,
+            summary: `blocked: ${failDetail}`,
+            ok: false,
+            ms: 0,
+            at: checkAt,
+          })
+          postNotice({ notice: 'connector_execution', params: { status: 'failed', action: approval.action, detail: failDetail } })
+          publishPresence(approval.bot_id)
+          return 'ok'
+        }
+      }
+
       const execStarted = Date.now()
-      const execRes = await connectorDriver.executeWrite({
+      const execRes = await safeExecuteWrite(connectorDriver, {
         ...frozen,
         remoteId: currentAcc.remote_id,
         accountLabel: currentAcc.account_label || frozen.accountLabel,
@@ -803,6 +881,8 @@ export function createApp(deps: AppDeps): GatewayApp {
             `Your operator approved #${approval.id} and the gateway executed ${frozen.tool}: ${execRes.summary}.`,
             { origin: 'operator', persistUserMessage: false, prewarm: false, trigger: 'approval' },
           )
+        } else {
+          publishPresence(approval.bot_id)
         }
         return 'ok'
       }
@@ -832,6 +912,7 @@ export function createApp(deps: AppDeps): GatewayApp {
           })
         }
         postNotice({ notice: 'connector_execution', params: { status: 'failed', action: approval.action, detail: execRes.error } })
+        publishPresence(approval.bot_id)
         return 'ok'
       }
 
@@ -848,6 +929,7 @@ export function createApp(deps: AppDeps): GatewayApp {
         at: execAt,
       })
       postNotice({ notice: 'connector_execution', params: { status: 'uncertain', action: approval.action, detail: execRes.detail } })
+      publishPresence(approval.bot_id)
       return 'ok'
     }
 
@@ -861,6 +943,8 @@ export function createApp(deps: AppDeps): GatewayApp {
       void startTurn(bot, approval.thread_id, seed, {
         origin: 'operator', persistUserMessage: false, prewarm: decision === 'approve', trigger: 'approval',
       })
+    } else {
+      publishPresence(approval.bot_id)
     }
     return 'ok'
   }

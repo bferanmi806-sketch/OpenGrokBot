@@ -362,6 +362,7 @@ function parseGmailDetail(raw: unknown): MailDetail {
   const msg = isRecord(raw) ? raw : {}
   const headers = gmailHeadersMap(msg.payload)
   const from = headers['from'] ?? ''
+  const replyTo = splitAddressList(headers['reply-to'] ?? '')
   const to = splitAddressList(headers['to'] ?? '')
   const cc = splitAddressList(headers['cc'] ?? '')
   const bcc = splitAddressList(headers['bcc'] ?? '')
@@ -381,6 +382,7 @@ function parseGmailDetail(raw: unknown): MailDetail {
     id: String(msg.id ?? ''),
     ...(typeof msg.threadId === 'string' && msg.threadId ? { threadId: msg.threadId } : {}),
     from,
+    ...(replyTo.length ? { replyTo } : {}),
     to,
     cc,
     ...(bcc.length ? { bcc } : {}),
@@ -468,6 +470,8 @@ function parseGraphDetail(raw: unknown): MailDetail {
     ? msg.receivedDateTime
     : (typeof msg.sentDateTime === 'string' ? msg.sentDateTime : '')
   const headers = graphHeadersMap(msg.internetMessageHeaders)
+  const graphReplyTo = Array.isArray(msg.replyTo) ? msg.replyTo.map(formatGraphRecipient).filter(Boolean) : []
+  const replyTo = graphReplyTo.length ? graphReplyTo : splitAddressList(headers['reply-to'] ?? '')
   const automated = isAutomatedMail({ from, headers })
 
   const bodyObj = isRecord(msg.body) ? msg.body : {}
@@ -493,6 +497,7 @@ function parseGraphDetail(raw: unknown): MailDetail {
     id: String(msg.id ?? ''),
     ...(typeof msg.conversationId === 'string' && msg.conversationId ? { threadId: msg.conversationId } : {}),
     from,
+    ...(replyTo.length ? { replyTo } : {}),
     to,
     cc,
     ...(bcc.length ? { bcc } : {}),
@@ -1675,16 +1680,20 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
             const origObj = isRecord(origData) ? origData : {}
             const headers = gmailHeadersMap(origObj.payload)
             const selfEmail = extractBareEmail(accountLabel)
-            const primaryReplyTo = (headers['reply-to'] ?? headers['from'] ?? '').trim()
-            if (!primaryReplyTo) {
+            const replyToList = splitAddressList(headers['reply-to'] ?? '')
+            const fromList = splitAddressList(headers['from'] ?? '')
+            const to = replyToList.length ? replyToList : fromList
+            if (!to.length) {
               return { status: 'failed', error: 'Original Gmail message has no sender to reply to' }
             }
 
-            const to = [primaryReplyTo]
-            const seenEmails = new Set<string>([extractBareEmail(primaryReplyTo), ...(selfEmail ? [selfEmail] : [])])
+            const seenEmails = new Set<string>([
+              ...to.map(extractBareEmail).filter(Boolean),
+              ...(selfEmail ? [selfEmail] : []),
+            ])
             const cc: string[] = []
             if (replyAll) {
-              for (const addr of [...splitAddressList(headers['to'] ?? ''), ...splitAddressList(headers['cc'] ?? '')]) {
+              for (const addr of [...fromList, ...splitAddressList(headers['to'] ?? ''), ...splitAddressList(headers['cc'] ?? '')]) {
                 const bare = extractBareEmail(addr)
                 if (bare && !seenEmails.has(bare)) {
                   seenEmails.add(bare)
