@@ -67,6 +67,25 @@ function BatchItems({ items, kept, onToggle, approved }: {
   )
 }
 
+function ExecutionLine({ payload }: { payload: ApprovalPayload }) {
+  const t = useT()
+  const status = payload.executionStatus
+  if (!status) return null
+  const detail = payload.executionDetail?.trim()
+  if (status === 'succeeded') {
+    return (
+      <div className="approval-exec succeeded">
+        <span>{t('approval.exec.succeeded')}</span>
+        {detail ? <span className="approval-exec-detail"> · {detail}</span> : null}
+      </div>
+    )
+  }
+  const text = status === 'failed'
+    ? (detail ? t('approval.exec.failedDetail', { detail }) : t('approval.exec.failed'))
+    : (detail ? t('approval.exec.uncertainDetail', { detail }) : t('approval.exec.uncertain'))
+  return <div className={`approval-exec ${status}`}>{text}</div>
+}
+
 export function ApprovalChip({ payload, onDecide }: {
   payload: ApprovalPayload
   onDecide: (approvalId: number, decision: 'approve' | 'discard', remember?: RuleDuration, items?: number[]) => void | Promise<void>
@@ -115,6 +134,7 @@ export function ApprovalChip({ payload, onDecide }: {
             scope: `${payload.rule.kind} → ${payload.rule.target}`, until: untilLabel(payload.rule.expiresAt, t),
           })}
         </div>
+        <ExecutionLine payload={payload} />
       </div>
     )
   }
@@ -147,14 +167,17 @@ export function ApprovalChip({ payload, onDecide }: {
         />
       ) : null}
       {outcome ? (
-        <div className="approval-outcome">
-          {items.length && approvedCount !== undefined
-            ? t('approval.outcomeCount', { outcome, approved: approvedCount, of: items.length })
-            : outcome}
-          {payload.remembered && scope
-            ? ` · ${t('approval.outcomeAllowed', { scope, until: untilLabel(payload.remembered.expiresAt, t) })}`
-            : ''}
-        </div>
+        <>
+          <div className="approval-outcome">
+            {items.length && approvedCount !== undefined
+              ? t('approval.outcomeCount', { outcome, approved: approvedCount, of: items.length })
+              : outcome}
+            {payload.remembered && scope
+              ? ` · ${t('approval.outcomeAllowed', { scope, until: untilLabel(payload.remembered.expiresAt, t) })}`
+              : ''}
+          </div>
+          <ExecutionLine payload={payload} />
+        </>
       ) : choosing ? (
         <div className="approval-remember">
           <div className="approval-remember-why">{t('approval.rememberWhy', { scope: scope ?? '' })}</div>

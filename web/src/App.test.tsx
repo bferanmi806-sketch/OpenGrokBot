@@ -31,12 +31,15 @@ function mockGateway(opts: {
   setup?: unknown
   /** /api/connections 的回答；不给 = 老网关 */
   connections?: unknown
+  /** /api/connectors 的回答；不给 = 老网关 */
+  connectors?: unknown | (() => unknown)
 } = {}) {
   const calls: string[] = []
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input)
     calls.push(url)
     if (init?.method === 'POST') calls.push(`POST ${url} ${String(init.body ?? '')}`)
+    if (init?.method === 'PUT') calls.push(`PUT ${url} ${String(init.body ?? '')}`)
     if (init?.method === 'DELETE') calls.push(`DELETE ${url}`)
     if (url === '/api/uploads' && init?.method === 'POST') {
       const sent = JSON.parse(String(init.body)) as { name: string; mime: string; data: string }
@@ -50,6 +53,14 @@ function mockGateway(opts: {
     if (url === '/api/setup' && opts.setup) return json(opts.setup)
     if (url === '/api/connections' && opts.connections) return json(opts.connections)
     if (url === '/api/settings/providers' && opts.connections) return json([])
+    if (url === '/api/connectors' && opts.connectors) {
+      return json(typeof opts.connectors === 'function' ? opts.connectors() : opts.connectors)
+    }
+    if (url.endsWith('/connectors') && init?.method === 'PUT') {
+      const sent = JSON.parse(String(init.body)) as { connectorIds: string[] }
+      const botId = decodeURIComponent(url.split('/')[3] ?? '')
+      return json({ botId, connectorIds: sent.connectorIds })
+    }
     if (url === '/api/about' && opts.setup) return json({ version: null, dataDir: '/d', logs: 'stdout', runtime: { node: '24', platform: 'darwin', arch: 'arm64' }, computers: 'local' })
     if (url === '/api/settings' && opts.setup && opts.language === undefined) {
       return json({ values: { model: 'grok-4.7', language: '', computers: 'auto', browserMirror: '' }, sources: {}, apiKey: { set: true, masked: 'x', source: 'file' }, needsRestart: [] })
@@ -403,5 +414,47 @@ describe('App', () => {
     await ready()
     await waitFor(() => expect(document.querySelector('.thread-header')?.textContent).toContain('Scout'))
     window.location.hash = ''
+  })
+
+  it('loads connectors, refreshes them and an open computer panel on connectors_changed, and toggles bot access', async () => {
+    let connectorSnap = {
+      key: { set: true, masked: 'cmp…1234', source: 'file', locked: false },
+      catalog: [{ app: 'gmail', name: 'Gmail', group: 'mail_calendar', domain: 'mail', toolkitSlug: 'gmail', authScheme: 'OAUTH2' }],
+      accounts: [{ id: 'ca-11112222', app: 'gmail', accountLabel: 'alice@gmail.com', status: 'expired', lastError: 'expired', createdAt: 1, updatedAt: 1 }],
+      botGrants: { researcher: [] as string[] },
+    }
+    const calls = mockGateway({
+      connectors: () => connectorSnap,
+      computer: {
+        botId: 'researcher',
+        running: false,
+        vncUrl: null,
+        routines: [],
+        connectors: [{ id: 'ca-11112222', app: 'gmail', name: 'Gmail', accountLabel: 'alice@gmail.com', status: 'active', granted: false }],
+      },
+    })
+    render(<App />)
+    const socket = await ready()
+
+    const connectorsBtn = await screen.findByRole('button', { name: 'Connectors (needs attention)' })
+    await userEvent.click(connectorsBtn)
+    expect(await screen.findByRole('dialog', { name: 'Connectors' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open its computer' }))
+    const gmailToggle = await screen.findByRole('checkbox', { name: 'alice@gmail.com' })
+    await userEvent.click(gmailToggle)
+    await waitFor(() => expect(calls).toContain(
+      `PUT /api/bots/researcher/connectors ${JSON.stringify({ connectorIds: ['ca-11112222'] })}`,
+    ))
+
+    const computerCallsBefore = calls.filter((u) => u === '/api/bots/researcher/computer').length
+    connectorSnap = {
+      ...connectorSnap,
+      accounts: [{ ...connectorSnap.accounts[0]!, status: 'active', lastError: '' }],
+    }
+    await act(async () => { socket.emit({ type: 'connectors_changed' }) })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Connectors' })).toBeInTheDocument())
+    await waitFor(() => expect(calls.filter((u) => u === '/api/bots/researcher/computer').length).toBeGreaterThan(computerCallsBefore))
   })
 })

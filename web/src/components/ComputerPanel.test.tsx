@@ -256,3 +256,39 @@ describe('waiting on the gateway', () => {
     expect(screen.getByRole('button', { name: "I\u2019m done signing in" })).not.toBeDisabled()
   })
 })
+
+describe('connector access toggles', () => {
+  it('omits the Connectors section when no accounts are connected', () => {
+    render(<ComputerPanel info={{ ...running, connectors: [] }} botName="Scout" onClose={() => {}} />)
+    expect(screen.queryByText('Connectors')).toBeNull()
+  })
+
+  it('lists connected accounts with status notes and toggles access per teammate', async () => {
+    const onToggleConnector = vi.fn()
+    render(
+      <ComputerPanel
+        info={{
+          ...running,
+          connectors: [
+            { id: 'ca-11112222', app: 'gmail', name: 'Gmail', accountLabel: 'alice@gmail.com', status: 'active', granted: true },
+            { id: 'ca-33334444', app: 'slack', name: 'Slack', accountLabel: '', status: 'expired', granted: false },
+          ],
+        }}
+        botName="Scout"
+        onClose={() => {}}
+        onToggleConnector={onToggleConnector}
+      />,
+    )
+    expect(screen.getByText('Connectors')).toBeInTheDocument()
+    const gmailBox = screen.getByRole('checkbox', { name: 'alice@gmail.com' })
+    const slackBox = screen.getByRole('checkbox', { name: 'Slack' })
+    expect(gmailBox).toBeChecked()
+    expect(slackBox).not.toBeChecked()
+    expect(screen.getByText('Needs reconnect')).toBeInTheDocument()
+
+    await userEvent.click(slackBox)
+    expect(onToggleConnector).toHaveBeenCalledWith('ca-33334444', true)
+    await userEvent.click(gmailBox)
+    expect(onToggleConnector).toHaveBeenCalledWith('ca-11112222', false)
+  })
+})
