@@ -381,6 +381,9 @@ export function buildTools(opts: {
   kind?: 'docker' | 'local'
   /** 这位同事已获授权的外部应用连接器工具 */
   connectorTools?: ToolDef[]
+  /** 这位同事已获授权的 MCP 工具与其中只读工具的名字集合 */
+  mcpTools?: ToolDef[]
+  mcpReadToolNames?: ReadonlySet<string>
 }): ToolDef[] {
   const computerTools = COMPUTER_TOOLS
     .filter((t) => opts.shell !== false || t.function.name !== 'shell')
@@ -408,6 +411,9 @@ export function buildTools(opts: {
     ...(opts.canRelay ? [RELAY_TOOL] : []),
     ...(opts.hasComputer ? computerTools : []),
     ...(opts.connectorTools ?? []),
+    ...(opts.mcpTools ?? []),
   ].filter((t) => opts.operatorTurn !== false || !OPERATOR_ONLY_TOOL_NAMES.has(t.function.name))
-  return opts.watch ? tools.filter((t) => WATCH_TOOL_NAMES.has(t.function.name)) : tools
+  return opts.watch
+    ? tools.filter((t) => WATCH_TOOL_NAMES.has(t.function.name) || Boolean(opts.mcpReadToolNames?.has(t.function.name)))
+    : tools
 }

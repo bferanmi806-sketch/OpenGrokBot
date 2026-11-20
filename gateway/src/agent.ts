@@ -7,10 +7,18 @@ import {
 import { checkBrowserUrl } from './browser-page.js'
 import type { BotComputer, Shot } from './computer.js'
 import { CONNECTOR_READ_TOOL_NAMES, isConnectorTool } from './connectors/tools.js'
+import { isMcpToolName } from './mcp/naming.js'
 import { limitText, noticeText, type BudgetHit, type Notice } from './notices.js'
 import { insertMessage, listMessages, updateMessagePayload, type BotRow, type Db, type MessageRow } from './db.js'
 import type { ChatMsg, LLM, ToolCall, ToolDef, Usage } from './llm.js'
-import { buildSystemPrompt, timeNote, withTimeNote, type PromptConnector, type PromptRoutine } from './prompts.js'
+import {
+  buildSystemPrompt,
+  timeNote,
+  withTimeNote,
+  type PromptConnector,
+  type PromptMcpServer,
+  type PromptRoutine,
+} from './prompts.js'
 import { validateReportPayload } from './report.js'
 import { normalizeMode, type RoutineMode } from './routines.js'
 import { buildTools, OPERATOR_ONLY_TOOL_NAMES, WATCH_TOOL_NAMES } from './tools.js'
@@ -98,6 +106,8 @@ export type AgentDeps = {
   turnTimeoutMs?: number
   /** 谁叫起了这一回合；不传就当不是操作者，常驻授权不生效 */
   origin?: TurnOrigin
+  /** 回合起点已带入外部不受信任载荷（如 MCP 写操作返回正文）：本回合直接标记 outside-data */
+  tainted?: boolean
   /** 操作者发来的文件：传进历史里的附件消息，回一份怎么给模型看的说明。不传 = 只报文件名 */
   attachments?: (rows: MessageRow[]) => Promise<AttachmentBrief>
   /** 这位同事已获授权的连接器列表（进系统提示词）与动态工具清单 */
@@ -107,6 +117,15 @@ export type AgentDeps = {
     name: string
     args: Record<string, unknown>
     ruleBlock: RuleBlock | null
+    events: AgentEvents
+  }) => Promise<{ text: string; ok: boolean; tainted?: boolean }>
+  /** 这位同事已获授权的 MCP 服务列表（进系统提示词）与动态工具清单 */
+  mcpServers?: PromptMcpServer[]
+  mcpTools?: ToolDef[]
+  mcpReadToolNames?: ReadonlySet<string>
+  onMcpTool?: (input: {
+    name: string
+    args: Record<string, unknown>
     events: AgentEvents
   }) => Promise<{ text: string; ok: boolean; tainted?: boolean }>
 }
@@ -171,7 +190,7 @@ export async function runTurn(
     const rows = orderHistory(listMessages(db, threadId, HISTORY_LIMIT), opts.pendingIds, opts.hiddenIds)
     // 模型眼前还摆着 webhook 载荷或本回合读过外部连接器内容时，就算是操作者开的头也不认规则：外部文字可能正是在诱导它
     const hasWebhookHistory = rows.some((m) => m.kind === 'webhook')
-    let taintedByOutsideData = false
+    let taintedByOutsideData = deps.tainted === true
     const computeRuleBlock = (): RuleBlock | null =>
       deps.origin !== 'operator'
         ? (deps.origin ?? 'unknown')
@@ -186,7 +205,7 @@ export async function runTurn(
         role: 'system',
         content: buildSystemPrompt(bot, soul, {
           hasComputer, computer: deps.computer, memory: deps.memory, group: deps.group, canRelay, manual: deps.manual, routines: deps.routines,
-          connectors: deps.connectors, skills: deps.onReadSkill ? deps.skills : undefined, language: deps.language,
+          connectors: deps.connectors, mcpServers: deps.mcpServers, skills: deps.onReadSkill ? deps.skills : undefined, language: deps.language,
         }),
       },
       ...rows.map((m) => toChatMsg(m, bot.id, brief)),
@@ -199,7 +218,7 @@ export async function runTurn(
     const hasSkills = Boolean(deps.skills?.length && deps.onReadSkill)
     const tools = buildTools({
       hasComputer, canRelay, hasSkills, watch: deps.watch === true, shell: deps.computer?.shell, kind: deps.computer?.kind,
-      operatorTurn: deps.origin === 'operator', connectorTools: deps.connectorTools,
+      operatorTurn: deps.origin === 'operator', connectorTools: deps.connectorTools, mcpTools: deps.mcpTools, mcpReadToolNames: deps.mcpReadToolNames,
     })
     const maxSteps = deps.maxSteps && deps.maxSteps > 0 ? Math.floor(deps.maxSteps) : DEFAULT_MAX_STEPS
     const turnMs = deps.turnTimeoutMs ?? DEFAULT_TURN_MS
@@ -398,7 +417,7 @@ async function execToolCall(
     return { text: `Tool ${call.name} failed: ${err instanceof Error ? err.message : String(err)}` }
   }
   // 没在清单里给它的工具，模型硬要调也不行：清单是给模型看的，这里才是门
-  if (deps.watch && !WATCH_TOOL_NAMES.has(call.name)) {
+  if (deps.watch && !WATCH_TOOL_NAMES.has(call.name) && !deps.mcpReadToolNames?.has(call.name)) {
     log(false)
     return {
       text: `${call.name} is not available in a watch routine: this run only looks. `
@@ -442,6 +461,21 @@ async function execToolCall(
     try {
       const res = await deps.onConnectorTool({ name: call.name, args, ruleBlock: deps.ruleBlock, events })
       if (res.tainted) onOutsideDataRead?.()
+      log(res.ok)
+      return { text: res.text }
+    } catch (err) {
+      return failed(err)
+    }
+  }
+  if (isMcpToolName(call.name)) {
+    if (deps.mcpReadToolNames?.has(call.name)) onOutsideDataRead?.()
+    if (!deps.onMcpTool) {
+      log(false)
+      return { text: 'MCP servers are not available on this gateway.' }
+    }
+    try {
+      const res = await deps.onMcpTool({ name: call.name, args, events })
+      if (deps.mcpReadToolNames?.has(call.name) || res.tainted) onOutsideDataRead?.()
       log(res.ok)
       return { text: res.text }
     } catch (err) {
@@ -496,9 +530,27 @@ function withoutQuery(url: string): string {
 const SECRET_FLAG = /(--?(?:token|password|passwd|pass|secret|api[-_]?key|key|auth)(?:[= ]))(\S+)/gi
 const SECRET_HEADER = /((?:authorization|x-api-key|x-shim-token|cookie)\s*:\s*)([^"'\\]+)/gi
 const USER_PASS = /(\s-u\s+[^\s:]+:)(\S+)/g
+const MCP_SECRET_KEY = /token|secret|password|passwd|key|auth|cookie|credential/i
 
 function redactCommand(cmd: string): string {
   return cmd.replace(SECRET_HEADER, '$1…').replace(SECRET_FLAG, '$1…').replace(USER_PASS, '$1…')
+}
+
+function summarizeMcpArgs(args: Record<string, unknown>): string {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return ''
+  const entries = Object.entries(args).slice(0, 3)
+  if (!entries.length) return ''
+  return entries
+    .map(([k, v]) => {
+      if (MCP_SECRET_KEY.test(k)) return `${k}=…`
+      if (typeof v === 'string') return `${k}=${v.trim().split('\n')[0]!.slice(0, 40)}`
+      if (typeof v === 'number' || typeof v === 'boolean' || v === null) return `${k}=${String(v)}`
+      if (Array.isArray(v)) return `${k}=[${v.length}]`
+      if (typeof v === 'object') return `${k}={…}`
+      return `${k}=…`
+    })
+    .join(', ')
+    .slice(0, 120)
 }
 
 function summarize(tool: string, args: Record<string, unknown>): string {
@@ -570,7 +622,8 @@ function summarize(tool: string, args: Record<string, unknown>): string {
       return `channel ${pick('channelId')}${pick('threadTs') ? ` (${pick('threadTs')})` : ''}`
     case 'slack_send_message':
       return `to ${pick('channelId')}`
-    default: return ''
+    default:
+      return isMcpToolName(tool) ? summarizeMcpArgs(args) : ''
   }
 }
 

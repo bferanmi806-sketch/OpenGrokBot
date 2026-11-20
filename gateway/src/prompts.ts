@@ -84,6 +84,14 @@ Present: ${group.members.join(', ')}, plus your operator.
 
 export type PromptRoutine = { id: number; name: string; human: string; enabled: boolean; watch?: boolean }
 export type PromptConnector = { id: string; app: string; label: string; status: string }
+export type PromptMcpServer = {
+  id: string
+  name: string
+  slug: string
+  enabled: boolean
+  status: string
+  toolCount: number
+}
 
 function connectorsSection(connectors: PromptConnector[]): string {
   const active = connectors.filter((c) => c.status === 'active')
@@ -97,6 +105,22 @@ function connectorsSection(connectors: PromptConnector[]): string {
     ? '\n\nUse the matching mail_*, calendar_*, notion_*, or slack_* tools for active accounts. Connector write tools are held by the gateway for operator approval automatically — call the write tool directly rather than wrapping it in hold_for_approval.'
     : ''
   return `## Connected apps\n\n${lines.join('\n')}${footer}`
+}
+
+function mcpServersSection(servers: PromptMcpServer[]): string {
+  if (!servers.length) return ''
+  const lines = servers.map((s) => {
+    if (!s.enabled) return `- ${s.name} (mcp__${s.slug}__*) — paused`
+    if (s.status === 'error') {
+      return `- ${s.name} (mcp__${s.slug}__*) — connection error (${s.toolCount} cached ${s.toolCount === 1 ? 'tool' : 'tools'}; ask your operator to check it in Connectors → MCP if calls fail)`
+    }
+    return `- ${s.name} (mcp__${s.slug}__*) — ${s.status} (${s.toolCount} ${s.toolCount === 1 ? 'tool' : 'tools'})`
+  })
+  const hasEnabled = servers.some((s) => s.enabled)
+  const footer = hasEnabled
+    ? '\n\nUse the matching mcp__<slug>__* tools for enabled MCP servers. MCP write tools are held by the gateway for operator approval automatically — call the MCP tool directly rather than wrapping it in hold_for_approval.'
+    : ''
+  return `## MCP servers\n\n${lines.join('\n')}${footer}`
 }
 
 function skillsSection(skills: { name: string; description: string }[]): string {
@@ -143,6 +167,7 @@ export function buildSystemPrompt(
     manual?: string
     routines?: PromptRoutine[]
     connectors?: PromptConnector[]
+    mcpServers?: PromptMcpServer[]
     skills?: { name: string; description: string }[]
     /** 电脑是什么做的、有没有命令行 */
     computer?: ComputerBriefingOptions
@@ -166,6 +191,7 @@ export function buildSystemPrompt(
     skillsSection(opts.skills ?? []),
     memory ? `## Standing rules your operator gave you\n\n${memory}` : '',
     connectorsSection(opts.connectors ?? []),
+    mcpServersSection(opts.mcpServers ?? []),
     routinesSection(opts.routines ?? []),
     opts.group ? groupBriefing(opts.group) : '',
   ]
