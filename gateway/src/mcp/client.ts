@@ -69,6 +69,8 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
     serverGenerations.set(serverId, next)
     return next
   }
+  const isCurrent = (serverId: string, opEpoch: number, opGen: number): boolean =>
+    globalEpoch === opEpoch && getGen(serverId) === opGen
 
   const toRedactedCallError = (
     serverId: string,
@@ -97,20 +99,30 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
       queuedRefreshes.add(serverId)
       return
     }
-    const task = (async () => {
+    const refreshEpoch = globalEpoch
+    const refreshGen = getGen(serverId)
+    let task: Promise<void> | undefined
+    task = (async () => {
+      await Promise.resolve()
       try {
         for (;;) {
           queuedRefreshes.delete(serverId)
+          if (!isCurrent(serverId, refreshEpoch, refreshGen)) {
+            queuedRefreshes.delete(serverId)
+            break
+          }
           const srv = getMcpServer(db, serverId)
           if (!srv || !srv.enabled || !sessions.get(serverId)?.isHealthy()) {
             queuedRefreshes.delete(serverId)
             break
           }
           await discoverTools(serverId).catch(() => {})
-          if (!queuedRefreshes.has(serverId)) break
+          if (!queuedRefreshes.has(serverId) || !isCurrent(serverId, refreshEpoch, refreshGen)) break
         }
       } finally {
-        activeRefreshes.delete(serverId)
+        if (task && activeRefreshes.get(serverId) === task) {
+          activeRefreshes.delete(serverId)
+        }
       }
     })()
     activeRefreshes.set(serverId, task)
@@ -186,11 +198,27 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
       }
     })()
 
+    void connectTask.catch(() => {})
     inflightConnects.set(serverId, connectTask)
     return connectTask
   }
 
+  const closeSessionOnly = async (serverId: string): Promise<void> => {
+    bumpGen(serverId)
+    queuedRefreshes.delete(serverId)
+    const active = sessions.get(serverId)
+    sessions.delete(serverId)
+    const inflight = inflightConnects.get(serverId)
+    inflightConnects.delete(serverId)
+    await Promise.allSettled([
+      active ? active.close() : Promise.resolve(),
+      inflight ? inflight.then((s) => s.close(), () => {}) : Promise.resolve(),
+    ])
+  }
+
   const discoverTools = async (serverId: string): Promise<McpDiscoveredTool[]> => {
+    const opEpoch = globalEpoch
+    const opGen = getGen(serverId)
     const server = getMcpServer(db, serverId)
     if (!server) {
       throw new McpCallError('not_found', `MCP server not found: ${serverId}`, false)
@@ -200,19 +228,23 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
       const session = await connect(serverId)
       const rawTools = await session.listTools()
       const normalized = sanitizeToolsList(rawTools)
-      saveMcpDiscoveredTools(db, serverId, normalized, now())
-      hub?.broadcast({ type: 'mcp_changed' })
+      if (isCurrent(serverId, opEpoch, opGen)) {
+        saveMcpDiscoveredTools(db, serverId, normalized, now())
+        hub?.broadcast({ type: 'mcp_changed' })
 
-      const latest = getMcpServer(db, serverId)
-      if (!latest || !latest.enabled) {
-        await disconnect(serverId)
+        const latest = getMcpServer(db, serverId)
+        if (!latest || !latest.enabled) {
+          await closeSessionOnly(serverId)
+        }
       }
       return normalized
     } catch (err) {
-      evictIfUnhealthy(serverId)
       const callErr = toRedactedCallError(serverId, err, 'connect_failed')
-      markMcpServerStatus(db, serverId, 'error', callErr.message, now())
-      hub?.broadcast({ type: 'mcp_changed' })
+      if (isCurrent(serverId, opEpoch, opGen)) {
+        evictIfUnhealthy(serverId)
+        markMcpServerStatus(db, serverId, 'error', callErr.message, now())
+        hub?.broadcast({ type: 'mcp_changed' })
+      }
       throw callErr
     }
   }
@@ -228,6 +260,8 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
   }
 
   const callTool: McpManager['callTool'] = async (serverId, toolName, args, opts) => {
+    const opEpoch = globalEpoch
+    const opGen = getGen(serverId)
     const server = getMcpServer(db, serverId)
     if (!server) {
       throw new McpCallError('not_found', `MCP server not found: ${serverId}`, false)
@@ -239,33 +273,30 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
     try {
       const session = await connect(serverId)
       const result = await session.callTool(toolName, args, opts)
-      if (getMcpServer(db, serverId)?.status !== 'connected') {
+      if (isCurrent(serverId, opEpoch, opGen) && getMcpServer(db, serverId)?.status !== 'connected') {
         markMcpServerStatus(db, serverId, 'connected', '', now())
         hub?.broadcast({ type: 'mcp_changed' })
       }
       return result
     } catch (err) {
-      const sessionDied = evictIfUnhealthy(serverId)
       const callErr = toRedactedCallError(serverId, err, 'connect_failed')
-      if (sessionDied || callErr.code === 'connect_failed') {
-        markMcpServerStatus(db, serverId, 'error', callErr.message, now())
-        hub?.broadcast({ type: 'mcp_changed' })
+      if (isCurrent(serverId, opEpoch, opGen)) {
+        const sessionDied = evictIfUnhealthy(serverId)
+        if (sessionDied || callErr.code === 'connect_failed') {
+          markMcpServerStatus(db, serverId, 'error', callErr.message, now())
+          hub?.broadcast({ type: 'mcp_changed' })
+        }
       }
       throw callErr
     }
   }
 
   const disconnect = async (serverId: string): Promise<void> => {
-    bumpGen(serverId)
-    queuedRefreshes.delete(serverId)
-    const active = sessions.get(serverId)
-    sessions.delete(serverId)
-    const inflight = inflightConnects.get(serverId)
-    inflightConnects.delete(serverId)
-    await Promise.allSettled([
-      active ? active.close() : Promise.resolve(),
-      inflight ? inflight.then((s) => s.close(), () => {}) : Promise.resolve(),
-    ])
+    await closeSessionOnly(serverId)
+    const refresh = activeRefreshes.get(serverId)
+    if (refresh) {
+      await refresh.catch(() => {})
+    }
   }
 
   const closeAll = async (): Promise<void> => {
@@ -279,6 +310,10 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
       ...activeList.map((s) => s.close()),
       ...inflightList.map((p) => p.then((s) => s.close(), () => {})),
     ])
+    const refreshes = [...activeRefreshes.values()]
+    if (refreshes.length > 0) {
+      await Promise.allSettled(refreshes)
+    }
   }
 
   return {

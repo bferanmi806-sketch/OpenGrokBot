@@ -89,12 +89,16 @@ export function validateMcpHttpConfig(
 function createRequestAbort(
   timeoutMs: number,
   externalSignal?: AbortSignal,
+  sessionSignal?: AbortSignal,
 ): { signal: AbortSignal; cleanup: () => void; timedOut: () => boolean } {
   const controller = new AbortController()
   let didTimeout = false
 
   const onExternalAbort = (): void => {
     controller.abort(externalSignal?.reason ?? new Error('aborted'))
+  }
+  const onSessionAbort = (): void => {
+    controller.abort(sessionSignal?.reason ?? new Error('session closed'))
   }
 
   const timer = setTimeout(() => {
@@ -103,13 +107,15 @@ function createRequestAbort(
   }, timeoutMs)
   timer.unref?.()
 
-  if (externalSignal) {
-    if (externalSignal.aborted) {
-      clearTimeout(timer)
-      controller.abort(externalSignal.reason ?? new Error('aborted'))
-    } else {
-      externalSignal.addEventListener('abort', onExternalAbort, { once: true })
-    }
+  if (externalSignal?.aborted) {
+    clearTimeout(timer)
+    controller.abort(externalSignal.reason ?? new Error('aborted'))
+  } else if (sessionSignal?.aborted) {
+    clearTimeout(timer)
+    controller.abort(sessionSignal.reason ?? new Error('session closed'))
+  } else {
+    externalSignal?.addEventListener('abort', onExternalAbort, { once: true })
+    sessionSignal?.addEventListener('abort', onSessionAbort, { once: true })
   }
 
   return {
@@ -117,6 +123,7 @@ function createRequestAbort(
     cleanup: () => {
       clearTimeout(timer)
       externalSignal?.removeEventListener('abort', onExternalAbort)
+      sessionSignal?.removeEventListener('abort', onSessionAbort)
     },
     timedOut: () => didTimeout,
   }
@@ -734,6 +741,7 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
   let closed = false
   let nextId = 0
   let reinitPromise: Promise<void> | null = null
+  const sessionAbort = new AbortController()
 
   const buildPostHeaders = (): Record<string, string> => ({
     ...customHeaders,
@@ -934,7 +942,7 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
   }
 
   const sendInitializedNotification = async (signal?: AbortSignal): Promise<void> => {
-    const reqAbort = createRequestAbort(handshakeTimeoutMs, signal)
+    const reqAbort = createRequestAbort(handshakeTimeoutMs, signal, sessionAbort.signal)
     try {
       const notifRes = await fetchImpl(baseUrl.href, {
         method: 'POST',
@@ -971,7 +979,7 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
 
   const runStreamableInitialize = async (allowLegacyFallback: boolean): Promise<'streamable' | McpSession> => {
     const initId = ++nextId
-    const reqAbort = createRequestAbort(handshakeTimeoutMs)
+    const reqAbort = createRequestAbort(handshakeTimeoutMs, undefined, sessionAbort.signal)
     let res: Response
     try {
       res = await fetchImpl(baseUrl.href, {
@@ -1086,7 +1094,7 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
 
     const id = ++nextId
     const usedSessionId = sessionId
-    const reqAbort = createRequestAbort(reqOpts.timeoutMs, reqOpts.signal)
+    const reqAbort = createRequestAbort(reqOpts.timeoutMs, reqOpts.signal, sessionAbort.signal)
 
     let res: Response
     try {
@@ -1164,6 +1172,7 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
     if (closed) return
     closed = true
     healthy = false
+    sessionAbort.abort(new Error('MCP HTTP session closed'))
     const sid = sessionId
     sessionId = null
     if (sid) {

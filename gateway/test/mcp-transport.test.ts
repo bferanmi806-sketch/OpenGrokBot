@@ -260,6 +260,15 @@ rl.on('line', (line) => {
     if (toolName === 'crash_mid_write') {
       process.exit(2)
     }
+
+    if (toolName === 'reply_then_exit_zero') {
+      send({
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: { content: [{ type: 'text', text: 'flushed-before-exit' }] },
+      })
+      process.exit(0)
+    }
   }
 })
 `
@@ -886,5 +895,145 @@ describe('mcp stdio & Streamable HTTP/SSE transports + McpManager', () => {
       await httpSession.close()
     }
     expect(httpSession.isHealthy()).toBe(false)
+  })
+
+  it('preserves SQLite status when disconnect/closeAll cancels in-flight discovery or list_changed refresh, and resolves stdout written right before exit(0)', async () => {
+    const dir = makeTempDir('osb-mcp-concurrency-')
+    const scriptPath = join(dir, 'mock-mcp-stdio.mjs')
+    writeFileSync(scriptPath, MOCK_STDIO_SERVER_SCRIPT, 'utf8')
+
+    // 1. Buffered stdout response written immediately before process.exit(0) resolves cleanly
+    const exitZeroSession = await createStdioSession({
+      command: process.execPath,
+      args: [scriptPath],
+    })
+    try {
+      const flushed = await exitZeroSession.callTool('reply_then_exit_zero', {}, { write: false })
+      expect(flushed.content).toEqual([{ type: 'text', text: 'flushed-before-exit' }])
+    } finally {
+      await exitZeroSession.close()
+    }
+
+    // 2. disconnect() & closeAll() during in-flight discoverTools / activeRefreshes do not overwrite status to 'error'
+    let holdToolsList = true
+    let notifyToolsListEntered: (() => void) | null = null
+
+    const { baseUrl } = await startHttpServer(async (req, res) => {
+      if (req.method === 'DELETE') {
+        res.statusCode = 200
+        res.end()
+        return
+      }
+      const raw = await readReqBody(req)
+      const msg = JSON.parse(raw) as { id?: number; method?: string }
+
+      if (msg.method === 'initialize') {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Mcp-Session-Id': 'sess-conc' })
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: { protocolVersion: '2025-03-26', capabilities: { tools: { listChanged: true } } },
+          }),
+        )
+        return
+      }
+
+      if (msg.method === 'notifications/initialized') {
+        res.statusCode = 202
+        res.end()
+        return
+      }
+
+      if (msg.method === 'tools/list') {
+        notifyToolsListEntered?.()
+        if (holdToolsList) {
+          await new Promise<void>((resolve) => {
+            res.once('close', () => resolve())
+          })
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: {
+              tools: [
+                {
+                  name: 'emit_change',
+                  description: 'Emit list_changed on SSE response',
+                  inputSchema: { type: 'object', properties: {} },
+                  annotations: { readOnlyHint: true },
+                },
+              ],
+            },
+          }),
+        )
+        return
+      }
+
+      if (msg.method === 'tools/call') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        res.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' })}\n\n`)
+        res.write(
+          `event: message\ndata: ${JSON.stringify({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: { content: [{ type: 'text', text: 'ok' }] },
+          })}\n\n`,
+        )
+        res.end()
+      }
+    })
+
+    const db = openDb(':memory:')
+    const secrets = createMcpSecretVault('')
+    const hub = createHub()
+    const hubEvents: unknown[] = []
+    hub.add({ send: (d) => hubEvents.push(JSON.parse(d)) })
+
+    const srv = createMcpServer(db, {
+      name: 'Concurrency HTTP MCP',
+      transport: 'http',
+      url: `${baseUrl}/mcp`,
+    })
+
+    const manager = createMcpManager({ db, secrets, hub })
+    activeManagers.push(manager)
+
+    // Case A: disconnect() cancels in-flight initial discoverTools -> status stays 'disconnected'
+    const enteredInitialList = new Promise<void>((resolve) => {
+      notifyToolsListEntered = resolve
+    })
+    const inflightOutcome = manager.discoverTools(srv.id).then(
+      () => null,
+      (err: unknown) => err,
+    )
+    await enteredInitialList
+    await manager.disconnect(srv.id)
+    const cancelledErr = await inflightOutcome
+    expect(cancelledErr).toBeInstanceOf(McpCallError)
+    expect(getMcpServer(db, srv.id)?.status).toBe('disconnected')
+    expect(getMcpServer(db, srv.id)?.lastError).toBe('')
+    expect(hubEvents).toEqual([])
+
+    // Case B: Connect cleanly, then trigger list_changed refresh that hangs while closeAll() runs -> status stays 'connected'
+    holdToolsList = false
+    notifyToolsListEntered = null
+    const discovered = await manager.discoverTools(srv.id)
+    expect(discovered.map((t) => t.name)).toEqual(['emit_change'])
+    expect(getMcpServer(db, srv.id)?.status).toBe('connected')
+
+    holdToolsList = true
+    const enteredRefreshList = new Promise<void>((resolve) => {
+      notifyToolsListEntered = resolve
+    })
+    await manager.callTool(srv.id, 'emit_change', {}, { write: false })
+    await enteredRefreshList
+
+    await manager.closeAll()
+    expect(getMcpServer(db, srv.id)?.status).toBe('connected')
+    expect(getMcpServer(db, srv.id)?.lastError).toBe('')
   })
 })

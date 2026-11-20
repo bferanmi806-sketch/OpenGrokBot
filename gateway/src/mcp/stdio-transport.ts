@@ -434,8 +434,10 @@ export async function createStdioSession(opts: StdioSessionOptions): Promise<Mcp
 
   let lineChunks: Buffer[] = []
   let lineBytes = 0
+  let framingOverflow = false
 
   const abortOnFramingOverflow = (): void => {
+    framingOverflow = true
     lineChunks = []
     lineBytes = 0
     healthy = false
@@ -444,7 +446,7 @@ export async function createStdioSession(opts: StdioSessionOptions): Promise<Mcp
   }
 
   child.stdout?.on('data', (chunk: Buffer) => {
-    if (closing || !healthy) return
+    if (closing || framingOverflow) return
     let slice = chunk
     for (;;) {
       const nl = slice.indexOf(0x0a)
