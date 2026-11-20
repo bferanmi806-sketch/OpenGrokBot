@@ -28,12 +28,14 @@ Qwen, GLM, MiniMax, a local Ollama, or anything OpenAI-compatible.
 
 <table>
 <tr>
-<td width="50%"><img src="assets/screenshot-group.png" alt="A group thread: every teammate reports, the chief of staff closes with a dispatch table"></td>
-<td width="50%"><img src="assets/screenshot-panel.png" alt="The computer panel: a teammate's live screen and the routines it runs"></td>
+<td width="33%"><img src="assets/screenshot-group.png" alt="A group thread: every teammate reports, the chief of staff closes with a dispatch table"></td>
+<td width="33%"><img src="assets/screenshot-panel.png" alt="The computer panel: a teammate's live screen, connector and MCP grants, and the routines it runs"></td>
+<td width="33%"><img src="assets/screenshot-connectors.png" alt="Connectors and MCP: OAuth app accounts plus stdio and Streamable HTTP MCP servers with per-tool read and approval policies"></td>
 </tr>
 <tr>
 <td>Ask the room — everyone answers for their own patch, the chief of staff closes with <code>✓ item → @bot · when</code>.</td>
-<td>Its computer: the live screen you can take over to sign in, and what it has scheduled.</td>
+<td>Its computer: live screen, sandboxed commands, per-teammate connector &amp; MCP grants, and scheduled routines.</td>
+<td>Connectors &amp; MCP: OAuth apps plus <code>stdio</code> and <code>Streamable HTTP</code> servers with per-tool read/write gates.</td>
 </tr>
 </table>
 
@@ -42,7 +44,7 @@ Qwen, GLM, MiniMax, a local Ollama, or anything OpenAI-compatible.
 A folder with a `SOUL.md` (who it is) and an `AGENTS.md` (how it works, with its hard boundaries), a thread in
 the sidebar, and a computer of its own. With Docker, that computer is a container:
 
-![Architecture: your browser talks to one gateway process, which drives one Docker container per teammate — each with a headed Chromium, a noVNC screen you can take over, a shell/file shim, and a persistent workspace](assets/architecture.svg)
+![Architecture: your desktop app or browser talks to one gateway process, which connects each teammate to its own AI model and gated app connectors or MCP servers, and drives one Docker container or local sandbox per teammate](assets/architecture.svg)
 
 Without Docker, a *local computer* takes the container's place: a background browser with its own profile and a
 folder of its own, on your machine ([docs/local-computers.md](docs/local-computers.md)). Either way, the bot's
@@ -288,7 +290,7 @@ official xAI product. [Download the latest release](https://github.com/wolfqing/
       tray presence, start at login, English and Chinese UI (v0.6.0; [docs/desktop.md](docs/desktop.md))
 - [x] **App connectors & native MCP client** — Gmail, Outlook, Google & Outlook Calendar, Notion and Slack via
       Composio OAuth plus zero-dependency `stdio` / `Streamable HTTP` MCP servers, Claude Desktop / Cursor JSON
-      import, per-teammate grants, and code-enforced frozen write approvals ([docs/security.md](docs/security.md))
+      import, per-teammate grants, and code-enforced frozen write approvals (v0.7.0; [docs/security.md](docs/security.md))
 - [ ] **Apple container backend** on macOS 26 for VM isolation without Docker, and a Windows desktop installer.
       Plan in [docs/local-computers.md](docs/local-computers.md)
 - [ ] Telegram as a notification / approval surface for when you are away from the desk

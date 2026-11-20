@@ -7,6 +7,13 @@ names.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-20
+
+App connectors for Gmail, Outlook, Google & Outlook Calendar, Notion and Slack; a zero-dependency native Model Context
+Protocol client (`stdio` and `Streamable HTTP` with `2024-11-05` SSE fallback) with Claude Desktop / Cursor JSON batch
+import and code-enforced frozen write approvals; deterministic browser workflow replay; and refreshed architecture and
+UI documentation.
+
 ### Added
 
 - **App connectors (`Connectors → Apps`).** Connect Gmail, Outlook, Google Calendar, Outlook Calendar, Notion and
@@ -18,6 +25,14 @@ names.
   `2024-11-05` HTTP+SSE fallback and same-origin redirect guards), Claude Desktop / Cursor `mcpServers` JSON batch
   import, `<data>/mcp-secrets.json` (`0600`) local secret storage and output redaction, per-teammate access toggles,
   per-tool read/write policy overrides, and non-rememberable frozen write approvals.
+- **Deterministic browser workflow replay.** Replay saved browser workflow traces through the teammate's existing
+  browser session with runtime placeholder binding, expected-URL verification, popup hygiene, and code-enforced pauses
+  on explicit `step.approval` actions (`POST /api/bots/:botId/workflows/:workflowId/runs`).
+
+### Changed
+
+- **Desktop & runtime dependencies.** Bumped Electron to 45.3.2 alongside minor/patch workspace dependencies, and
+  refreshed the architecture diagram and Retina product screenshots across `README.md` and `README.zh-CN.md`.
 
 ## [0.6.1] - 2026-11-17
 
@@ -668,7 +683,8 @@ A self-hosted Grok Bot alternative assembled from OpenClaw: three preconfigured 
 Ticker) with strict boundaries, agent-to-agent handoffs, any model provider, a one-command setup that never
 overwrites an existing OpenClaw config, a Docker/VPS path and an honest comparison with Grok Bot.
 
-[Unreleased]: https://github.com/wolfqing/OpenSuperBot/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/wolfqing/OpenSuperBot/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/wolfqing/OpenSuperBot/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/wolfqing/OpenSuperBot/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/wolfqing/OpenSuperBot/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/wolfqing/OpenSuperBot/compare/v0.4.0...v0.5.0

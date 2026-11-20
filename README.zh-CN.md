@@ -28,12 +28,14 @@ OpenAI 兼容的模型。
 
 <table>
 <tr>
-<td width="50%"><img src="assets/screenshot-group.png" alt="群线程：每位同事各报各的，幕僚长最后发分派表"></td>
-<td width="50%"><img src="assets/screenshot-panel.png" alt="电脑面板：同事的实时屏幕，以及它排了哪些 routine"></td>
+<td width="33%"><img src="assets/screenshot-group.png" alt="群线程：每位同事各报各的，幕僚长最后发分派表"></td>
+<td width="33%"><img src="assets/screenshot-panel.png" alt="电脑面板：同事的实时屏幕、连接器与 MCP 授权开关，以及它排了哪些 routine"></td>
+<td width="33%"><img src="assets/screenshot-connectors.png" alt="连接器与 MCP：OAuth 应用账号，以及带逐工具读写审批策略的 stdio 与 Streamable HTTP MCP 服务"></td>
 </tr>
 <tr>
 <td>在群里问一句——每位只报自己那摊，幕僚长收口发 <code>✓ 事项 → @谁 · 期限</code>。</td>
-<td>它的电脑：可以接管去登录的实时屏幕，以及它排了哪些定时任务。</td>
+<td>它的电脑：可接管的实时屏幕、沙箱命令开关、按同事勾选的连接器与 MCP 授权，以及定时任务。</td>
+<td>连接器与 MCP：OAuth 应用账号加 <code>stdio</code> / <code>Streamable HTTP</code> 服务，逐工具管控只读与写操作审批。</td>
 </tr>
 </table>
 
@@ -42,7 +44,7 @@ OpenAI 兼容的模型。
 一个文件夹（`SOUL.md` 写它是谁，`AGENTS.md` 写它怎么干活、硬边界在哪）、侧栏里的一条线程，外加一台自己的电脑。
 用 Docker 时，这台电脑是一个容器：
 
-![架构图：浏览器连一个 gateway 进程，它驱动每个同事各自的 Docker 容器——里面是有头 Chromium、可被你接管的 noVNC 屏幕、shell/文件 shim，以及一个持久化的工作区](assets/architecture.svg)
+![架构图：桌面端或浏览器连一个 gateway 进程，按同事接入各自的 AI 模型与受控应用连接器 / MCP 服务，并驱动每个同事各自的 Docker 容器或本机沙箱电脑](assets/architecture.svg)
 
 不用 Docker 时，换成一台「本机电脑」：你机器上一个在后台运行、有独立 profile 的浏览器，加上它自己的文件夹（见
 [docs/local-computers.md](docs/local-computers.md)）。两种情况下，凭证都只存在**它的**浏览器 profile 里。gateway
@@ -256,7 +258,7 @@ Build 驱动你本机的 `grok` 命令行——会话按项目分组，Markdown�
       系统沙箱里（v0.4.0）；Windows 上有浏览器和文件夹
 - [x] **带首次启动向导的桌面 App**（macOS 和 Linux）——试用不需要 Docker、Node 和终端，支持菜单栏/托盘常驻、开机自启与
       中英双语界面（v0.6.0，见 [docs/desktop.md](docs/desktop.md)）
-- [x] **应用连接器与原生 MCP 客户端**——支持 Gmail、Outlook、Google 与 Outlook 日历、Notion、Slack 多账号 OAuth 接入，以及零依赖 `stdio` / `Streamable HTTP` MCP 服务、Claude Desktop / Cursor JSON 批量导入、按同事显式授权与网关代码级冻结写操作审批（见 [docs/security.md](docs/security.md)）
+- [x] **应用连接器与原生 MCP 客户端**——支持 Gmail、Outlook、Google 与 Outlook 日历、Notion、Slack 多账号 OAuth 接入，以及零依赖 `stdio` / `Streamable HTTP` MCP 服务、Claude Desktop / Cursor JSON 批量导入、按同事显式授权与网关代码级冻结写操作审批（v0.7.0，见 [docs/security.md](docs/security.md)）
 - [ ] **macOS 26 上的 Apple container 后端**（免 Docker 的轻量虚拟机隔离）与 Windows 桌面安装包。计划见
       [docs/local-computers.md](docs/local-computers.md)
 - [ ] Telegram 作为离开电脑时的通知 / 审批补位渠道
