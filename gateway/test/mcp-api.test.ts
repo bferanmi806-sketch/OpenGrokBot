@@ -739,5 +739,68 @@ describe('MCP HTTP API (/api/mcp/*, /api/bots/:botId/mcp, /api/bots/:botId/compu
     const testDelRes = await pendingTestDel
     expect(testDelRes.status).toBe(404)
     expect(await testDelRes.json()).toMatchObject({ error: 'unknown MCP server' })
+
+    // 5. Two concurrent PATCH requests while disconnect() takes 30ms preserve BOTH updates
+    const slowDisconnectManager: McpManager = {
+      async discoverTools() {
+        return []
+      },
+      async ensureDiscovered() {
+        return null
+      },
+      async callTool() {
+        return { content: [] }
+      },
+      async disconnect() {
+        await new Promise((r) => setTimeout(r, 30))
+      },
+      async closeAll() {},
+    }
+    const gw3 = createApp({ db, llm: okLlm, dataDir, env: {}, mcpManager: slowDisconnectManager })
+    const createdForPatch = (
+      await (
+        await gw3.app.request('http://127.0.0.1:4747/api/mcp/servers', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            name: 'Concurrent Patch Server',
+            transport: 'http',
+            url: 'https://concurrent.example.com/mcp',
+            connectNow: false,
+          }),
+        })
+      ).json()
+    ).server
+
+    const [p1, p2] = await Promise.all([
+      gw3.app.request(`http://127.0.0.1:4747/api/mcp/servers/${createdForPatch.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          toolPolicies: { tool_alpha: 'read' },
+          headers: { 'X-Alpha': 'alpha_secret_1234' },
+        }),
+      }),
+      gw3.app.request(`http://127.0.0.1:4747/api/mcp/servers/${createdForPatch.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          toolPolicies: { tool_beta: 'write' },
+          headers: { 'X-Beta': 'beta_secret_5678' },
+        }),
+      }),
+    ])
+    expect(p1.status).toBe(200)
+    expect(p2.status).toBe(200)
+
+    const finalSnap = await (await gw3.app.request('http://127.0.0.1:4747/api/mcp/servers')).json()
+    expect(finalSnap.servers[0]).toMatchObject({
+      id: createdForPatch.id,
+      toolPolicies: {
+        tool_alpha: 'read',
+        tool_beta: 'write',
+      },
+      headerKeys: ['X-Alpha', 'X-Beta'],
+    })
   })
 })
