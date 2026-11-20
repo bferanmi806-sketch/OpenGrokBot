@@ -13,11 +13,12 @@ import {
 import { useT, type MessageKey, type T } from '../i18n'
 import { en } from '../i18n/en'
 import { errorText } from '../i18n/describe'
-import type { AppGroupId, AppKey, ConnectorAccountView, ConnectorsSnapshot } from '../types'
+import type { AppGroupId, AppKey, ConnectorAccountView, ConnectorsSnapshot, McpServersSnapshot } from '../types'
 import { ConfirmDialog, useEscape } from './ConfirmDialog'
 import { PlusIcon, XIcon } from './Icons'
+import { McpTab } from './McpTab'
 
-type Roster = Record<string, { name: string; emoji: string }>
+export type Roster = Record<string, { name: string; emoji: string }>
 
 const GROUPS: AppGroupId[] = ['mail_calendar', 'productivity', 'messaging']
 
@@ -36,7 +37,7 @@ function connectorErrorMessage(t: T, err: unknown): { text: string; detail?: str
   return { text: err instanceof Error ? err.message : String(err) }
 }
 
-function TeammateCheckList({ roster, selected, disabled, onToggle }: {
+export function TeammateCheckList({ roster, selected, disabled, onToggle }: {
   roster: Roster
   selected: Set<string>
   disabled?: boolean
@@ -65,14 +66,30 @@ function TeammateCheckList({ roster, selected, disabled, onToggle }: {
   )
 }
 
-export function ConnectorsDialog({ state, roster, onChange, onSignedOut, onClose }: {
+export function ConnectorsDialog({
+  state,
+  roster,
+  onChange,
+  mcpState,
+  onMcpChange,
+  initialTab = 'apps',
+  onSignedOut,
+  onClose,
+}: {
   state: ConnectorsSnapshot
   roster: Roster
   onChange: (next: ConnectorsSnapshot) => void
+  mcpState?: McpServersSnapshot | null
+  onMcpChange?: (next: McpServersSnapshot) => void
+  initialTab?: 'apps' | 'mcp'
   onSignedOut?: () => void
   onClose: () => void
 }) {
   const t = useT()
+  const hasMcp = mcpState != null
+  const [tab, setTab] = useState<'apps' | 'mcp'>(initialTab)
+  const activeTab: 'apps' | 'mcp' = hasMcp ? tab : 'apps'
+
   const [changingKey, setChangingKey] = useState(false)
   const [keyDraft, setKeyDraft] = useState('')
   const [keyBusy, setKeyBusy] = useState<'saving' | 'testing' | null>(null)
@@ -102,13 +119,15 @@ export function ConnectorsDialog({ state, roster, onChange, onSignedOut, onClose
   const [error, setError] = useState<string | null>(null)
   const [confirmDisconnect, setConfirmDisconnect] = useState<{ account: ConnectorAccountView; appName: string } | null>(null)
 
-  const cancelInline = changingKey
-    ? () => { setChangingKey(false); setKeyDraft(''); setKeyStatus(null) }
-    : connectingApp
-      ? () => { setConnectingApp(null); setConnectBots(new Set()) }
-      : managingId
-        ? () => { setManagingId(null); setAccessBots(new Set()) }
-        : null
+  const cancelInline = activeTab !== 'apps'
+    ? null
+    : changingKey
+      ? () => { setChangingKey(false); setKeyDraft(''); setKeyStatus(null) }
+      : connectingApp
+        ? () => { setConnectingApp(null); setConnectBots(new Set()) }
+        : managingId
+          ? () => { setManagingId(null); setAccessBots(new Set()) }
+          : null
   useEscape(cancelInline ?? onClose)
 
   const botOrder = useMemo(() => {
@@ -323,7 +342,41 @@ export function ConnectorsDialog({ state, roster, onChange, onSignedOut, onClose
           </button>
         </div>
 
-        <p className="conn-intro">{t('connectors.custodyNote')}</p>
+        {hasMcp ? (
+          <div className="connectors-tabs" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'apps'}
+              className={`connectors-tab${activeTab === 'apps' ? ' active' : ''}`}
+              onClick={() => setTab('apps')}
+            >
+              <span>{t('connectors.tab.apps')}</span>
+              <span className="connectors-tab-count" aria-hidden="true">{state.accounts.length}</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'mcp'}
+              className={`connectors-tab${activeTab === 'mcp' ? ' active' : ''}`}
+              onClick={() => setTab('mcp')}
+            >
+              <span>{t('connectors.tab.mcp')}</span>
+              <span className="connectors-tab-count" aria-hidden="true">{mcpState.servers.length}</span>
+            </button>
+          </div>
+        ) : null}
+
+        {activeTab === 'mcp' && mcpState ? (
+          <McpTab
+            state={mcpState}
+            roster={roster}
+            onChange={(next) => onMcpChange?.(next)}
+            onSignedOut={onSignedOut}
+          />
+        ) : (
+          <>
+            <p className="conn-intro">{t('connectors.custodyNote')}</p>
 
         <div className="connectors-key-bar">
           <div className="connectors-key-head">
@@ -557,6 +610,8 @@ export function ConnectorsDialog({ state, roster, onChange, onSignedOut, onClose
             )
           })}
         </div>
+          </>
+        )}
       </div>
 
       {confirmClearKey ? (

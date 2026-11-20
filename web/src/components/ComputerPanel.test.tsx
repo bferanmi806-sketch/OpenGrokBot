@@ -1,6 +1,7 @@
 import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+import { I18nProvider } from '../i18n'
 import type { ComputerInfo } from '../types'
 import { ComputerPanel } from './ComputerPanel'
 
@@ -290,5 +291,91 @@ describe('connector access toggles', () => {
     expect(onToggleConnector).toHaveBeenCalledWith('ca-33334444', true)
     await userEvent.click(gmailBox)
     expect(onToggleConnector).toHaveBeenCalledWith('ca-11112222', false)
+  })
+})
+
+describe('MCP server access toggles', () => {
+  it('omits the MCP servers section when no MCP servers are configured', () => {
+    render(<ComputerPanel info={{ ...running, mcpServers: [] }} botName="Scout" onClose={() => {}} />)
+    expect(screen.queryByText('MCP servers')).toBeNull()
+  })
+
+  it('lists configured MCP servers with transport, tool count, and status notes and toggles access per teammate', async () => {
+    const onToggleMcpServer = vi.fn()
+    const { unmount } = render(
+      <ComputerPanel
+        info={{
+          ...running,
+          mcpServers: [
+            {
+              id: 'mcp-linear',
+              name: 'Linear',
+              slug: 'linear',
+              transport: 'http',
+              enabled: true,
+              status: 'connected',
+              toolCount: 4,
+              granted: true,
+            },
+            {
+              id: 'mcp-fs',
+              name: 'Filesystem',
+              slug: 'filesystem',
+              transport: 'stdio',
+              enabled: true,
+              status: 'error',
+              toolCount: 2,
+              granted: false,
+            },
+          ],
+        }}
+        botName="Scout"
+        onClose={() => {}}
+        onToggleMcpServer={onToggleMcpServer}
+      />,
+    )
+
+    expect(screen.getByText('MCP servers')).toBeInTheDocument()
+    expect(screen.getByText(/Checked MCP servers can be used by this teammate/)).toBeInTheDocument()
+    expect(screen.getByText('4 tools')).toBeInTheDocument()
+    expect(screen.getByText('Error')).toBeInTheDocument()
+
+    const linearBox = screen.getByRole('checkbox', { name: 'Linear' })
+    const fsBox = screen.getByRole('checkbox', { name: 'Filesystem' })
+    expect(linearBox).toBeChecked()
+    expect(fsBox).not.toBeChecked()
+
+    await userEvent.click(fsBox)
+    expect(onToggleMcpServer).toHaveBeenCalledWith('mcp-fs', true)
+    await userEvent.click(linearBox)
+    expect(onToggleMcpServer).toHaveBeenCalledWith('mcp-linear', false)
+
+    unmount()
+    render(
+      <I18nProvider lang="zh-CN">
+        <ComputerPanel
+          info={{
+            ...running,
+            mcpServers: [
+              {
+                id: 'mcp-linear',
+                name: 'Linear',
+                slug: 'linear',
+                transport: 'http',
+                enabled: false,
+                status: 'disconnected',
+                toolCount: 3,
+                granted: false,
+              },
+            ],
+          }}
+          botName="Scout"
+          onClose={() => {}}
+          onToggleMcpServer={() => {}}
+        />
+      </I18nProvider>,
+    )
+    expect(screen.getByText('MCP 服务')).toBeInTheDocument()
+    expect(screen.getByText('3 个工具')).toBeInTheDocument()
   })
 })

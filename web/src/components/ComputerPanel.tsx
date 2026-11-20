@@ -39,6 +39,8 @@ type PanelActions = {
   onShell?: (enabled: boolean) => void | Promise<void>
   /** 开关某个已连接外部账号对这位同事的访问授权 */
   onToggleConnector?: (connectorId: string, granted: boolean) => void | Promise<void>
+  /** 开关某个已配置 MCP 服务对这位同事的访问授权 */
+  onToggleMcpServer?: (serverId: string, granted: boolean) => void | Promise<void>
 }
 
 /** webhook 地址带着密钥：给一个「复制」，不把它整串摊在面板上 */
@@ -151,7 +153,7 @@ export function ComputerPanel({ info, botName, onClose, ...actions }: {
   )
 }
 
-function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWindowDone, onShell, onToggleConnector }: {
+function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWindowDone, onShell, onToggleConnector, onToggleMcpServer }: {
   info: ComputerInfo
   botName: string
 } & PanelActions) {
@@ -160,10 +162,11 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
   const memory = info.memory ?? []
   const skills = info.skills ?? []
   const connectors = info.connectors ?? []
-  // 开关命令行、收回窗口、切连接器授权都要等网关响应：期间锁住控件，失败把原因写在旁边，不用 alert
-  const [busy, setBusy] = useState<'shell' | 'window' | `connector:${string}` | null>(null)
+  const mcpServers = info.mcpServers ?? []
+  // 开关命令行、收回窗口、切连接器或 MCP 授权都要等网关响应：期间锁住控件，失败把原因写在旁边，不用 alert
+  const [busy, setBusy] = useState<'shell' | 'window' | `connector:${string}` | `mcp:${string}` | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
-  const act = async (what: 'shell' | 'window' | `connector:${string}`, run: () => void | Promise<void>) => {
+  const act = async (what: 'shell' | 'window' | `connector:${string}` | `mcp:${string}`, run: () => void | Promise<void>) => {
     setBusy(what)
     setProblem(null)
     try {
@@ -256,6 +259,45 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
                         {statusNote ? <span className={`panel-connector-status ${c.status}`}>{statusNote}</span> : null}
                       </span>
                     ) : null}
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+        </div>
+      ) : null}
+
+      {mcpServers.length > 0 ? (
+        <div className="panel-section">
+          <div className="panel-section-title">{t('panel.mcpServers')}</div>
+          <div className="panel-connectors-hint">{t('panel.mcpServersHint')}</div>
+          <div className="panel-connectors-list">
+            {mcpServers.map((s) => {
+              const transportLabel = s.transport === 'stdio' ? 'stdio' : 'HTTP'
+              const toolsLabel = t('panel.mcpToolsCount', { count: s.toolCount })
+              const statusKey = !s.enabled ? 'paused' : s.status
+              const statusNote = statusKey !== 'connected' ? t(`mcp.status.${statusKey}` as MessageKey) : null
+              return (
+                <label className="panel-connector" key={s.id}>
+                  <input
+                    type="checkbox"
+                    checked={s.granted}
+                    disabled={!onToggleMcpServer || busy !== null}
+                    aria-label={s.name}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                      void act(`mcp:${s.id}`, () => onToggleMcpServer?.(s.id, next))
+                    }}
+                  />
+                  <span className="panel-connector-body">
+                    <span className="panel-connector-label">{s.name}</span>
+                    <span className="panel-connector-meta">
+                      <span>{transportLabel}</span>
+                      <span aria-hidden="true"> · </span>
+                      <span>{toolsLabel}</span>
+                      {statusNote ? <span aria-hidden="true"> · </span> : null}
+                      {statusNote ? <span className={`panel-connector-status mcp-${statusKey}`}>{statusNote}</span> : null}
+                    </span>
                   </span>
                 </label>
               )
