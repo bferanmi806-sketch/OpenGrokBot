@@ -1249,13 +1249,8 @@ describe('mcp stdio & Streamable HTTP/SSE transports + McpManager', () => {
         }
       }
 
-      // Same-origin 302 on Legacy SSE GET (/sse -> /sse-v2)
-      if (req.url === '/sse' && req.method === 'POST') {
-        res.statusCode = 405
-        res.end()
-        return
-      }
-      if (req.url === '/sse' && req.method === 'GET') {
+      // Same-origin 302 on ALL methods (/sse -> /sse-v2, including initial POST probe!)
+      if (req.url === '/sse') {
         res.writeHead(302, { Location: '/sse-v2' })
         res.end()
         return
@@ -1271,10 +1266,27 @@ describe('mcp stdio & Streamable HTTP/SSE transports + McpManager', () => {
         res.write('event: endpoint\ndata: /sse-messages\n\n')
         return
       }
+      if (req.url === '/accepted' && req.method === 'GET') {
+        const bodyOnGet = await readReqBody(req)
+        if (bodyOnGet.length > 0 || req.headers['content-type'] !== undefined) {
+          res.statusCode = 400
+          res.end('Unexpected body or content-type on redirected GET')
+          return
+        }
+        res.statusCode = 202
+        res.end('Accepted')
+        return
+      }
       if (req.url === '/sse-messages' && req.method === 'POST') {
         const raw = await readReqBody(req)
-        const msg = JSON.parse(raw) as { id?: number; method?: string }
-        res.statusCode = 202
+        const msg = JSON.parse(raw) as { id?: number; method?: string; params?: { name?: string; arguments?: { item?: string } } }
+        if (msg.method === 'tools/call' && msg.params?.name === 'sse_write_broken_303') {
+          res.writeHead(303, { Location: '/missing-after-303' })
+          res.end()
+          return
+        }
+        // Return 303 See Other -> GET /accepted while delivering JSON-RPC result over SSE stream
+        res.writeHead(303, { Location: '/accepted' })
         res.end()
         if (msg.method === 'initialize') {
           legacySseStream?.write(
@@ -1289,7 +1301,22 @@ describe('mcp stdio & Streamable HTTP/SSE transports + McpManager', () => {
             `event: message\ndata: ${JSON.stringify({
               jsonrpc: '2.0',
               id: msg.id,
-              result: { tools: [{ name: 'sse_v2_tool', description: 'ok', inputSchema: { type: 'object', properties: {} } }] },
+              result: {
+                tools: [
+                  { name: 'sse_v2_tool', description: 'ok', inputSchema: { type: 'object', properties: {} } },
+                  { name: 'sse_write_broken_303', description: 'write 303 fail', inputSchema: { type: 'object', properties: {} } },
+                ],
+              },
+            })}\n\n`,
+          )
+        } else if (msg.method === 'tools/call') {
+          legacySseStream?.write(
+            `event: message\ndata: ${JSON.stringify({
+              jsonrpc: '2.0',
+              id: msg.id,
+              result: {
+                content: [{ type: 'text', text: `sse-303-ok:${msg.params?.arguments?.item ?? ''}` }],
+              },
             })}\n\n`,
           )
         }
@@ -1383,8 +1410,22 @@ describe('mcp stdio & Streamable HTTP/SSE transports + McpManager', () => {
       nested: { leakedHeader: '[REDACTED]' },
     })
 
-    // Same-origin 302 redirect on legacy SSE GET (/sse -> /sse-v2) succeeds too
+    // Same-origin 302 redirect on ALL methods (/sse -> /sse-v2) + 303 See Other on POST /sse-messages -> GET /accepted
     const sseV2Tools = await manager.discoverTools(sameOriginLegacySrv.id)
-    expect(sseV2Tools.map((t) => t.name)).toEqual(['sse_v2_tool'])
+    expect(sseV2Tools.map((t) => t.name)).toEqual(['sse_v2_tool', 'sse_write_broken_303'])
+
+    const sse303Call = await manager.callTool(sameOriginLegacySrv.id, 'sse_v2_tool', { item: 'alpha' }, { write: false })
+    expect(sse303Call.content).toEqual([{ type: 'text', text: 'sse-303-ok:alpha' }])
+
+    // Write POST that received 303 See Other whose follow-up GET fails -> uncertain_write (dispatched === true)
+    let broken303WriteErr: unknown
+    try {
+      await manager.callTool(sameOriginLegacySrv.id, 'sse_write_broken_303', { item: 'beta' }, { write: true })
+    } catch (err) {
+      broken303WriteErr = err
+    }
+    expect(broken303WriteErr).toBeInstanceOf(McpCallError)
+    expect((broken303WriteErr as McpCallError).code).toBe('uncertain_write')
+    expect((broken303WriteErr as McpCallError).dispatched).toBe(true)
   })
 })

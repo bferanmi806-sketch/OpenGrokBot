@@ -145,13 +145,45 @@ function isAbortLikeError(err: unknown): boolean {
   return name === 'AbortError' || name === 'TimeoutError'
 }
 
+type SameOriginFetchOutcome = {
+  response: Response
+  finalUrl: URL
+  rewrittenToGet: boolean
+  sawPost303: boolean
+}
+
+function copyRequestHeaders(raw: HeadersInit | undefined): Record<string, string> {
+  if (!raw) return {}
+  if (raw instanceof Headers) {
+    const out: Record<string, string> = {}
+    raw.forEach((v, k) => {
+      out[k] = v
+    })
+    return out
+  }
+  if (Array.isArray(raw)) {
+    const out: Record<string, string> = {}
+    for (const [k, v] of raw) {
+      out[k] = v
+    }
+    return out
+  }
+  return { ...raw }
+}
+
 async function fetchSameOriginWithUrl(
   fetchImpl: typeof fetch,
   baseUrl: URL,
   initialUrl: string,
   init: RequestInit,
   redact: (text: string) => string,
-): Promise<{ res: Response; finalUrl: URL }> {
+  opts?: { write?: boolean },
+): Promise<SameOriginFetchOutcome> {
+  const makeRedirectError = (msg: string, uncertainAfter303: boolean): McpCallError =>
+    uncertainAfter303 && opts?.write
+      ? new McpCallError('uncertain_write', redact(msg), true)
+      : new McpCallError('connect_failed', redact(msg), false)
+
   let currentUrl: URL
   try {
     currentUrl = new URL(initialUrl)
@@ -171,13 +203,22 @@ async function fetchSameOriginWithUrl(
     )
   }
 
-  let method = (init.method ?? 'GET').toUpperCase()
-  let body = init.body
-  const headers: Record<string, string> = { ...(init.headers as Record<string, string> | undefined) }
+  const {
+    body: initBody,
+    headers: initHeaders,
+    method: initMethod,
+    redirect: _ignoredRedirect,
+    ...restInit
+  } = init
+  let method = (initMethod ?? 'GET').toUpperCase()
+  let body: BodyInit | undefined = initBody ?? undefined
+  const headers = copyRequestHeaders(initHeaders)
+  let rewrittenToGet = false
+  let sawPost303 = false
 
   for (let hop = 0; ; hop++) {
     const res = await fetchImpl(currentUrl.href, {
-      ...init,
+      ...restInit,
       method,
       headers,
       ...(body !== undefined ? { body } : {}),
@@ -185,33 +226,29 @@ async function fetchSameOriginWithUrl(
     })
 
     if (!REDIRECT_STATUSES.has(res.status)) {
-      return { res, finalUrl: currentUrl }
+      return { response: res, finalUrl: currentUrl, rewrittenToGet, sawPost303 }
     }
 
     await res.body?.cancel().catch(() => {})
 
+    if (res.status === 303 && method === 'POST') {
+      sawPost303 = true
+    }
+
     if (hop >= MAX_REDIRECT_HOPS) {
-      throw new McpCallError(
-        'connect_failed',
-        redact(`MCP HTTP redirect limit exceeded (max ${MAX_REDIRECT_HOPS} hops)`),
-        false,
-      )
+      throw makeRedirectError(`MCP HTTP redirect limit exceeded (max ${MAX_REDIRECT_HOPS} hops)`, sawPost303)
     }
 
     const location = res.headers.get('location')?.trim() ?? ''
     if (!location) {
-      throw new McpCallError(
-        'connect_failed',
-        redact(`MCP HTTP ${res.status} redirect missing Location header`),
-        false,
-      )
+      throw makeRedirectError(`MCP HTTP ${res.status} redirect missing Location header`, sawPost303)
     }
 
     let nextUrl: URL
     try {
       nextUrl = new URL(location, currentUrl)
     } catch {
-      throw new McpCallError('connect_failed', redact('Invalid redirect Location URL in MCP HTTP response'), false)
+      throw makeRedirectError('Invalid redirect Location URL in MCP HTTP response', sawPost303)
     }
 
     if (
@@ -220,10 +257,9 @@ async function fetchSameOriginWithUrl(
       nextUrl.username !== '' ||
       nextUrl.password !== ''
     ) {
-      throw new McpCallError(
-        'connect_failed',
-        redact(`Cross-origin MCP HTTP redirect rejected (${nextUrl.origin} !== ${baseUrl.origin})`),
-        false,
+      throw makeRedirectError(
+        `Cross-origin MCP HTTP redirect rejected (${nextUrl.origin} !== ${baseUrl.origin})`,
+        sawPost303,
       )
     }
 
@@ -231,6 +267,7 @@ async function fetchSameOriginWithUrl(
       (res.status === 303 && method !== 'GET' && method !== 'HEAD') ||
       ((res.status === 301 || res.status === 302) && method === 'POST')
     ) {
+      rewrittenToGet = true
       method = 'GET'
       body = undefined
       for (const key of Object.keys(headers)) {
@@ -250,9 +287,10 @@ async function fetchSameOrigin(
   initialUrl: string,
   init: RequestInit,
   redact: (text: string) => string,
+  opts?: { write?: boolean },
 ): Promise<Response> {
-  const { res } = await fetchSameOriginWithUrl(fetchImpl, baseUrl, initialUrl, init, redact)
-  return res
+  const { response } = await fetchSameOriginWithUrl(fetchImpl, baseUrl, initialUrl, init, redact, opts)
+  return response
 }
 
 async function readBoundedText(body: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<string> {
@@ -562,7 +600,7 @@ async function connectLegacySse(params: {
         },
         redact,
       )
-      getRes = getOutcome.res
+      getRes = getOutcome.response
       sseStreamUrl = getOutcome.finalUrl
     } catch (err) {
       if (err instanceof McpCallError) throw err
@@ -723,10 +761,10 @@ async function connectLegacySse(params: {
         pending.set(id, entry)
 
         void (async () => {
-          let postRes: Response
+          let postOutcome: SameOriginFetchOutcome
           try {
             entry.dispatched = true
-            postRes = await fetchSameOrigin(
+            postOutcome = await fetchSameOriginWithUrl(
               fetchImpl,
               baseUrl,
               resolvedEndpoint.href,
@@ -740,6 +778,7 @@ async function connectLegacySse(params: {
                 signal: reqAbort.signal,
               },
               redact,
+              { write: reqOpts.write },
             )
           } catch (err) {
             const cur = pending.get(id)
@@ -763,6 +802,23 @@ async function connectLegacySse(params: {
             return
           }
 
+          const postRes = postOutcome.response
+          if (postOutcome.rewrittenToGet && !postOutcome.sawPost303) {
+            await postRes.body?.cancel().catch(() => {})
+            const cur = pending.get(id)
+            if (!cur) return
+            pending.delete(id)
+            cur.cleanup()
+            cur.reject(
+              new McpCallError(
+                'connect_failed',
+                'MCP legacy SSE POST was redirected to GET (dropped JSON-RPC body)',
+                false,
+              ),
+            )
+            return
+          }
+
           if (!postRes.ok) {
             const snippet = await readBoundedText(postRes.body, MAX_ERROR_SNIPPET_BYTES).catch(() => '')
             const cur = pending.get(id)
@@ -770,7 +826,15 @@ async function connectLegacySse(params: {
             pending.delete(id)
             cur.cleanup()
             const suffix = snippet.trim() ? `: ${snippet.trim()}` : ''
-            if (postRes.status >= 500 || postRes.status === 408) {
+            if (postOutcome.sawPost303 && cur.write) {
+              cur.reject(
+                new McpCallError(
+                  'uncertain_write',
+                  redact(`MCP SSE POST 303 follow-up HTTP ${postRes.status} during write${suffix}`),
+                  true,
+                ),
+              )
+            } else if (postRes.status >= 500 || postRes.status === 408) {
               if (cur.write) {
                 cur.reject(
                   new McpCallError(
@@ -833,7 +897,7 @@ async function connectLegacySse(params: {
       sseAbort.signal,
     )
     try {
-      const notifRes = await fetchSameOrigin(
+      const notifOutcome = await fetchSameOriginWithUrl(
         fetchImpl,
         baseUrl,
         resolvedEndpoint.href,
@@ -848,6 +912,15 @@ async function connectLegacySse(params: {
         },
         redact,
       )
+      const notifRes = notifOutcome.response
+      if (notifOutcome.rewrittenToGet && !notifOutcome.sawPost303) {
+        await notifRes.body?.cancel().catch(() => {})
+        throw new McpCallError(
+          'connect_failed',
+          'MCP legacy SSE notifications/initialized POST was redirected to GET (dropped JSON-RPC body)',
+          false,
+        )
+      }
       if (!notifRes.ok) {
         const snippet = await readBoundedText(notifRes.body, MAX_ERROR_SNIPPET_BYTES).catch(() => '')
         const suffix = snippet.trim() ? `: ${snippet.trim()}` : ''
@@ -1130,7 +1203,7 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
   const sendInitializedNotification = async (signal?: AbortSignal): Promise<void> => {
     const reqAbort = createRequestAbort(handshakeTimeoutMs, signal, sessionAbort.signal)
     try {
-      const notifRes = await fetchSameOrigin(
+      const notifOutcome = await fetchSameOriginWithUrl(
         fetchImpl,
         baseUrl,
         baseUrl.href,
@@ -1142,6 +1215,15 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
         },
         redact,
       )
+      const notifRes = notifOutcome.response
+      if (notifOutcome.rewrittenToGet && !notifOutcome.sawPost303) {
+        await notifRes.body?.cancel().catch(() => {})
+        throw new McpCallError(
+          'connect_failed',
+          'MCP notifications/initialized POST was redirected to GET (dropped JSON-RPC body)',
+          false,
+        )
+      }
       const returnedSid = notifRes.headers.get('mcp-session-id')?.trim()
       if (returnedSid) {
         sessionId = returnedSid
@@ -1172,9 +1254,9 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
   const runStreamableInitialize = async (allowLegacyFallback: boolean): Promise<'streamable' | McpSession> => {
     const initId = ++nextId
     const reqAbort = createRequestAbort(handshakeTimeoutMs, undefined, sessionAbort.signal)
-    let res: Response
+    let initOutcome: SameOriginFetchOutcome
     try {
-      res = await fetchSameOrigin(
+      initOutcome = await fetchSameOriginWithUrl(
         fetchImpl,
         baseUrl,
         baseUrl.href,
@@ -1206,7 +1288,29 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
       )
     }
 
+    const res = initOutcome.response
     try {
+      if (initOutcome.rewrittenToGet) {
+        await res.body?.cancel().catch(() => {})
+        if (allowLegacyFallback) {
+          reqAbort.cleanup()
+          return await connectLegacySse({
+            baseUrl,
+            customHeaders,
+            fetchImpl,
+            redact,
+            onToolsChanged: opts.onToolsChanged,
+            handshakeTimeoutMs,
+            callTimeoutMs,
+          })
+        }
+        throw new McpCallError(
+          'connect_failed',
+          'MCP HTTP initialize POST was redirected to GET (dropped JSON-RPC body)',
+          false,
+        )
+      }
+
       if (allowLegacyFallback && (res.status === 400 || res.status === 404 || res.status === 405)) {
         const bodyText = await readBoundedText(res.body, 64 * 1024).catch(() => '')
         let parsed: unknown = null
@@ -1295,9 +1399,9 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
     const usedSessionId = sessionId
     const reqAbort = createRequestAbort(reqOpts.timeoutMs, reqOpts.signal, sessionAbort.signal)
 
-    let res: Response
+    let reqOutcome: SameOriginFetchOutcome
     try {
-      res = await fetchSameOrigin(
+      reqOutcome = await fetchSameOriginWithUrl(
         fetchImpl,
         baseUrl,
         baseUrl.href,
@@ -1308,6 +1412,7 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
           signal: reqAbort.signal,
         },
         redact,
+        { write: reqOpts.write },
       )
     } catch (err) {
       reqAbort.cleanup()
@@ -1329,7 +1434,24 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
       throw new McpCallError('connect_failed', redact(`MCP HTTP request failed: ${msg}`), false)
     }
 
+    const res = reqOutcome.response
     try {
+      if (reqOutcome.rewrittenToGet) {
+        await res.body?.cancel().catch(() => {})
+        if (reqOpts.write && reqOutcome.sawPost303) {
+          throw new McpCallError(
+            'uncertain_write',
+            'MCP HTTP write received 303 redirect dropping JSON-RPC response',
+            true,
+          )
+        }
+        throw new McpCallError(
+          'connect_failed',
+          'MCP HTTP POST was redirected to GET (dropped JSON-RPC body)',
+          false,
+        )
+      }
+
       if (res.status === 404 && usedSessionId !== null) {
         await readBoundedText(res.body, MAX_ERROR_SNIPPET_BYTES).catch(() => '')
         if (sessionId === usedSessionId) {
