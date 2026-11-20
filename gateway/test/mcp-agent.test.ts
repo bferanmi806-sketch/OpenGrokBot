@@ -19,6 +19,9 @@ import {
   setBotMcpServers,
   updateMcpServer,
 } from '../src/mcp/store.js'
+import { computeExposedToolNames } from '../src/mcp/naming.js'
+import { createMcpManager } from '../src/mcp/client.js'
+import { createMcpSecretVault } from '../src/mcp/secrets.js'
 import {
   buildMcpToolSet,
   formatMcpCallResult,
@@ -733,5 +736,146 @@ describe('MCP dynamic tools, 3-tier policy, outside-data taint & gateway-execute
     expect(slackApprove.status).toBe(202)
     expect(connectorExecutions).toHaveLength(1)
     expect(getApproval(db, slackChip!.approvalId)!.execution_status).toBe('succeeded')
+  })
+
+  it('strips trailing underscores on truncated tool stems, propagates turn AbortSignal to read MCP calls, and redacts vault secrets in tool results', async () => {
+    // 1. Collision-suffix underscore stripping: `__` stays exclusively the `mcp__<server>__<tool>` delimiter
+    const prefix = 'mcp__linear__'
+    const maxToolLen = 64 - prefix.length - 5 // 46
+    // Place an underscore right at index maxToolLen - 1 (45) so slice(0, 46) ends in `_`
+    const stemWithTrailingUnderscore = `${'a'.repeat(maxToolLen - 1)}_extra_characters_beyond_limit`
+    const exposed = computeExposedToolNames('linear', [{ name: stemWithTrailingUnderscore }])
+    const assignedName = exposed.get(stemWithTrailingUnderscore)!
+    expect(assignedName.length).toBeLessThanOrEqual(64)
+    expect(assignedName.split('__')).toHaveLength(3)
+
+    // 2. Turn AbortSignal propagates to read-only MCP calls, and McpManager redacts echoed secrets
+    const dataDir = mkdtempSync(join(tmpdir(), 'osb-mcp-abort-redact-'))
+    const db = openDb(':memory:')
+    upsertBot(db, { id: 'engineer', name: 'Builder', role: 'engineering', emoji: '🛠️', soul_path: '' })
+    const threadId = ensureDmThread(db, 'engineer')
+
+    const secrets = createMcpSecretVault(dataDir)
+    const srv = createMcpServer(db, {
+      name: 'SecretAPI',
+      transport: 'http',
+      url: 'https://mcp.secret.example/mcp',
+      enabled: true,
+      trustReadOnlyHint: true,
+      headerKeys: ['Authorization'],
+      tools: [
+        {
+          name: 'slow_or_leaky_read',
+          description: 'Read tool',
+          inputSchema: { type: 'object', properties: { mode: { type: 'string' } } },
+          readOnlyHint: true,
+          destructiveHint: false,
+        },
+      ],
+      status: 'connected',
+    })
+    secrets.patch(srv.id, { headers: { Authorization: 'Bearer ultra_secret_mcp_token_8888' } })
+    setBotMcpServers(db, 'engineer', [srv.id])
+
+    let notifyCallStarted: (() => void) | null = null
+    let observedAbort = false
+
+    const realManager = createMcpManager({
+      db,
+      secrets,
+      fetchImpl: async (_input, init) => {
+        const bodyStr = typeof init?.body === 'string' ? init.body : ''
+        const rpc = bodyStr ? (JSON.parse(bodyStr) as { id?: number; method?: string; params?: { arguments?: { mode?: string } } }) : {}
+        if (rpc.method === 'initialize') {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: rpc.id,
+              result: { protocolVersion: '2025-03-26', capabilities: { tools: {} } },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        if (rpc.method === 'notifications/initialized') {
+          return new Response('', { status: 202 })
+        }
+        if (rpc.method === 'tools/call') {
+          const mode = rpc.params?.arguments?.mode
+          if (mode === 'hang') {
+            notifyCallStarted?.()
+            await new Promise<void>((_, reject) => {
+              const sig = init?.signal
+              if (sig?.aborted) {
+                observedAbort = true
+                reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }))
+                return
+              }
+              sig?.addEventListener(
+                'abort',
+                () => {
+                  observedAbort = true
+                  reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }))
+                },
+                { once: true },
+              )
+            })
+          }
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: rpc.id,
+              result: {
+                isError: true,
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Upstream 401 with Authorization: Bearer ultra_secret_mcp_token_8888',
+                  },
+                ],
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        return new Response('Not Found', { status: 404 })
+      },
+    })
+
+    const llm = scriptedLlm([
+      { toolCalls: [{ id: 'c1', name: 'mcp__secretapi__slow_or_leaky_read', args: { mode: 'leak' } }] },
+      { content: 'Handled redacted error.' },
+      { toolCalls: [{ id: 'c2', name: 'mcp__secretapi__slow_or_leaky_read', args: { mode: 'hang' } }] },
+      { content: 'Should not reach here after stop.' },
+    ])
+
+    const gw = createApp({ db, llm, dataDir, mcpManager: realManager })
+
+    // Turn 1: Verify echoed secret in `isError: true` content[].text is redacted before reaching LLM context
+    await gw.app.request(`http://127.0.0.1:4747/api/threads/${threadId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Run leaky read' }),
+    })
+    await vi.waitFor(() => expect(llm.seenMessages).toHaveLength(2))
+    const toolMsg = llm.seenMessages[1]!.find((m) => m.role === 'tool')!
+    expect(String(toolMsg.content)).toContain('[REDACTED]')
+    expect(String(toolMsg.content)).not.toContain('ultra_secret_mcp_token_8888')
+
+    // Turn 2: Start hanging read tool, then cancel turn via POST /api/threads/:threadId/stop -> signal aborts fetch immediately
+    const callStarted = new Promise<void>((resolve) => {
+      notifyCallStarted = resolve
+    })
+    await gw.app.request(`http://127.0.0.1:4747/api/threads/${threadId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Run slow read' }),
+    })
+    await callStarted
+    const stopRes = await gw.app.request(`http://127.0.0.1:4747/api/threads/${threadId}/stop`, { method: 'POST' })
+    expect(stopRes.status).toBe(200)
+    await vi.waitFor(() => expect(observedAbort).toBe(true))
+    await vi.waitFor(() => expect(gw.isBusy('engineer')).toBe(false))
+
+    await gw.stopAll()
   })
 })

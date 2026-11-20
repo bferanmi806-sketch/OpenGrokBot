@@ -5,6 +5,7 @@ import type { McpSecretVault } from './secrets.js'
 import {
   MAX_TOOLS_PER_SERVER,
   createStdioSession,
+  isRecord,
   normalizeMcpDiscoveredTool,
   type McpSession,
 } from './stdio-transport.js'
@@ -52,6 +53,49 @@ function sanitizeToolsList(tools: readonly McpDiscoveredTool[]): McpDiscoveredTo
   return out
 }
 
+const MAX_REDACT_DEPTH = 32
+
+function redactStructuredValue(
+  val: unknown,
+  redact: (text: string) => string,
+  depth: number,
+  seen: WeakSet<object>,
+): unknown {
+  if (typeof val === 'string') return redact(val)
+  if (val === null || typeof val !== 'object') return val
+  if (seen.has(val)) return '[Circular]'
+  if (depth >= MAX_REDACT_DEPTH) return val
+
+  seen.add(val)
+  try {
+    if (Array.isArray(val)) {
+      return val.map((item) => redactStructuredValue(item, redact, depth + 1, seen))
+    }
+    if (isRecord(val)) {
+      const out: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(val)) {
+        if (!Object.hasOwn(val, k)) continue
+        const cleanKey = redact(k)
+        const cleanVal = redactStructuredValue(v, redact, depth + 1, seen)
+        if (cleanKey === '__proto__') {
+          Object.defineProperty(out, cleanKey, {
+            value: cleanVal,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          })
+        } else {
+          out[cleanKey] = cleanVal
+        }
+      }
+      return out
+    }
+    return val
+  } finally {
+    seen.delete(val)
+  }
+}
+
 export function createMcpManager(deps: McpManagerDeps): McpManager {
   const { db, secrets, hub } = deps
   const now = deps.now ?? (() => Date.now())
@@ -83,6 +127,36 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
       return new McpCallError(err.code, cleanMsg, err.dispatched)
     }
     return new McpCallError(fallbackCode, cleanMsg, false)
+  }
+
+  const redactCallResult = (serverId: string, result: McpCallResult): McpCallResult => {
+    const redact = (text: string): string => secrets.redactText(serverId, text)
+    const content = Array.isArray(result.content)
+      ? result.content.map((block) => {
+          if (!isRecord(block)) return block
+          if (block.type === 'text' && typeof block.text === 'string') {
+            return { ...block, text: redact(block.text) }
+          }
+          if (block.type === 'resource' && isRecord(block.resource) && typeof block.resource.text === 'string') {
+            return {
+              ...block,
+              resource: {
+                ...block.resource,
+                text: redact(block.resource.text),
+              },
+            }
+          }
+          return block
+        })
+      : []
+
+    return {
+      ...result,
+      content,
+      ...(result.structuredContent !== undefined
+        ? { structuredContent: redactStructuredValue(result.structuredContent, redact, 0, new WeakSet<object>()) }
+        : {}),
+    }
   }
 
   const evictIfUnhealthy = (serverId: string): boolean => {
@@ -272,7 +346,8 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
 
     try {
       const session = await connect(serverId)
-      const result = await session.callTool(toolName, args, opts)
+      const rawResult = await session.callTool(toolName, args, opts)
+      const result = redactCallResult(serverId, rawResult)
       if (isCurrent(serverId, opEpoch, opGen) && getMcpServer(db, serverId)?.status !== 'connected') {
         markMcpServerStatus(db, serverId, 'connected', '', now())
         hub?.broadcast({ type: 'mcp_changed' })

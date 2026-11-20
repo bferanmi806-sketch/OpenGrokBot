@@ -80,8 +80,16 @@ function parseSecretPatch(
   }
   const out: Record<string, string | null> = {}
   for (const [rawKey, val] of Object.entries(raw)) {
+    if (!Object.hasOwn(raw, rawKey)) continue
     const key = rawKey.trim()
-    if (!key || key.includes('\0') || (kind === 'env' && key.includes('='))) {
+    if (
+      !key ||
+      key === '__proto__' ||
+      key === 'constructor' ||
+      key === 'prototype' ||
+      key.includes('\0') ||
+      (kind === 'env' && key.includes('='))
+    ) {
       throw new Error(`Invalid MCP ${kind} key: ${rawKey}`)
     }
     if (val === null) {

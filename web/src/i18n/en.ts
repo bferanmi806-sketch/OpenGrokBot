@@ -333,7 +333,7 @@ export const en = {
   'mcp.importSubmit': 'Import',
   'mcp.importing': 'Importing…',
   'mcp.importSuccess': 'Imported {count} MCP server(s).',
-  'mcp.importPartialErrors': 'Skipped {count} invalid entry(s):',
+  'mcp.importPartialErrors': 'Skipped {count} invalid entries:',
   'mcp.importErrorRow': '{name}: {error}',
   'mcp.field.name': 'Name',
   'mcp.field.namePlaceholder': 'e.g. Linear or Filesystem',

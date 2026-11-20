@@ -150,6 +150,16 @@ function defaultToolMode(server: McpServerView, tool: { readOnlyHint: boolean; d
   return server.trustReadOnlyHint && tool.readOnlyHint && !tool.destructiveHint ? 'read' : 'write'
 }
 
+function hasIncompleteSecretRow(rows: SecretRow[]): boolean {
+  return rows.some((r) => {
+    const k = r.key.trim()
+    if (k === '' && r.value === '' && !r.originalKey) return false
+    if (!k) return true
+    if (r.value === '' && !(r.originalKey && k === r.originalKey)) return true
+    return false
+  })
+}
+
 export function McpTab({
   state,
   roster,
@@ -358,8 +368,15 @@ export function McpTab({
     return patch
   }
 
+  const activeSecretRows = transportDraft === 'stdio' ? envRows : headerRows
+  const formSaveDisabled =
+    busyId !== null
+    || !nameDraft.trim()
+    || (transportDraft === 'stdio' ? !commandDraft.trim() : !urlDraft.trim())
+    || hasIncompleteSecretRow(activeSecretRows)
+
   const submitAddOrEdit = async () => {
-    if (!formMode || formMode.kind === 'import') return
+    if (!formMode || formMode.kind === 'import' || formSaveDisabled) return
     setBusyId('form')
     setError(null)
     try {
@@ -552,6 +569,8 @@ export function McpTab({
     try {
       await deleteMcpServer(serverId)
       onChange(removeServerFromSnapshot(stateRef.current, serverId))
+      setFormMode((prev) => (prev?.kind === 'edit' && prev.serverId === serverId ? null : prev))
+      setManagingAccessId((prev) => (prev === serverId ? null : prev))
     } catch (err) {
       if (err instanceof SignedOut) { onSignedOut?.(); return }
       setError(mcpErrorMessage(t, err))
@@ -598,6 +617,7 @@ export function McpTab({
                 type="text"
                 spellCheck={false}
                 value={row.key}
+                aria-label={t('mcp.field.keyPlaceholder')}
                 placeholder={t('mcp.field.keyPlaceholder')}
                 disabled={busyId !== null}
                 onChange={(e) => updateSecretRow(kind, row.id, { key: e.target.value })}
@@ -607,6 +627,7 @@ export function McpTab({
                 autoComplete="off"
                 spellCheck={false}
                 value={row.value}
+                aria-label={t('mcp.field.valuePlaceholder')}
                 placeholder={
                   row.savedMasked && (!row.originalKey || row.key.trim() === row.originalKey)
                     ? t('mcp.field.secretSavedPlaceholder', { masked: row.savedMasked })
@@ -807,11 +828,7 @@ export function McpTab({
             <button
               type="submit"
               className="primary"
-              disabled={
-                busyId !== null
-                || !nameDraft.trim()
-                || (transportDraft === 'stdio' ? !commandDraft.trim() : !urlDraft.trim())
-              }
+              disabled={formSaveDisabled}
             >
               {busyId === 'form' ? t('mcp.saving') : t('mcp.save')}
             </button>

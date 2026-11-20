@@ -249,9 +249,9 @@ if (config.idleStopMinutes > 0) {
 // bot 的 Docker 电脑该长期在线：只断 CDP 连接，容器留着（也保住浏览器登录态）
 onShutdown(runtime, async () => {
   schedulerProxy.stopAll()
-  gateway.stopAll()
+  const stoppingGateway = gateway.stopAll()
   killActiveSandboxes()
   server.close()
-  await pool.disposeAll()
+  await Promise.all([pool.disposeAll(), stoppingGateway])
   try { db.close() } catch { /* 已经关了 */ }
 }, { log: (line) => console.log(`[gateway] ${line}`) })

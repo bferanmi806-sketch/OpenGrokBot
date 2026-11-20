@@ -113,8 +113,11 @@ describe('mcp store & secrets vault', () => {
       now: 12,
     })
     expect(a.slug.length).toBeLessThanOrEqual(20)
-    expect(b.slug).toBe(`${a.slug.slice(0, 17)}_2`)
-    expect(c.slug).toBe(`${a.slug.slice(0, 17)}_3`)
+    expect(b.slug).toBe('twenty_character_2')
+    expect(c.slug).toBe('twenty_character_3')
+    expect(b.slug).not.toContain('__')
+    expect(c.slug).not.toContain('__')
+    expect(normalizeMcpSlug('nineteen_characters_extra')).toBe('nineteen_characters')
 
     expect(getMcpServer(db, 'not-an-id')).toBeNull()
     expect(updateMcpServer(db, 'mcp-00000000', { name: 'Nope' })).toBeNull()
@@ -191,5 +194,22 @@ describe('mcp store & secrets vault', () => {
     expect(mem.get('mcp-aaaaaaaa').env.API_TOKEN).toBeUndefined()
     mem.remove('mcp-aaaaaaaa')
     expect(mem.get('mcp-aaaaaaaa')).toEqual({ env: {}, headers: {} })
+
+    // Prototype-key & Object.hasOwn guards
+    expect(mem.get('constructor')).toEqual({ env: {}, headers: {} })
+    expect(mem.get('toString')).toEqual({ env: {}, headers: {} })
+    const protoEnv = JSON.parse('{"__proto__":"evil","constructor":"evil","prototype":"evil","SAFE_KEY":"ok_val"}') as Record<
+      string,
+      string
+    >
+    mem.patch('mcp-bbbbbbbb', { env: protoEnv })
+    expect(mem.get('mcp-bbbbbbbb')).toEqual({ env: { SAFE_KEY: 'ok_val' }, headers: {} })
+
+    const diskDir = mkdtempSync(join(tmpdir(), 'osb-mcp-secrets-proto-'))
+    const diskVault = createMcpSecretVault(diskDir)
+    diskVault.patch('mcp-cccccccc', { env: protoEnv })
+    expect(diskVault.get('constructor')).toEqual({ env: {}, headers: {} })
+    expect(diskVault.get('toString')).toEqual({ env: {}, headers: {} })
+    expect(diskVault.get('mcp-cccccccc')).toEqual({ env: { SAFE_KEY: 'ok_val' }, headers: {} })
   })
 })

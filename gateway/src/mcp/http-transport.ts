@@ -17,6 +17,16 @@ export type { McpSession } from './stdio-transport.js'
 const MAX_HTTP_BODY_BYTES = 4 * 1024 * 1024
 const MAX_ERROR_SNIPPET_BYTES = 4 * 1024
 const DELETE_TIMEOUT_MS = 3_000
+const MAX_REDIRECT_HOPS = 5
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+const BODY_HEADER_NAMES = new Set([
+  'content-encoding',
+  'content-language',
+  'content-location',
+  'content-type',
+  'content-length',
+])
 
 const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
 const FORBIDDEN_HEADER_NAMES = new Set([
@@ -135,6 +145,116 @@ function isAbortLikeError(err: unknown): boolean {
   return name === 'AbortError' || name === 'TimeoutError'
 }
 
+async function fetchSameOriginWithUrl(
+  fetchImpl: typeof fetch,
+  baseUrl: URL,
+  initialUrl: string,
+  init: RequestInit,
+  redact: (text: string) => string,
+): Promise<{ res: Response; finalUrl: URL }> {
+  let currentUrl: URL
+  try {
+    currentUrl = new URL(initialUrl)
+  } catch {
+    throw new McpCallError('connect_failed', 'Invalid MCP HTTP request URL', false)
+  }
+  if (
+    (currentUrl.protocol !== 'http:' && currentUrl.protocol !== 'https:') ||
+    currentUrl.origin !== baseUrl.origin ||
+    currentUrl.username !== '' ||
+    currentUrl.password !== ''
+  ) {
+    throw new McpCallError(
+      'connect_failed',
+      redact(`Cross-origin MCP HTTP target rejected (${currentUrl.origin} !== ${baseUrl.origin})`),
+      false,
+    )
+  }
+
+  let method = (init.method ?? 'GET').toUpperCase()
+  let body = init.body
+  const headers: Record<string, string> = { ...(init.headers as Record<string, string> | undefined) }
+
+  for (let hop = 0; ; hop++) {
+    const res = await fetchImpl(currentUrl.href, {
+      ...init,
+      method,
+      headers,
+      ...(body !== undefined ? { body } : {}),
+      redirect: 'manual',
+    })
+
+    if (!REDIRECT_STATUSES.has(res.status)) {
+      return { res, finalUrl: currentUrl }
+    }
+
+    await res.body?.cancel().catch(() => {})
+
+    if (hop >= MAX_REDIRECT_HOPS) {
+      throw new McpCallError(
+        'connect_failed',
+        redact(`MCP HTTP redirect limit exceeded (max ${MAX_REDIRECT_HOPS} hops)`),
+        false,
+      )
+    }
+
+    const location = res.headers.get('location')?.trim() ?? ''
+    if (!location) {
+      throw new McpCallError(
+        'connect_failed',
+        redact(`MCP HTTP ${res.status} redirect missing Location header`),
+        false,
+      )
+    }
+
+    let nextUrl: URL
+    try {
+      nextUrl = new URL(location, currentUrl)
+    } catch {
+      throw new McpCallError('connect_failed', redact('Invalid redirect Location URL in MCP HTTP response'), false)
+    }
+
+    if (
+      (nextUrl.protocol !== 'http:' && nextUrl.protocol !== 'https:') ||
+      nextUrl.origin !== baseUrl.origin ||
+      nextUrl.username !== '' ||
+      nextUrl.password !== ''
+    ) {
+      throw new McpCallError(
+        'connect_failed',
+        redact(`Cross-origin MCP HTTP redirect rejected (${nextUrl.origin} !== ${baseUrl.origin})`),
+        false,
+      )
+    }
+
+    if (
+      (res.status === 303 && method !== 'GET' && method !== 'HEAD') ||
+      ((res.status === 301 || res.status === 302) && method === 'POST')
+    ) {
+      method = 'GET'
+      body = undefined
+      for (const key of Object.keys(headers)) {
+        if (BODY_HEADER_NAMES.has(key.toLowerCase())) {
+          delete headers[key]
+        }
+      }
+    }
+
+    currentUrl = nextUrl
+  }
+}
+
+async function fetchSameOrigin(
+  fetchImpl: typeof fetch,
+  baseUrl: URL,
+  initialUrl: string,
+  init: RequestInit,
+  redact: (text: string) => string,
+): Promise<Response> {
+  const { res } = await fetchSameOriginWithUrl(fetchImpl, baseUrl, initialUrl, init, redact)
+  return res
+}
+
 async function readBoundedText(body: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<string> {
   if (!body) return ''
   const reader = body.getReader()
@@ -216,6 +336,7 @@ async function consumeSseStream(
     } else if (field === 'data') {
       eventBytes += Buffer.byteLength(val, 'utf8') + 1
       if (eventBytes > opts.maxEventBytes) {
+        await reader.cancel().catch(() => {})
         throw new Error(`MCP SSE event exceeded ${opts.maxEventBytes} byte limit`)
       }
       dataLines.push(val)
@@ -353,13 +474,19 @@ async function connectLegacySse(params: {
 
   const sendBestEffortReply = (payload: Record<string, unknown>): void => {
     if (!endpointUrl || closed) return
-    const abort = createRequestAbort(5_000)
-    void fetchImpl(endpointUrl.href, {
-      method: 'POST',
-      headers: { ...customHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: abort.signal,
-    })
+    const abort = createRequestAbort(5_000, undefined, sseAbort.signal)
+    void fetchSameOrigin(
+      fetchImpl,
+      baseUrl,
+      endpointUrl.href,
+      {
+        method: 'POST',
+        headers: { ...customHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: abort.signal,
+      },
+      redact,
+    )
       .catch(() => {})
       .finally(() => abort.cleanup())
   }
@@ -419,16 +546,26 @@ async function connectLegacySse(params: {
 
   try {
     let getRes: Response
+    let sseStreamUrl = baseUrl
     try {
-      getRes = await fetchImpl(baseUrl.href, {
-        method: 'GET',
-        headers: {
-          ...customHeaders,
-          Accept: 'text/event-stream',
+      const getOutcome = await fetchSameOriginWithUrl(
+        fetchImpl,
+        baseUrl,
+        baseUrl.href,
+        {
+          method: 'GET',
+          headers: {
+            ...customHeaders,
+            Accept: 'text/event-stream',
+          },
+          signal: sseAbort.signal,
         },
-        signal: sseAbort.signal,
-      })
+        redact,
+      )
+      getRes = getOutcome.res
+      sseStreamUrl = getOutcome.finalUrl
     } catch (err) {
+      if (err instanceof McpCallError) throw err
       const msg = err instanceof Error ? err.message : String(err)
       throw new McpCallError(
         handshakeTimedOut || isAbortLikeError(err) ? 'timeout' : 'connect_failed',
@@ -454,7 +591,7 @@ async function connectLegacySse(params: {
         if (ev.event === 'endpoint') {
           let candidate: URL
           try {
-            candidate = new URL(ev.data.trim(), baseUrl)
+            candidate = new URL(ev.data.trim(), sseStreamUrl)
           } catch {
             healthy = false
             rejectEndpoint(new McpCallError('protocol_error', 'Invalid endpoint URL in MCP SSE event', false))
@@ -508,12 +645,14 @@ async function connectLegacySse(params: {
       .then(() => {
         healthy = false
         if (!closed) {
+          sseAbort.abort()
           rejectEndpoint(new McpCallError('connect_failed', 'MCP SSE stream closed before endpoint event', false))
           rejectAllPending('MCP SSE stream closed unexpectedly')
         }
       })
       .catch((err) => {
         healthy = false
+        sseAbort.abort()
         if (!closed) {
           const msg = err instanceof Error ? err.message : String(err)
           rejectEndpoint(
@@ -543,8 +682,12 @@ async function connectLegacySse(params: {
 
       const id = ++nextId
       return new Promise<unknown>((resolve, reject) => {
-        const reqAbort = createRequestAbort(reqOpts.timeoutMs, reqOpts.signal)
+        const reqAbort = createRequestAbort(reqOpts.timeoutMs, reqOpts.signal, sseAbort.signal)
         const onSignalAbort = (): void => {
+          if (!reqAbort.timedOut() && !reqOpts.signal?.aborted && !handshakeTimedOut) {
+            // Aborted via sseAbort (session close or SSE stream error); rejectAllPending provides the exact reason.
+            return
+          }
           const cur = pending.get(id)
           if (!cur) return
           pending.delete(id)
@@ -583,20 +726,30 @@ async function connectLegacySse(params: {
           let postRes: Response
           try {
             entry.dispatched = true
-            postRes = await fetchImpl(resolvedEndpoint.href, {
-              method: 'POST',
-              headers: {
-                ...customHeaders,
-                'Content-Type': 'application/json',
+            postRes = await fetchSameOrigin(
+              fetchImpl,
+              baseUrl,
+              resolvedEndpoint.href,
+              {
+                method: 'POST',
+                headers: {
+                  ...customHeaders,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ jsonrpc: '2.0', id, method, params: reqParams }),
+                signal: reqAbort.signal,
               },
-              body: JSON.stringify({ jsonrpc: '2.0', id, method, params: reqParams }),
-              signal: reqAbort.signal,
-            })
+              redact,
+            )
           } catch (err) {
             const cur = pending.get(id)
             if (!cur) return
             pending.delete(id)
             cur.cleanup()
+            if (err instanceof McpCallError) {
+              cur.reject(err)
+              return
+            }
             const msg = err instanceof Error ? err.message : String(err)
             if (cur.write) {
               cur.reject(
@@ -674,18 +827,45 @@ async function connectLegacySse(params: {
       throw new McpCallError('protocol_error', 'Invalid MCP initialize response from legacy SSE server', false)
     }
 
-    const notifAbort = createRequestAbort(Math.max(1_000, handshakeDeadline - Date.now()))
+    const notifAbort = createRequestAbort(
+      Math.max(1_000, handshakeDeadline - Date.now()),
+      undefined,
+      sseAbort.signal,
+    )
     try {
-      const notifRes = await fetchImpl(resolvedEndpoint.href, {
-        method: 'POST',
-        headers: {
-          ...customHeaders,
-          'Content-Type': 'application/json',
+      const notifRes = await fetchSameOrigin(
+        fetchImpl,
+        baseUrl,
+        resolvedEndpoint.href,
+        {
+          method: 'POST',
+          headers: {
+            ...customHeaders,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+          signal: notifAbort.signal,
         },
-        body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
-        signal: notifAbort.signal,
-      })
+        redact,
+      )
+      if (!notifRes.ok) {
+        const snippet = await readBoundedText(notifRes.body, MAX_ERROR_SNIPPET_BYTES).catch(() => '')
+        const suffix = snippet.trim() ? `: ${snippet.trim()}` : ''
+        throw new McpCallError(
+          'connect_failed',
+          redact(`MCP legacy SSE notifications/initialized failed with HTTP ${notifRes.status}${suffix}`),
+          false,
+        )
+      }
       await readBoundedText(notifRes.body, MAX_ERROR_SNIPPET_BYTES).catch(() => '')
+    } catch (err) {
+      if (err instanceof McpCallError) throw err
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new McpCallError(
+        handshakeTimedOut || notifAbort.timedOut() || isAbortLikeError(err) ? 'timeout' : 'connect_failed',
+        redact(`MCP legacy SSE notifications/initialized failed: ${msg}`),
+        false,
+      )
     } finally {
       notifAbort.cleanup()
     }
@@ -752,13 +932,19 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
 
   const sendBestEffortPostReply = (payload: Record<string, unknown>): void => {
     if (closed) return
-    const abort = createRequestAbort(5_000)
-    void fetchImpl(baseUrl.href, {
-      method: 'POST',
-      headers: buildPostHeaders(),
-      body: JSON.stringify(payload),
-      signal: abort.signal,
-    })
+    const abort = createRequestAbort(5_000, undefined, sessionAbort.signal)
+    void fetchSameOrigin(
+      fetchImpl,
+      baseUrl,
+      baseUrl.href,
+      {
+        method: 'POST',
+        headers: buildPostHeaders(),
+        body: JSON.stringify(payload),
+        signal: abort.signal,
+      },
+      redact,
+    )
       .catch(() => {})
       .finally(() => abort.cleanup())
   }
@@ -944,12 +1130,18 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
   const sendInitializedNotification = async (signal?: AbortSignal): Promise<void> => {
     const reqAbort = createRequestAbort(handshakeTimeoutMs, signal, sessionAbort.signal)
     try {
-      const notifRes = await fetchImpl(baseUrl.href, {
-        method: 'POST',
-        headers: buildPostHeaders(),
-        body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
-        signal: reqAbort.signal,
-      })
+      const notifRes = await fetchSameOrigin(
+        fetchImpl,
+        baseUrl,
+        baseUrl.href,
+        {
+          method: 'POST',
+          headers: buildPostHeaders(),
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+          signal: reqAbort.signal,
+        },
+        redact,
+      )
       const returnedSid = notifRes.headers.get('mcp-session-id')?.trim()
       if (returnedSid) {
         sessionId = returnedSid
@@ -982,23 +1174,30 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
     const reqAbort = createRequestAbort(handshakeTimeoutMs, undefined, sessionAbort.signal)
     let res: Response
     try {
-      res = await fetchImpl(baseUrl.href, {
-        method: 'POST',
-        headers: buildPostHeaders(),
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: initId,
-          method: 'initialize',
-          params: {
-            protocolVersion: MCP_PROTOCOL_VERSION,
-            capabilities: {},
-            clientInfo: MCP_CLIENT_INFO,
-          },
-        }),
-        signal: reqAbort.signal,
-      })
+      res = await fetchSameOrigin(
+        fetchImpl,
+        baseUrl,
+        baseUrl.href,
+        {
+          method: 'POST',
+          headers: buildPostHeaders(),
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: initId,
+            method: 'initialize',
+            params: {
+              protocolVersion: MCP_PROTOCOL_VERSION,
+              capabilities: {},
+              clientInfo: MCP_CLIENT_INFO,
+            },
+          }),
+          signal: reqAbort.signal,
+        },
+        redact,
+      )
     } catch (err) {
       reqAbort.cleanup()
+      if (err instanceof McpCallError) throw err
       const msg = err instanceof Error ? err.message : String(err)
       throw new McpCallError(
         reqAbort.timedOut() || isAbortLikeError(err) ? 'timeout' : 'connect_failed',
@@ -1098,14 +1297,21 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
 
     let res: Response
     try {
-      res = await fetchImpl(baseUrl.href, {
-        method: 'POST',
-        headers: buildPostHeaders(),
-        body: JSON.stringify({ jsonrpc: '2.0', id, method, params: reqParams }),
-        signal: reqAbort.signal,
-      })
+      res = await fetchSameOrigin(
+        fetchImpl,
+        baseUrl,
+        baseUrl.href,
+        {
+          method: 'POST',
+          headers: buildPostHeaders(),
+          body: JSON.stringify({ jsonrpc: '2.0', id, method, params: reqParams }),
+          signal: reqAbort.signal,
+        },
+        redact,
+      )
     } catch (err) {
       reqAbort.cleanup()
+      if (err instanceof McpCallError) throw err
       const msg = err instanceof Error ? err.message : String(err)
       if (reqOpts.write) {
         throw new McpCallError(
@@ -1113,6 +1319,9 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
           redact(`MCP HTTP write request failed after dispatch: ${msg}`),
           true,
         )
+      }
+      if (closed) {
+        throw new McpCallError('connect_failed', 'MCP HTTP session closed', false)
       }
       if (reqAbort.timedOut() || isAbortLikeError(err)) {
         throw new McpCallError('timeout', `MCP HTTP request timed out (${method})`, false)
@@ -1178,14 +1387,20 @@ export async function createHttpSession(opts: HttpSessionOptions): Promise<McpSe
     if (sid) {
       const delAbort = createRequestAbort(DELETE_TIMEOUT_MS)
       try {
-        const delRes = await fetchImpl(baseUrl.href, {
-          method: 'DELETE',
-          headers: {
-            ...customHeaders,
-            'Mcp-Session-Id': sid,
+        const delRes = await fetchSameOrigin(
+          fetchImpl,
+          baseUrl,
+          baseUrl.href,
+          {
+            method: 'DELETE',
+            headers: {
+              ...customHeaders,
+              'Mcp-Session-Id': sid,
+            },
+            signal: delAbort.signal,
           },
-          signal: delAbort.signal,
-        })
+          redact,
+        )
         await readBoundedText(delRes.body, MAX_ERROR_SNIPPET_BYTES).catch(() => '')
       } catch {
         // Best-effort DELETE on disconnect

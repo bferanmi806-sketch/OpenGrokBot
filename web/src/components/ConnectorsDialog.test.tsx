@@ -545,7 +545,7 @@ describe('ConnectorsDialog', () => {
       botGrants: { 'inbox-keeper': [], researcher: ['mcp-fs'] },
     })
     expect(screen.getByText('Imported 1 MCP server(s).')).toBeInTheDocument()
-    expect(screen.getByText('Skipped 1 invalid entry(s):')).toBeInTheDocument()
+    expect(screen.getByText('Skipped 1 invalid entries:')).toBeInTheDocument()
     expect(screen.getByText(/broken: MCP server entry must specify/)).toBeInTheDocument()
 
     rerender(
@@ -560,11 +560,20 @@ describe('ConnectorsDialog', () => {
       />,
     )
 
-    // Edit stdio server while keeping saved secret untouched
+    // Edit stdio server while keeping saved secret untouched (and verify renaming key without value disables Save)
     const card = screen.getByText('Filesystem').closest('.mcp-card') as HTMLElement
     expect(within(card).getByText('stdio')).toBeInTheDocument()
     await userEvent.click(within(card).getByRole('button', { name: 'Edit' }))
     expect(screen.getByPlaceholderText('Saved (tok…9999) — leave blank to keep')).toBeInTheDocument()
+    const envKeyInput = screen.getByLabelText('Key') as HTMLInputElement
+    const saveBtn = screen.getByRole('button', { name: 'Save' })
+    expect(saveBtn).not.toBeDisabled()
+    await userEvent.clear(envKeyInput)
+    await userEvent.type(envKeyInput, 'RENAMED_TOKEN')
+    expect(saveBtn).toBeDisabled()
+    await userEvent.clear(envKeyInput)
+    await userEvent.type(envKeyInput, 'API_TOKEN')
+    expect(saveBtn).not.toBeDisabled()
     const cwdInput = screen.getByLabelText('Working folder')
     await userEvent.clear(cwdInput)
     await userEvent.type(cwdInput, '/var/tmp')
@@ -610,7 +619,9 @@ describe('ConnectorsDialog', () => {
     const pausedCard = screen.getByText('Filesystem').closest('.mcp-card') as HTMLElement
     expect(within(pausedCard).getByText('Paused')).toBeInTheDocument()
 
-    // Delete server via ConfirmDialog
+    // Open Edit form, then delete server via ConfirmDialog -> Edit form closes too
+    await userEvent.click(within(pausedCard).getByRole('button', { name: 'Edit' }))
+    expect(screen.getByText('Edit Filesystem')).toBeInTheDocument()
     await userEvent.click(within(pausedCard).getByRole('button', { name: 'Delete' }))
     const confirm = screen.getByRole('alertdialog')
     expect(confirm).toHaveTextContent('Delete Filesystem?')
@@ -620,6 +631,7 @@ describe('ConnectorsDialog', () => {
       path: '/api/mcp/servers/mcp-fs',
       body: undefined,
     }))
+    expect(screen.queryByText('Edit Filesystem')).toBeNull()
     expect(onMcpChange).toHaveBeenLastCalledWith({
       servers: [],
       botGrants: { 'inbox-keeper': [], researcher: [] },
@@ -695,8 +707,11 @@ describe('ConnectorsDialog', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /Authorization: Bearer/ }))
     const valueInput = screen.getByPlaceholderText('Value') as HTMLInputElement
+    const saveBtn = screen.getByRole('button', { name: 'Save' })
     await userEvent.clear(valueInput)
+    expect(saveBtn).toBeDisabled()
     await userEvent.type(valueInput, 'Bearer ghp_secret_abcd')
+    expect(saveBtn).not.toBeDisabled()
 
     await userEvent.click(screen.getByRole('checkbox', { name: /Trust server readOnlyHint/ }))
     await userEvent.click(screen.getByRole('checkbox', { name: 'Sorter' }))

@@ -241,7 +241,7 @@ export const zhCN: Record<MessageKey, string> = {
 
   'sidebar.models': 'AI 模型',
   'sidebar.connectors': '连接器',
-  'sidebar.connectorsAttention': '连接器（有账号需处理）',
+  'sidebar.connectorsAttention': '连接器（有异常需处理）',
 
   'connectors.title': '连接器',
   'connectors.close': '关闭',

@@ -114,12 +114,38 @@ export function normalizeMcpInputSchema(raw: unknown): Record<string, unknown> {
   const properties = isRecord(s.properties) ? { ...s.properties } : {}
   const required = Array.isArray(s.required)
     ? s.required.filter((item): item is string => typeof item === 'string')
-    : undefined
-  return {
+    : []
+  const out: Record<string, unknown> = {
     type: 'object',
     properties,
-    ...(required !== undefined ? { required } : {}),
   }
+  if (required.length > 0) {
+    out.required = required
+  }
+  if (isRecord(s.$defs)) {
+    out.$defs = { ...s.$defs }
+  }
+  if (isRecord(s.definitions)) {
+    out.definitions = { ...s.definitions }
+  }
+  if (typeof s.additionalProperties === 'boolean') {
+    out.additionalProperties = s.additionalProperties
+  } else if (isRecord(s.additionalProperties)) {
+    out.additionalProperties = { ...s.additionalProperties }
+  }
+  if (typeof s.description === 'string') {
+    out.description = s.description
+  }
+  if (Array.isArray(s.anyOf)) {
+    out.anyOf = [...s.anyOf]
+  }
+  if (Array.isArray(s.oneOf)) {
+    out.oneOf = [...s.oneOf]
+  }
+  if (Array.isArray(s.allOf)) {
+    out.allOf = [...s.allOf]
+  }
+  return out
 }
 
 export function normalizeMcpDiscoveredTool(raw: unknown): McpDiscoveredTool | null {
@@ -617,8 +643,6 @@ export async function createStdioSession(opts: StdioSessionOptions): Promise<Mcp
       } catch {
         // ignore
       }
-
-      await Promise.resolve()
 
       // Guard child.pid > 0 strictly: when spawn() fails with ENOENT, child.pid is undefined
       // while Node's internal uv_process_t handle has pid = 0 until onErrorNT runs, so calling

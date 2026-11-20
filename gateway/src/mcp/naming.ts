@@ -30,12 +30,14 @@ export function computeExposedToolNames(
       const digest = createHash('sha256').update(tool.name).digest('hex')
       const hash = digest.slice(0, 4)
       const maxToolLen = Math.max(1, 64 - prefix.length - 5)
-      assigned = `${prefix}${rawSlug.slice(0, maxToolLen)}_${hash}`
+      const stem = (rawSlug.slice(0, maxToolLen).replace(/_+$/, '') || 'tool').slice(0, maxToolLen)
+      assigned = `${prefix}${stem}_${hash}`
       if (used.has(assigned)) {
         for (let n = 2; ; n++) {
           const suffix = `_${hash}${n}`
           const altLen = Math.max(1, 64 - prefix.length - suffix.length)
-          const alt = `${prefix}${rawSlug.slice(0, altLen)}${suffix}`
+          const altStem = (rawSlug.slice(0, altLen).replace(/_+$/, '') || 'tool').slice(0, altLen)
+          const alt = `${prefix}${altStem}${suffix}`
           if (!used.has(alt)) {
             assigned = alt
             break

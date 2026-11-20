@@ -139,8 +139,8 @@ export type GatewayApp = {
   isBusy(botId: string): boolean
   /** 收拾上传目录：没挂到消息上的过期上传、对不上账的文件。启动时和之后每小时跑一次 */
   sweepUploads(): Promise<{ orphans: number; strays: number; missing: number }>
-  /** 网关收摊时停掉全部正在跑和排队的回合 */
-  stopAll(): void
+  /** 网关收摊时停掉全部正在跑和排队的回合，并关闭活跃的 MCP 会话 */
+  stopAll(): Promise<void>
 }
 
 type QuestionPayload = { question: string; options: string[]; multi: boolean; status: string; answer?: string[]; watch?: boolean }
@@ -632,7 +632,7 @@ export function createApp(deps: AppDeps): GatewayApp {
             events: turnEvents,
             now: now().getTime(),
           }),
-        onMcpTool: ({ name, args, events: turnEvents }) =>
+        onMcpTool: ({ name, args, events: turnEvents, signal: toolSignal }) =>
           runMcpToolCall({
             db,
             manager: mcpManager,
@@ -642,6 +642,7 @@ export function createApp(deps: AppDeps): GatewayApp {
             name,
             args,
             watch: opts.watch,
+            signal: toolSignal ?? signal,
             events: turnEvents,
             now: now().getTime(),
           }),
@@ -2033,7 +2034,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       for (const active of workflowRuns.values()) releaseWorkflowRun(active, true)
       waiting.clear()
       mcpApi.stop()
-      void mcpManager.closeAll()
+      return mcpManager.closeAll().catch(() => {})
     },
   }
 }

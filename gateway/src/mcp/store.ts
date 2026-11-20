@@ -12,6 +12,7 @@ export function normalizeMcpSlug(raw: string): string {
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 20)
+    .replace(/_+$/, '')
   return cleaned || 'server'
 }
 
@@ -22,7 +23,8 @@ function uniqueMcpSlug(db: Db, raw: string): string {
   for (let n = 2; ; n++) {
     const suffix = `_${n}`
     const headLen = Math.min(17, Math.max(1, 20 - suffix.length))
-    const candidate = `${base.slice(0, headLen)}${suffix}`
+    const prefix = (base.slice(0, headLen).replace(/_+$/, '') || 'server').slice(0, headLen)
+    const candidate = `${prefix}${suffix}`
     if (!exists.get(candidate)) return candidate
   }
 }

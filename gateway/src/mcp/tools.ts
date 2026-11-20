@@ -169,10 +169,11 @@ export async function runMcpToolCall(input: {
   name: string
   args: Record<string, unknown>
   watch?: boolean
+  signal?: AbortSignal
   events: AgentEvents
   now: number
 }): Promise<{ text: string; ok: boolean; tainted?: boolean }> {
-  const { db, manager, botId, threadId, name, watch, events, now } = input
+  const { db, manager, botId, threadId, name, watch, signal, events, now } = input
   const cleanArgs = isRecord(input.args) ? input.args : {}
 
   const enabledServers = listEnabledBotMcpServers(db, botId)
@@ -197,7 +198,10 @@ export async function runMcpToolCall(input: {
 
   if (mode === 'read') {
     try {
-      const res = await manager.callTool(server.id, tool.name, cleanArgs, { write: false })
+      const res = await manager.callTool(server.id, tool.name, cleanArgs, {
+        write: false,
+        ...(signal ? { signal } : {}),
+      })
       const text = formatMcpCallResult(res)
       return {
         text: res.isError ? `MCP tool error (${server.name} · ${tool.name}): ${text}` : text,

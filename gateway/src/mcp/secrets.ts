@@ -13,12 +13,19 @@ type StoredSecretsFile = {
 
 const secretsFile = (dataDir: string) => join(dataDir, 'mcp-secrets.json')
 
+const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+const isSafeObjectKey = (key: string): boolean => key.length > 0 && !FORBIDDEN_OBJECT_KEYS.has(key)
+
 function sanitizeStringMap(raw: unknown): Record<string, string> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
   const out: Record<string, string> = {}
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Object.hasOwn(raw, k)) continue
     const key = k.trim()
-    if (key && typeof v === 'string' && v.length > 0) out[key] = v
+    if (isSafeObjectKey(key) && typeof v === 'string' && v.length > 0) {
+      out[key] = v
+    }
   }
   return out
 }
@@ -34,11 +41,17 @@ function applyPatchMap(
   base: Record<string, string>,
   patch?: Record<string, string | null>,
 ): Record<string, string> {
-  const next = { ...base }
+  const next: Record<string, string> = {}
+  for (const [k, v] of Object.entries(base)) {
+    if (Object.hasOwn(base, k) && isSafeObjectKey(k)) {
+      next[k] = v
+    }
+  }
   if (!patch) return next
   for (const [k, v] of Object.entries(patch)) {
+    if (!Object.hasOwn(patch, k)) continue
     const key = k.trim()
-    if (!key) continue
+    if (!isSafeObjectKey(key)) continue
     if (v === null || v === '') {
       delete next[key]
     } else if (typeof v === 'string') {
@@ -59,14 +72,24 @@ export function createMcpSecretVault(
     if (!existsSync(path)) return {}
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<StoredSecretsFile> | null
-      if (!parsed || typeof parsed !== 'object' || !parsed.servers || typeof parsed.servers !== 'object') {
+      if (
+        !parsed ||
+        typeof parsed !== 'object' ||
+        !Object.hasOwn(parsed, 'servers') ||
+        !parsed.servers ||
+        typeof parsed.servers !== 'object' ||
+        Array.isArray(parsed.servers)
+      ) {
         return {}
       }
       const out: Record<string, McpServerSecrets> = {}
       for (const [serverId, entry] of Object.entries(parsed.servers)) {
-        if (!entry || typeof entry !== 'object') continue
-        const env = sanitizeStringMap((entry as Partial<McpServerSecrets>).env)
-        const headers = sanitizeStringMap((entry as Partial<McpServerSecrets>).headers)
+        if (!Object.hasOwn(parsed.servers, serverId) || !isSafeObjectKey(serverId)) continue
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+        const env = Object.hasOwn(entry, 'env') ? sanitizeStringMap((entry as Partial<McpServerSecrets>).env) : {}
+        const headers = Object.hasOwn(entry, 'headers')
+          ? sanitizeStringMap((entry as Partial<McpServerSecrets>).headers)
+          : {}
         if (Object.keys(env).length > 0 || Object.keys(headers).length > 0) {
           out[serverId] = { env, headers }
         }
@@ -95,12 +118,14 @@ export function createMcpSecretVault(
   }
 
   const get = (serverId: string): McpServerSecrets => {
+    if (!isSafeObjectKey(serverId)) return cloneSecrets()
     if (!dataDir) return cloneSecrets(memory.get(serverId))
     const servers = readDisk()
-    return cloneSecrets(servers[serverId])
+    return cloneSecrets(Object.hasOwn(servers, serverId) ? servers[serverId] : undefined)
   }
 
   const patch: McpSecretVault['patch'] = (serverId, update) => {
+    if (!isSafeObjectKey(serverId)) return cloneSecrets()
     if (!dataDir) {
       const cur = cloneSecrets(memory.get(serverId))
       const next: McpServerSecrets = {
@@ -116,7 +141,7 @@ export function createMcpSecretVault(
     }
 
     const servers = readDisk()
-    const cur = cloneSecrets(servers[serverId])
+    const cur = cloneSecrets(Object.hasOwn(servers, serverId) ? servers[serverId] : undefined)
     const next: McpServerSecrets = {
       env: applyPatchMap(cur.env, update.env),
       headers: applyPatchMap(cur.headers, update.headers),
@@ -131,6 +156,7 @@ export function createMcpSecretVault(
   }
 
   const remove = (serverId: string): void => {
+    if (!isSafeObjectKey(serverId)) return
     if (!dataDir) {
       memory.delete(serverId)
       return
@@ -138,7 +164,9 @@ export function createMcpSecretVault(
     const path = secretsFile(dataDir)
     if (!existsSync(path)) return
     const servers = readDisk()
-    delete servers[serverId]
+    if (Object.hasOwn(servers, serverId)) {
+      delete servers[serverId]
+    }
     writeDisk(servers)
   }
 

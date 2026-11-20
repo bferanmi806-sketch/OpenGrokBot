@@ -127,6 +127,7 @@ export type AgentDeps = {
     name: string
     args: Record<string, unknown>
     events: AgentEvents
+    signal?: AbortSignal
   }) => Promise<{ text: string; ok: boolean; tainted?: boolean }>
 }
 
@@ -474,7 +475,7 @@ async function execToolCall(
       return { text: 'MCP servers are not available on this gateway.' }
     }
     try {
-      const res = await deps.onMcpTool({ name: call.name, args, events })
+      const res = await deps.onMcpTool({ name: call.name, args, events, signal: deps.signal })
       if (deps.mcpReadToolNames?.has(call.name) || res.tainted) onOutsideDataRead?.()
       log(res.ok)
       return { text: res.text }
