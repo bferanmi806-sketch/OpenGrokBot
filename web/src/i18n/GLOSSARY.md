@@ -25,7 +25,9 @@
 | thread | 对话 | 不说「线程」「会话」 |
 | AI models | AI 模型 | 设置里管服务商和 key 的那一块 |
 | (model) connection | 连接 | 一家服务商 + 一个 key + 默认模型；没选过的同事用「默认连接」 |
-| connector | 连接器 | Gmail、Outlook、Notion、Slack 这些外部应用的连接 |
+| connector | 连接器 | Gmail、Outlook、Notion、Slack 这些外部应用的连接；总弹窗分「应用」和「MCP 服务」两栏 |
+| MCP server | MCP 服务 | 通过 MCP 协议接入的工具服务（本机命令 stdio 或远程 HTTP）；不说「MCP 服务器」 |
+| transport (MCP) | 连接方式 | 本机命令（stdio）或远程 HTTP；协议与配置名 `MCP`、`stdio`、`HTTP`、`JSON`、`readOnlyHint`、`0600` 原样不翻 |
 | service / provider | 服务商 | DeepSeek、Claude 这些；不说「供应商」「提供方」 |
 | API key | API key | 不翻 |
 | subscription plan key | 订阅套餐的 key | 编程套餐之类；和按量付费的 API key 分开说 |
@@ -40,6 +42,7 @@
 | 英文 | 中文 | 说明 |
 |---|---|---|
 | approval | 审批 | 「等你审批」 |
+| read-only / needs approval | 只读 / 需审批 | MCP 工具的调用权限（只读直接跑，需审批先问你） |
 | approve / discard | 批准 / 驳回 | discard 不说「丢弃」 |
 | always allow | 一直放行 | 点了就存一条放行规矩 |
 | revoke | 撤销 | |

@@ -1,10 +1,18 @@
 import { fileToBase64 } from './attachments'
 import type {
   AboutInfo, AppKey, AttachmentPayload, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
-  Conversation, FieldError, GatewayEvent, Message, ProviderPreset, RoutineAction, RuleDuration, SettingsView, SetupInfo,
+  Conversation, CreateMcpServerInput, FieldError, GatewayEvent, ImportMcpServersInput, ImportMcpServersResult, McpServersSnapshot,
+  McpServerView, Message, ProviderPreset, RoutineAction, RuleDuration, ServerEvent, SettingsView, SetupInfo, UpdateMcpServerPatch,
 } from './types'
 
-export type { GatewayEvent } from './types'
+export type {
+  CreateMcpServerInput,
+  GatewayEvent,
+  ImportMcpServersInput,
+  ImportMcpServersResult,
+  ServerEvent,
+  UpdateMcpServerPatch,
+} from './types'
 
 /** 网关说「先登录」：界面换成锁屏说明，而不是一片空白。 */
 export class SignedOut extends Error {
@@ -234,6 +242,46 @@ export async function setBotConnectors(
 ): Promise<{ botId: string; connectorIds: string[] }> {
   const res = await send('PUT', `/api/bots/${encodeURIComponent(botId)}/connectors`, { connectorIds }, { strict: true })
   return res.json() as Promise<{ botId: string; connectorIds: string[] }>
+}
+
+/** MCP 服务与授权快照；老网关没有这个路由就是 null（界面不显示这一块） */
+export async function fetchMcpServers(): Promise<McpServersSnapshot | null> {
+  const res = await request('/api/mcp/servers')
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`GET /api/mcp/servers ${res.status}`)
+  return res.json() as Promise<McpServersSnapshot>
+}
+
+export async function createMcpServer(input: CreateMcpServerInput): Promise<{ server: McpServerView }> {
+  const res = await send('POST', '/api/mcp/servers', input, { strict: true })
+  return res.json() as Promise<{ server: McpServerView }>
+}
+
+export async function importMcpServers(input: ImportMcpServersInput): Promise<ImportMcpServersResult> {
+  const res = await send('POST', '/api/mcp/servers/import', input, { strict: true })
+  return res.json() as Promise<ImportMcpServersResult>
+}
+
+export async function updateMcpServer(id: string, patch: UpdateMcpServerPatch): Promise<{ server: McpServerView }> {
+  const res = await send('PATCH', `/api/mcp/servers/${encodeURIComponent(id)}`, patch, { strict: true })
+  return res.json() as Promise<{ server: McpServerView }>
+}
+
+export async function testMcpServer(id: string): Promise<{ server: McpServerView }> {
+  const res = await send('POST', `/api/mcp/servers/${encodeURIComponent(id)}/test`, undefined, { strict: true })
+  return res.json() as Promise<{ server: McpServerView }>
+}
+
+export async function deleteMcpServer(id: string): Promise<void> {
+  await send('DELETE', `/api/mcp/servers/${encodeURIComponent(id)}`, undefined, { strict: true })
+}
+
+export async function setMcpServerBots(id: string, botIds: string[]): Promise<void> {
+  await send('PUT', `/api/mcp/servers/${encodeURIComponent(id)}/bots`, { botIds }, { strict: true })
+}
+
+export async function setBotMcpServers(botId: string, serverIds: string[]): Promise<void> {
+  await send('PUT', `/api/bots/${encodeURIComponent(botId)}/mcp`, { serverIds }, { strict: true })
 }
 
 /** 首次启动要不要出向导；老网关没有这个路由（或出了错）就当不用，绝不因此挡住界面 */
