@@ -286,6 +286,39 @@ const MIGRATIONS: Migration[] = [
     if (!have.has('execution_detail')) db.exec('ALTER TABLE approvals ADD COLUMN execution_detail TEXT')
     if (!have.has('operation_id')) db.exec('ALTER TABLE approvals ADD COLUMN operation_id TEXT')
   },
+  // v13：标准 MCP 客户端服务表（stdio / Streamable HTTP）与按同事显式授权表（密钥单独存 <data>/mcp-secrets.json）
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_servers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL UNIQUE,
+        transport TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        command TEXT NOT NULL DEFAULT '',
+        args_json TEXT NOT NULL DEFAULT '[]',
+        cwd TEXT NOT NULL DEFAULT '',
+        url TEXT NOT NULL DEFAULT '',
+        env_keys_json TEXT NOT NULL DEFAULT '[]',
+        header_keys_json TEXT NOT NULL DEFAULT '[]',
+        trust_read_only_hint INTEGER NOT NULL DEFAULT 0,
+        tools_json TEXT NOT NULL DEFAULT '[]',
+        tool_policies_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'disconnected',
+        last_error TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled);
+      CREATE TABLE IF NOT EXISTS bot_mcp_servers (
+        bot_id TEXT NOT NULL,
+        server_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (bot_id, server_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_bot_mcp_servers_server ON bot_mcp_servers(server_id);
+    `)
+  },
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

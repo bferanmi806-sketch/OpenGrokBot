@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiError, SignedOut, answerQuestion, checkSession, connectEvents, createBot, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
-  fetchLanguage, fetchMessages, fetchProviders, fetchSetup, forgetMemoryRule, removeUpload, resolveApproval, revokeRule, sendMessage, setBotConnectors, setComputerShell, setComputerWindow,
-  stopThread, updateRoutine, uploadFile,
+  fetchLanguage, fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, forgetMemoryRule, removeUpload, resolveApproval, revokeRule, sendMessage, setBotConnectors, setBotMcpServers,
+  setComputerShell, setComputerWindow, stopThread, updateRoutine, uploadFile,
 } from './api'
 import { BotModelChip, BotModelPicker, botModel, botSeesImages } from './components/BotModelPicker'
 import { ConfirmDialog, useEscape } from './components/ConfirmDialog'
@@ -20,7 +20,16 @@ import { desktopApi } from './desktop'
 import { I18nProvider, browserLanguages, pickLang, useT, type Lang } from './i18n'
 import { errorText } from './i18n/describe'
 import { applyHello, applyStatus, clearDone } from './presence'
-import type { BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, Message, ProviderPreset, RoutineAction, SetupInfo } from './types'
+import type {
+  BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, McpServersSnapshot, Message, ProviderPreset, RoutineAction, SetupInfo,
+} from './types'
+
+const EMPTY_CONNECTORS: ConnectorsSnapshot = {
+  key: { set: false, masked: '', source: 'none', locked: false },
+  catalog: [],
+  accounts: [],
+  botGrants: {},
+}
 
 /** 网关锁着：告诉人去哪拿登录链接，而不是一片空白。 */
 function SignIn() {
@@ -85,6 +94,8 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
   const [providers, setProviders] = useState<ProviderPreset[]>([])
   /** 外部应用连接器快照；老网关没有这块就一直是 null */
   const [connectors, setConnectors] = useState<ConnectorsSnapshot | null>(null)
+  /** MCP 服务快照；老网关没有这块就一直是 null */
+  const [mcpServers, setMcpServers] = useState<McpServersSnapshot | null>(null)
   /** 开着的是哪个窗口：「AI 模型」总表、「连接器」总表，或给某位同事选模型 */
   const [modelsOpen, setModelsOpen] = useState(false)
   const [connectorsOpen, setConnectorsOpen] = useState(false)
@@ -209,16 +220,25 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
     }
   }, [])
 
+  /** MCP 服务快照；老网关没有这个路由就返回 null，界面上不显示这一块 */
+  const loadMcpServers = useCallback(async () => {
+    try {
+      setMcpServers(await fetchMcpServers())
+    } catch (err) {
+      if (err instanceof SignedOut) throw err
+    }
+  }, [])
+
   /** 首次加载和每次重连都走这里：断线期间错过的消息、审批数、名册一次补齐。 */
   const resync = useCallback(async () => {
     try {
-      await Promise.all([refreshConversations(), loadRoster(), loadLlms(), loadConnectors()])
+      await Promise.all([refreshConversations(), loadRoster(), loadLlms(), loadConnectors(), loadMcpServers()])
       const current = threadIdRef.current
       if (current) await loadMessages(current)
     } catch (err) {
       guard(err)
     }
-  }, [guard, loadConnectors, loadLlms, loadMessages, loadRoster, refreshConversations])
+  }, [guard, loadConnectors, loadLlms, loadMcpServers, loadMessages, loadRoster, refreshConversations])
 
   useEffect(() => {
     checkSession()
@@ -280,6 +300,11 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
         if (panelFor.current) void loadPanel(panelFor.current)
         return
       }
+      if (e.type === 'mcp_changed') {
+        void loadMcpServers().catch(guard)
+        if (panelFor.current) void loadPanel(panelFor.current)
+        return
+      }
       if (e.type !== 'message') return // 更新的网关发来不认识的事件，不归这里管
       if (e.message.sender !== 'user' && e.message.kind !== 'activity') postedRef.current.add(e.message.sender)
       // 就地更新的旧消息（activity 卡片收尾、审批 chip 翻转）不该顶掉更新的那条预览；没变就不换数组引用
@@ -310,7 +335,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
         })
       }
     }, { onSignedOut: signOut })
-  }, [signedOut, resync, refreshConversations, loadConnectors, loadPanel, guard, signOut])
+  }, [signedOut, resync, refreshConversations, loadConnectors, loadMcpServers, loadPanel, guard, signOut])
 
   const waiting = conversations.reduce((sum, c) => sum + (c.pending ?? 0), 0)
   useEffect(() => {
@@ -404,6 +429,28 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
     const res = await setBotConnectors(botId, nextIds)
     setConnectors((prev) => (prev ? { ...prev, botGrants: { ...prev.botGrants, [botId]: res.connectorIds } } : prev))
   })
+  const onToggleMcpServer = (serverId: string, granted: boolean) => panelAction(async (botId) => {
+    const current = panel?.botId === botId && panel.info?.mcpServers
+      ? panel.info.mcpServers.filter((s) => s.granted).map((s) => s.id)
+      : (mcpServers?.botGrants[botId] ?? [])
+    const nextIds = granted
+      ? (current.includes(serverId) ? current : [...current, serverId])
+      : current.filter((id) => id !== serverId)
+    await setBotMcpServers(botId, nextIds)
+    setMcpServers((prev) => {
+      if (!prev) return prev
+      const servers = prev.servers.map((s) => {
+        const has = s.grantedBotIds.includes(botId)
+        const wants = nextIds.includes(s.id)
+        if (has === wants) return s
+        return {
+          ...s,
+          grantedBotIds: wants ? [...s.grantedBotIds, botId] : s.grantedBotIds.filter((id) => id !== botId),
+        }
+      })
+      return { servers, botGrants: { ...prev.botGrants, [botId]: nextIds } }
+    })
+  })
 
   const hire = async (name: string, role: string) => {
     try {
@@ -412,7 +459,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
       setHireError(undefined)
       await refreshConversations()
       setSelectedId(`dm:${bot.id}`)
-      await Promise.all([loadRoster(), loadLlms(), loadConnectors()])
+      await Promise.all([loadRoster(), loadLlms(), loadConnectors(), loadMcpServers()])
     } catch (err) {
       if (err instanceof SignedOut) setSignedOut(true)
       else setHireError(err instanceof ApiError ? errorText(t, err) : err instanceof Error ? err.message : String(err))
@@ -467,7 +514,11 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
     )
   }
 
-  const connectorsAttention = Boolean(connectors?.accounts.some((a) => a.status === 'expired' || a.status === 'failed'))
+  const hasConnectors = Boolean(connectors || mcpServers)
+  const connectorsAttention = Boolean(
+    connectors?.accounts.some((a) => a.status === 'expired' || a.status === 'failed')
+    || mcpServers?.servers.some((s) => s.enabled && s.status === 'error'),
+  )
   const thinking = selected ? selected.members.some((id) => statuses[id] === 'thinking') : false
   // 单聊里才说得出「这位同事看不看得了图」；群里各人各样，不提
   const seesImages = llms && selected?.kind === 'dm' && selected.members[0] ? botSeesImages(llms, selected.members[0]) : undefined
@@ -493,7 +544,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         {...(llms ? { onModels: () => setModelsOpen(true) } : {})}
-        {...(connectors ? { onConnectors: () => setConnectorsOpen(true), connectorsAttention } : {})}
+        {...(hasConnectors ? { onConnectors: () => setConnectorsOpen(true), connectorsAttention } : {})}
         {...(setup ? { onSettings: () => setSettingsOpen(true) } : {})}
       />
       {selected ? (
@@ -555,6 +606,7 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
           onWindowDone={onWindowDone}
           onShell={onShell}
           onToggleConnector={onToggleConnector}
+          onToggleMcpServer={onToggleMcpServer}
         />
       ) : null}
       {settingsOpen && !modelsOpen && !connectorsOpen ? (
@@ -574,14 +626,20 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
       {llms && modelsOpen ? (
         <ModelsDialog state={llms} providers={providers} roster={roster} onChange={setLlms} onSignedOut={signOut} onClose={() => setModelsOpen(false)} />
       ) : null}
-      {connectors && connectorsOpen ? (
+      {hasConnectors && connectorsOpen ? (
         <ConnectorsDialog
-          state={connectors}
+          state={connectors ?? EMPTY_CONNECTORS}
           roster={roster}
           onChange={(next) => {
             setConnectors(next)
             if (panelFor.current) void loadPanel(panelFor.current)
           }}
+          mcpState={mcpServers}
+          onMcpChange={(next) => {
+            setMcpServers(next)
+            if (panelFor.current) void loadPanel(panelFor.current)
+          }}
+          {...(!connectors && mcpServers ? { initialTab: 'mcp' as const } : {})}
           onSignedOut={signOut}
           onClose={() => setConnectorsOpen(false)}
         />

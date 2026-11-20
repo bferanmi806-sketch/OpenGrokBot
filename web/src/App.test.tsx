@@ -33,6 +33,8 @@ function mockGateway(opts: {
   connections?: unknown
   /** /api/connectors 的回答；不给 = 老网关 */
   connectors?: unknown | (() => unknown)
+  /** /api/mcp/servers 的回答；不给 = 老网关 */
+  mcpServers?: unknown | (() => unknown)
 } = {}) {
   const calls: string[] = []
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -60,6 +62,14 @@ function mockGateway(opts: {
       const sent = JSON.parse(String(init.body)) as { connectorIds: string[] }
       const botId = decodeURIComponent(url.split('/')[3] ?? '')
       return json({ botId, connectorIds: sent.connectorIds })
+    }
+    if (url === '/api/mcp/servers' && opts.mcpServers) {
+      return json(typeof opts.mcpServers === 'function' ? opts.mcpServers() : opts.mcpServers)
+    }
+    if (url.endsWith('/mcp') && init?.method === 'PUT') {
+      const sent = JSON.parse(String(init.body)) as { serverIds: string[] }
+      const botId = decodeURIComponent(url.split('/')[3] ?? '')
+      return json({ botId, serverIds: sent.serverIds })
     }
     if (url === '/api/about' && opts.setup) return json({ version: null, dataDir: '/d', logs: 'stdout', runtime: { node: '24', platform: 'darwin', arch: 'arm64' }, computers: 'local' })
     if (url === '/api/settings' && opts.setup && opts.language === undefined) {
@@ -454,6 +464,89 @@ describe('App', () => {
       accounts: [{ ...connectorSnap.accounts[0]!, status: 'active', lastError: '' }],
     }
     await act(async () => { socket.emit({ type: 'connectors_changed' }) })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Connectors' })).toBeInTheDocument())
+    await waitFor(() => expect(calls.filter((u) => u === '/api/bots/researcher/computer').length).toBeGreaterThan(computerCallsBefore))
+  })
+
+  it('loads MCP servers, lights up attention on enabled server errors, refreshes on mcp_changed, and toggles bot MCP access', async () => {
+    const connectorSnap = {
+      key: { set: true, masked: 'cmp…1234', source: 'file', locked: false },
+      catalog: [],
+      accounts: [],
+      botGrants: { researcher: [] as string[] },
+    }
+    let mcpSnap = {
+      servers: [
+        {
+          id: 'mcp-linear',
+          name: 'Linear',
+          slug: 'linear',
+          transport: 'http',
+          enabled: true,
+          command: '',
+          args: [],
+          cwd: '',
+          url: 'https://mcp.linear.app/mcp',
+          envKeys: [],
+          headerKeys: [],
+          envMasked: {},
+          headersMasked: {},
+          trustReadOnlyHint: false,
+          tools: [],
+          toolPolicies: {},
+          status: 'error',
+          lastError: 'connection refused',
+          grantedBotIds: [] as string[],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      botGrants: { researcher: [] as string[] },
+    }
+    const calls = mockGateway({
+      connectors: connectorSnap,
+      mcpServers: () => mcpSnap,
+      computer: {
+        botId: 'researcher',
+        running: false,
+        vncUrl: null,
+        routines: [],
+        mcpServers: [
+          {
+            id: 'mcp-linear',
+            name: 'Linear',
+            slug: 'linear',
+            transport: 'http',
+            enabled: true,
+            status: 'connected',
+            toolCount: 2,
+            granted: false,
+          },
+        ],
+      },
+    })
+    render(<App />)
+    const socket = await ready()
+
+    const connectorsBtn = await screen.findByRole('button', { name: 'Connectors (needs attention)' })
+    await userEvent.click(connectorsBtn)
+    await userEvent.click(screen.getByRole('tab', { name: 'MCP' }))
+    expect(screen.getByText('connection refused')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open its computer' }))
+    const linearToggle = await screen.findByRole('checkbox', { name: 'Linear' })
+    await userEvent.click(linearToggle)
+    await waitFor(() => expect(calls).toContain(
+      `PUT /api/bots/researcher/mcp ${JSON.stringify({ serverIds: ['mcp-linear'] })}`,
+    ))
+
+    const computerCallsBefore = calls.filter((u) => u === '/api/bots/researcher/computer').length
+    mcpSnap = {
+      ...mcpSnap,
+      servers: [{ ...mcpSnap.servers[0]!, status: 'connected', lastError: '' }],
+    }
+    await act(async () => { socket.emit({ type: 'mcp_changed' }) })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Connectors' })).toBeInTheDocument())
     await waitFor(() => expect(calls.filter((u) => u === '/api/bots/researcher/computer').length).toBeGreaterThan(computerCallsBefore))
   })

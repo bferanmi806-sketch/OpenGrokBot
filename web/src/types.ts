@@ -161,7 +161,11 @@ export type ComputerInfo = {
   actions?: ActionEntry[]
   /** 已连接的外部账号，以及这位同事有没有获得访问授权 */
   connectors?: ComputerConnectorItem[]
+  /** 已配置的 MCP 服务，以及这位同事有没有获得访问授权 */
+  mcpServers?: BotMcpServerItem[]
 }
+
+export type ComputerView = ComputerInfo
 
 export type RoutineAction = 'run' | 'pause' | 'resume' | 'delete'
 
@@ -238,6 +242,9 @@ export type GatewayEvent =
   /** 本机模式的浏览器：找到了、缺着、下载中（进度）、下载失败。向导里用 */
   | { type: 'setup.browser'; browser: BrowserStatus }
   | { type: 'connectors_changed' }
+  | { type: 'mcp_changed' }
+
+export type ServerEvent = GatewayEvent
 
 export type BrowserStatus =
   | { state: 'found'; executablePath: string; source: 'env' | 'system' | 'downloaded' }
@@ -381,4 +388,107 @@ export type ComputerConnectorItem = {
   accountLabel: string
   status: ConnectorStatus
   granted: boolean
+}
+
+export type McpTransportKind = 'stdio' | 'http'
+
+export type McpServerStatus = 'disconnected' | 'connected' | 'error'
+
+export type McpToolMode = 'read' | 'write'
+
+export type McpToolPolicyChoice = McpToolMode | 'default' | null
+
+export type McpToolView = {
+  name: string
+  description: string
+  inputSchema: Record<string, unknown>
+  readOnlyHint: boolean
+  destructiveHint: boolean
+  overrideMode: McpToolMode | null
+  effectiveMode: McpToolMode
+  exposedName: string
+}
+
+export type McpServerView = {
+  id: string
+  name: string
+  slug: string
+  transport: McpTransportKind
+  enabled: boolean
+  command: string
+  args: string[]
+  cwd: string
+  url: string
+  envKeys: string[]
+  headerKeys: string[]
+  envMasked: Record<string, string>
+  headersMasked: Record<string, string>
+  trustReadOnlyHint: boolean
+  tools: McpToolView[]
+  toolPolicies: Record<string, McpToolMode>
+  status: McpServerStatus
+  lastError: string
+  grantedBotIds: string[]
+  createdAt: number
+  updatedAt: number
+}
+
+export type McpServersSnapshot = {
+  servers: McpServerView[]
+  botGrants: Record<string, string[]>
+}
+
+export type BotMcpServerItem = {
+  id: string
+  name: string
+  slug: string
+  transport: McpTransportKind
+  enabled: boolean
+  status: McpServerStatus
+  toolCount: number
+  granted: boolean
+}
+
+export type CreateMcpServerInput = {
+  name: string
+  transport: McpTransportKind
+  enabled?: boolean
+  command?: string
+  args?: string[]
+  cwd?: string
+  url?: string
+  env?: Record<string, string | null>
+  headers?: Record<string, string | null>
+  trustReadOnlyHint?: boolean
+  toolPolicies?: Record<string, McpToolPolicyChoice>
+  botIds?: string[]
+  connectNow?: boolean
+}
+
+export type UpdateMcpServerPatch = {
+  name?: string
+  transport?: McpTransportKind
+  enabled?: boolean
+  command?: string
+  args?: string[]
+  cwd?: string
+  url?: string
+  env?: Record<string, string | null>
+  headers?: Record<string, string | null>
+  trustReadOnlyHint?: boolean
+  toolPolicies?: Record<string, McpToolPolicyChoice>
+  botIds?: string[]
+  connectNow?: boolean
+}
+
+export type ImportMcpServersInput = {
+  json: string
+  botIds?: string[]
+  trustReadOnlyHint?: boolean
+  connectNow?: boolean
+}
+
+export type ImportMcpServersResult = {
+  imported: McpServerView[]
+  errors: { name: string; error: string }[]
 }
