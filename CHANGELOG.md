@@ -7,6 +7,18 @@ names.
 
 ## [Unreleased]
 
+### Added
+
+- **App connectors (`Connectors → Apps`).** Connect Gmail, Outlook, Google Calendar, Outlook Calendar, Notion and
+  Slack accounts via Composio OAuth with per-teammate explicit grants, 16 structured domain tools, 3-stage mail
+  noise/tracker sanitization, `outside-data` taint on reads, and gateway-enforced frozen write approvals (`uncertain`
+  single-attempt guarantee on mid-flight drop).
+- **Standard MCP client (`Connectors → MCP`).** Zero-dependency native Model Context Protocol client supporting local
+  `stdio` subprocesses (`shell: false`, clean-room environment) and remote `Streamable HTTP` endpoints (with automatic
+  `2024-11-05` HTTP+SSE fallback and same-origin redirect guards), Claude Desktop / Cursor `mcpServers` JSON batch
+  import, `<data>/mcp-secrets.json` (`0600`) local secret storage and output redaction, per-teammate access toggles,
+  per-tool read/write policy overrides, and non-rememberable frozen write approvals.
+
 ## [0.6.1] - 2026-11-17
 
 Security hardening across browser navigation, local command sandboxes, Docker containers and Electron window

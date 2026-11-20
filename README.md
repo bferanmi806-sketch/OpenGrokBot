@@ -8,6 +8,11 @@
 [English](README.md) · [中文](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/wolfqing/OpenSuperBot/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/wolfqing/OpenSuperBot/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/wolfqing/OpenSuperBot?style=flat-square&label=release)](https://github.com/wolfqing/OpenSuperBot/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-informational?style=flat-square)](docs/desktop.md)
+[![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20Streamable%20HTTP-8A2BE2?style=flat-square)](docs/security.md)
+[![Connectors](https://img.shields.io/badge/connectors-Gmail%20%7C%20Outlook%20%7C%20Calendar%20%7C%20Notion%20%7C%20Slack-0A7EA4?style=flat-square)](docs/security.md)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-blue?style=flat-square)](../../pulls)
 
 xAI's Grok Bot sells always-on teammates that each get a cloud computer — browser, filesystem, terminal — with
@@ -73,10 +78,10 @@ Every line below is implemented and covered by tests — nothing here is a roadm
   routine a secret webhook address instead, for GitHub, a form or any script to call. "Keep an eye on the status
   page" makes a watch routine: read-only tools, and silence unless something needs you. Pause, run or delete them
   from the computer panel — or tell the bot to stop one.
-- **Recorded workflow traces (first slice).** API-only controls start and stop a typed recording on a teammate's
-  existing browser page. The operator reviews the draft before saving it to SQLite; password, one-time-code and
-  other sensitive-looking fields are redacted automatically. Local-computer recordings continue across window
-  relaunches. Replay and routine scheduling are not part of this slice. See [docs/workflows.md](docs/workflows.md).
+- **Recorded workflow traces and replay.** API controls record typed browser steps on a teammate's existing page
+  (redacting password, one-time-code and sensitive fields automatically) and replay saved traces deterministically
+  with optional placeholder inputs and approval steps. Local-computer recordings survive window relaunches; UI
+  controls and routine scheduling are tracked separately. See [docs/workflows.md](docs/workflows.md).
 - **Hand it a file.** Attach images, PDFs, text or Markdown files to a message: paperclip, paste or drag. The file
   lands in the teammate's own folder where it can open it, a model that sees images gets the picture, and a PDF
   arrives with its text extracted so it can be read. See [docs/attachments.md](docs/attachments.md).
@@ -105,6 +110,21 @@ Every line below is implemented and covered by tests — nothing here is a roadm
 - Computers start on demand, stop after an hour without use, and come back with their logins. A container is
   capped (memory, CPU, processes) and cannot reach any other bot's computer; a local computer has no resource
   caps ([what that means](docs/security.md#local-computers)).
+
+**Connectors & MCP**
+
+- **App connectors (Gmail, Outlook, Google & Outlook Calendar, Notion, Slack).** Connect one or more accounts
+  from **Connectors → Apps** via Composio OAuth and grant them per teammate. Ships 16 structured tools, a 3-stage
+  mail sanitizer (filtering `no-reply` / `mailer-daemon` noise, stripping HTML and tracking pixels, and removing
+  URL tracking parameters), `outside-data` taint on reads, and **code-enforced frozen write approvals** executed
+  once by the gateway when you click Approve (never replayed if a connection drops mid-flight).
+- **Native MCP client (`stdio` & `Streamable HTTP`).** Attach any Model Context Protocol server from
+  **Connectors → MCP** — local `stdio` commands (`shell: false`, clean-room environment) or remote `Streamable HTTP`
+  endpoints (with automatic `2024-11-05` HTTP+SSE fallback and same-origin redirect guards) — or paste a Claude
+  Desktop / Cursor `mcpServers` JSON block to import a batch at once. Secrets stay in `<data>/mcp-secrets.json`
+  (`0600`) outside SQLite and containers; access is opt-in per teammate; tools default to `'write'` unless marked
+  `'read'`, so `'read'` tools work safely in `watch` routines while `'write'` tools pause at a non-rememberable
+  approval chip with frozen arguments.
 
 **The crew**
 
@@ -203,6 +223,7 @@ pnpm start` and the launchd / systemd / Windows Task Scheduler templates in [doc
 | `OPENSUPERBOT_DAILY_TOKENS` | `0` (off) | Per-teammate daily token budget |
 | `OPENSUPERBOT_VISION` | *(off)* | Show the model its own screenshots |
 | `OPENSUPERBOT_UPLOADS_MAX_MB` | `2048` | Disk the files you send to teammates may use in all; `0` no limit |
+| `OPENSUPERBOT_COMPOSIO_API_KEY` | — | Optional Composio API key for **Connectors → Apps**; saved keys live in `<data>/composio-key` (`0600`) |
 
 Every other setting — listen address, idle stop, per-computer limits, timeouts — is in
 [docs/always-on.md](docs/always-on.md#configuration).
@@ -214,7 +235,10 @@ In a slow-network region: for Docker, build with a mirror — `docker build --bu
 The loudest objection to hosted always-on agents: an agent that never sleeps, holding all your credentials, on
 someone else's infrastructure, exposed to prompt injection. The self-hosted answers:
 
-- **Credentials never leave your machine.** They live in the bot's own browser profile.
+- **Credentials stay out of the bot's reach.** Browser logins live in each bot's own browser profile, and MCP
+  secrets live in `<data>/mcp-secrets.json` (`0600`) on your machine; if you opt into **Connectors → Apps**, OAuth
+  tokens live on Composio while the API key stays in `<data>/composio-key` (`0600`) outside every bot container
+  and workspace.
 - **The bot never asks for a password in chat.** It asks you to take over its screen instead.
 - **Nothing reaches the gateway without its token.** It listens on `127.0.0.1`, each browser signs in once, and
   only its own pages may change state. A website you visit cannot approve a hold — and neither can the bot.
@@ -223,8 +247,10 @@ someone else's infrastructure, exposed to prompt injection. The self-hosted answ
   commands are off unless you turn them on, but nothing caps its memory or CPU, and commands it runs can reach your
   network. [docs/security.md](docs/security.md#local-computers) spells out the difference.
 - **Rules change only through the memory chip.** A bot cannot quietly rewrite what you told it.
-- **Outward actions are held for your approval.** That is an instruction every teammate follows, not a sandbox
-  rule — so give bots their own accounts rather than yours.
+- **Outward actions are held for your approval.** App connector writes, MCP write tools and recorded workflow
+  approval steps are enforced in gateway code — their arguments are frozen and executed only after you click
+  Approve. General browser clicks and shell commands remain a prompt convention, so give bots their own browser
+  accounts rather than yours.
 - **Bot-to-bot messaging is off** until you allowlist a direction.
 
 [docs/security.md](docs/security.md) lists exactly what is enforced, what is a convention, and what is still
@@ -254,12 +280,15 @@ official xAI product. [Download the latest release](https://github.com/wolfqing/
 ## Roadmap
 
 - [ ] **teach-mode** — record a browser demonstration once and keep it as a workflow the teammate can run again,
-      by hand or from a routine. The first slice (typed browser workflow recorder and trace format, [docs/workflows.md](docs/workflows.md))
-      is in; deterministic replay and routine integration are tracked in [#1](../../issues/1)
+      by hand or from a routine. Typed browser recording and deterministic replay ([docs/workflows.md](docs/workflows.md))
+      are in; UI controls and routine integration are tracked in [#1](../../issues/1)
 - [x] **Computers without Docker** on macOS and Linux — a browser profile and a folder per teammate, commands
       off by default and sandboxed when on (v0.4.0); on Windows, the browser and the folder
 - [x] **Desktop app with a first-run wizard** on macOS and Linux — no Docker, Node or terminal needed, menu bar /
       tray presence, start at login, English and Chinese UI (v0.6.0; [docs/desktop.md](docs/desktop.md))
+- [x] **App connectors & native MCP client** — Gmail, Outlook, Google & Outlook Calendar, Notion and Slack via
+      Composio OAuth plus zero-dependency `stdio` / `Streamable HTTP` MCP servers, Claude Desktop / Cursor JSON
+      import, per-teammate grants, and code-enforced frozen write approvals ([docs/security.md](docs/security.md))
 - [ ] **Apple container backend** on macOS 26 for VM isolation without Docker, and a Windows desktop installer.
       Plan in [docs/local-computers.md](docs/local-computers.md)
 - [ ] Telegram as a notification / approval surface for when you are away from the desk

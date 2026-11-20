@@ -8,6 +8,11 @@
 [English](README.md) · [中文](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/wolfqing/OpenSuperBot/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/wolfqing/OpenSuperBot/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/wolfqing/OpenSuperBot?style=flat-square&label=release)](https://github.com/wolfqing/OpenSuperBot/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-informational?style=flat-square)](docs/desktop.md)
+[![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20Streamable%20HTTP-8A2BE2?style=flat-square)](docs/security.md)
+[![Connectors](https://img.shields.io/badge/connectors-Gmail%20%7C%20Outlook%20%7C%20Calendar%20%7C%20Notion%20%7C%20Slack-0A7EA4?style=flat-square)](docs/security.md)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-blue?style=flat-square)](../../pulls)
 
 xAI 的 Grok Bot 卖的是「随时在线的同事」：每个 bot 配一台云电脑（浏览器、文件系统、终端），有持久记忆，彼此
@@ -70,9 +75,9 @@ OpenAI 兼容的模型。
   不会叠着跑。「每来一个新 issue 就……」则给这条 routine 一个带密钥的 webhook 地址，GitHub、表单或任何脚本都能
   调用它。「帮我盯着状态页」会建一条只看不动的 watch routine：只给只读工具，没事就不出声。可以在电脑面板里暂停、
   立即运行或删除，也可以直接让 bot 停掉某一条。
-- **录下来的操作轨迹（第一步）。** 目前只有 API：在同事已有的浏览器页面上开始、停止一段带类型的录制。存进 SQLite
-  之前先由你过目草稿；密码、一次性验证码和其他看着敏感的输入框会自动打码。本机电脑上的录制在窗口重开后会接着录。
-  回放和接进 routine 定时跑还不在这一步里。见 [docs/workflows.md](docs/workflows.md)。
+- **录下来的操作轨迹与确定性回放。** API 支持在同事已有的浏览器页面上录制带类型的操作步骤（密码、一次性验证码等敏感输
+  入框自动打码），并可带占位参数与审批步骤确定性回放已存轨迹。本机电脑上的录制在窗口重开后会接着录；可视化入口与例行任
+  务接入单独跟进。见 [docs/workflows.md](docs/workflows.md)。
 - **把文件交给它。** 发消息时可以带上图片、PDF、文本或 Markdown 文件：点回形针、粘贴、拖进对话都行。文件会放进这位同事自己的文件夹，
   它打得开；能看图的模型会直接看到图片；PDF 会连同抽好的文字一起送到，它读得了。详见 [docs/attachments.md](docs/attachments.md)。
 - **共享技能。** 往 `<数据目录>/skills/` 放一份 Markdown 做事手册，所有同事都能看到，做相关的活之前先读它。
@@ -94,6 +99,18 @@ OpenAI 兼容的模型。
   从线程里打开它的屏幕；本机电脑的话，它的浏览器会以普通窗口弹到你桌面上——会话就留在它的 profile 里，重启也还在。
 - 电脑按需启动，闲置一小时自动停机，下次用时连同登录态原样回来。容器有内存 / CPU / 进程数上限，也碰不到别的同事
   的电脑；本机电脑没有资源上限（[这意味着什么](docs/security.md#local-computers)）。
+
+**应用连接器与标准 MCP 客户端**
+
+- **应用连接器（Gmail、Outlook、Google 与 Outlook 日历、Notion、Slack）。** 在「连接器 → 应用」里通过 Composio OAuth
+  绑定一个或多个账号，并按同事勾选授权。内置 16 个结构化工具、三阶邮件去噪防追踪清洗（过滤 `no-reply` / `mailer-daemon`
+  机器通知、剥离 HTML 与隐藏追踪像素、剔除链接追踪参数）、读取 `outside-data` 染色，以及**网关代码强制执行的冻结审批**
+  （你点 Approve 后由网关单次执行真实冻结参数，中途断连绝不自动重发）。
+- **零依赖原生 MCP 客户端（`stdio` 与 `Streamable HTTP`）。** 在「连接器 → MCP」里接入任意 Model Context Protocol
+  服务——本机 `stdio` 命令（`shell: false` 净室环境变量）或远程 `Streamable HTTP` 端点（自动回退 `2024-11-05` HTTP+SSE，
+  带同源重定向防护）——也可直接粘贴 Claude Desktop / Cursor 的 `mcpServers` JSON 一键批量导入。密钥只存在本机
+  `<数据目录>/mcp-secrets.json`（权限 `0600`），不进数据库和容器；按同事显式授权；工具默认按 `'write'` 拦截，`'read'`
+  工具可在 `watch` 巡检中安全运行，`'write'` 工具统一挂起审批且禁止自动记住放行。
 
 **这支班子**
 
@@ -182,6 +199,7 @@ Linux 用 bubblewrap），只能写这位同事自己的文件夹。Windows 没�
 | `OPENSUPERBOT_DAILY_TOKENS` | `0`（不限） | 每位同事每天的 token 预算 |
 | `OPENSUPERBOT_VISION` | *(关)* | 把截图喂回给模型看 |
 | `OPENSUPERBOT_UPLOADS_MAX_MB` | `2048` | 你发给同事的文件总共最多占多少磁盘；`0` 不限 |
+| `OPENSUPERBOT_COMPOSIO_API_KEY` | — | 「连接器 → 应用」可选的 Composio API key；界面保存的 key 存进 `<数据目录>/composio-key`（权限 `0600`） |
 
 其余设置——监听地址、闲置停机、单台电脑的资源上限、超时——见
 [docs/always-on.md](docs/always-on.md#configuration)。
@@ -195,7 +213,9 @@ Linux 用 bubblewrap），只能写这位同事自己的文件夹。Windows 没�
 对「托管式常驻 agent」最响的反对声：一个永不休眠、手握你全部凭证的 agent，跑在别人的基础设施上，还暴露在提示词
 注入面前。自托管的回答是：
 
-- **凭证不出你的机器。** 它们在 bot 自己的浏览器 profile 里。
+- **凭证隔离在 bot 触及不到的地方。** 浏览器登录态只留在每个 bot 自己的浏览器 profile 里，MCP 密钥只存在你机器上的
+  `<数据目录>/mcp-secrets.json`（`0600`）；如果启用「连接器 → 应用」，OAuth 令牌由 Composio 托管，API key 则留在
+  `<数据目录>/composio-key`（`0600`），绝不挂进任何 bot 容器或工作区。
 - **bot 不会在聊天里问密码。** 它只会请你接管它的屏幕。
 - **没有令牌，什么都连不上 gateway。** 它只听 `127.0.0.1`，每个浏览器登录一次，且只有它自己的页面能改状态。你随手
   打开的网页放行不了审批——bot 自己也放行不了。
@@ -203,7 +223,9 @@ Linux 用 bubblewrap），只能写这位同事自己的文件夹。Windows 没�
   薄一些：文件出不了它的文件夹，命令行要你打开才有，但内存和 CPU 没有上限，它跑的命令也能访问你的网络。差别在
   [docs/security.md](docs/security.md#local-computers) 里写清楚了。
 - **规矩只能经记忆 chip 改。** bot 没法悄悄改写你交代过的话。
-- **对外动作会扣住等你批准。** 这是每位同事都遵守的指令，而不是沙箱规则——所以给 bot 配它们自己的账号，别用你的。
+- **对外动作会扣住等你批准。** 应用连接器写操作、MCP 写工具和录制工作流的审批步骤均由 **gateway 代码级强制拦截**——
+  参数先冻结，等你点 Approve 后才由网关执行。普通浏览器点击与命令行外发仍属提示词约定，所以浏览器里请给 bot 配它们
+  自己的账号，别用你的。
 - **bot 之间默认不能互发消息**，要你显式放行方向。
 
 哪些是代码强制的、哪些只是约定、哪些仍然要你自己把关，[docs/security.md](docs/security.md) 里写得清清楚楚。
@@ -229,11 +251,12 @@ Build 驱动你本机的 `grok` 命令行——会话按项目分组，Markdown�
 
 ## 路线图
 
-- [ ] **teach-mode**——录一遍浏览器操作，存成一个同事能反复执行的 workflow，手动跑或由 routine 定时跑。第一步（类型化浏览器录制器与录制格式，见 [docs/workflows.md](docs/workflows.md)）已合入；确定性回放与例行任务接入跟进在 [#1](../../issues/1)
+- [ ] **teach-mode**——录一遍浏览器操作，存成一个同事能反复执行的 workflow，手动跑或由 routine 定时跑。类型化浏览器录制器与确定性回放（见 [docs/workflows.md](docs/workflows.md)）已合入；可视化操作入口与例行任务接入跟进在 [#1](../../issues/1)
 - [x] **不用 Docker 的电脑**（macOS 和 Linux）——每位同事独立的浏览器 profile 和文件夹，命令行默认关、打开后跑在
       系统沙箱里（v0.4.0）；Windows 上有浏览器和文件夹
 - [x] **带首次启动向导的桌面 App**（macOS 和 Linux）——试用不需要 Docker、Node 和终端，支持菜单栏/托盘常驻、开机自启与
       中英双语界面（v0.6.0，见 [docs/desktop.md](docs/desktop.md)）
+- [x] **应用连接器与原生 MCP 客户端**——支持 Gmail、Outlook、Google 与 Outlook 日历、Notion、Slack 多账号 OAuth 接入，以及零依赖 `stdio` / `Streamable HTTP` MCP 服务、Claude Desktop / Cursor JSON 批量导入、按同事显式授权与网关代码级冻结写操作审批（见 [docs/security.md](docs/security.md)）
 - [ ] **macOS 26 上的 Apple container 后端**（免 Docker 的轻量虚拟机隔离）与 Windows 桌面安装包。计划见
       [docs/local-computers.md](docs/local-computers.md)
 - [ ] Telegram 作为离开电脑时的通知 / 审批补位渠道
