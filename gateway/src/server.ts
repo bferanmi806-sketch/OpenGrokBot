@@ -435,7 +435,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     now: () => now().getTime(),
     ...(deps.allowedOrigins ? { allowedOrigins: deps.allowedOrigins } : {}),
   })
-  mountMcp(app, {
+  const mcpApi = mountMcp(app, {
     db,
     secrets: mcpSecrets,
     manager: mcpManager,
@@ -1863,6 +1863,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       turns.stopAll()
       for (const active of workflowRuns.values()) releaseWorkflowRun(active, true)
       waiting.clear()
+      mcpApi.stop()
       void mcpManager.closeAll()
     },
   }

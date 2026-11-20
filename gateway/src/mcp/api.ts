@@ -309,12 +309,33 @@ async function runBounded<T>(
   )
 }
 
+function isCancellationError(msg: string): boolean {
+  return (
+    msg.includes('MCP connection superseded during handshake') ||
+    msg.includes('MCP stdio session closed') ||
+    msg.includes('MCP HTTP session closed') ||
+    msg.includes('MCP legacy SSE session closed') ||
+    /\bsession closed\b/i.test(msg)
+  )
+}
+
 export function mountMcp(
   app: Hono,
   deps: { db: Db; secrets: McpSecretVault; manager: McpManager; hub: Hub; now?: () => number },
-): void {
+): { stop(): void } {
   const { db, secrets, manager, hub } = deps
   const clock = deps.now ?? Date.now
+
+  let apiEpoch = 0
+  const serverGens = new Map<string, number>()
+  const getGen = (serverId: string): number => serverGens.get(serverId) ?? 0
+  const bumpGen = (serverId: string): number => {
+    const next = getGen(serverId) + 1
+    serverGens.set(serverId, next)
+    return next
+  }
+  const isCurrent = (serverId: string, epoch: number, gen: number): boolean =>
+    apiEpoch === epoch && getGen(serverId) === gen
 
   const serverBotIds = (serverId: string): string[] =>
     (
@@ -386,24 +407,31 @@ export function mountMcp(
     return { servers, botGrants }
   }
 
-  const runDiscovery = async (serverId: string): Promise<void> => {
+  const runDiscovery = async (
+    serverId: string,
+    opts: { allowPaused?: boolean; opEpoch?: number; opGen?: number } = {},
+  ): Promise<boolean> => {
+    const opEpoch = opts.opEpoch ?? apiEpoch
+    const opGen = opts.opGen ?? getGen(serverId)
+
     try {
       const tools = await manager.discoverTools(serverId)
+      if (!isCurrent(serverId, opEpoch, opGen)) return false
       const current = getMcpServer(db, serverId)
-      if (current && (current.status !== 'connected' || current.tools.length !== tools.length)) {
-        saveMcpDiscoveredTools(db, serverId, tools, clock())
-      }
+      if (!current) return false
+      if (!opts.allowPaused && !current.enabled) return false
+      saveMcpDiscoveredTools(db, serverId, tools, clock())
+      return true
     } catch (err) {
+      if (!isCurrent(serverId, opEpoch, opGen)) return false
       const rawMsg = err instanceof Error ? err.message : String(err)
-      const cleanMsg = secrets.redactText(serverId, rawMsg)
+      if (isCancellationError(rawMsg)) return false
       const current = getMcpServer(db, serverId)
-      if (current) {
-        const redactedExisting = current.lastError ? secrets.redactText(serverId, current.lastError) : ''
-        const nextErr = redactedExisting || cleanMsg
-        if (current.status !== 'error' || current.lastError !== nextErr) {
-          markMcpServerStatus(db, serverId, 'error', nextErr, clock())
-        }
-      }
+      if (!current) return false
+      if (!opts.allowPaused && !current.enabled) return false
+      const cleanMsg = secrets.redactText(serverId, rawMsg)
+      markMcpServerStatus(db, serverId, 'error', cleanMsg, clock())
+      return true
     }
   }
 
@@ -529,12 +557,20 @@ export function mountMcp(
       setMcpServerBots(db, created.id, body.botIds, at)
     }
 
+    const createEpoch = apiEpoch
+    const createGen = getGen(created.id)
     if (enabled && body.connectNow !== false) {
-      await runDiscovery(created.id)
+      await runDiscovery(created.id, { opEpoch: createEpoch, opGen: createGen })
     }
 
-    hub.broadcast({ type: 'mcp_changed' })
-    return c.json({ server: viewById(created.id)! }, 201)
+    const createdView = viewById(created.id)
+    if (!createdView) {
+      return c.json({ error: 'unknown MCP server', code: 'not_found' }, 404)
+    }
+    if (apiEpoch === createEpoch) {
+      hub.broadcast({ type: 'mcp_changed' })
+    }
+    return c.json({ server: createdView }, 201)
   })
 
   app.post('/api/mcp/servers/import', async (c) => {
@@ -566,8 +602,9 @@ export function mountMcp(
       return c.json({ error: 'no MCP servers found in JSON', code: 'empty_import' }, 400)
     }
 
+    const importEpoch = apiEpoch
     const createdIds: string[] = []
-    const toDiscover: string[] = []
+    const toDiscover: Array<{ id: string; gen: number }> = []
 
     for (const entry of parsed.entries) {
       const at = clock()
@@ -594,21 +631,21 @@ export function mountMcp(
 
       createdIds.push(row.id)
       if (row.enabled && body.connectNow !== false) {
-        toDiscover.push(row.id)
+        toDiscover.push({ id: row.id, gen: getGen(row.id) })
       }
     }
 
     if (toDiscover.length > 0) {
-      await runBounded(toDiscover, IMPORT_DISCOVERY_CONCURRENCY, async (id) => {
-        await runDiscovery(id)
+      await runBounded(toDiscover, IMPORT_DISCOVERY_CONCURRENCY, async ({ id, gen }) => {
+        await runDiscovery(id, { opEpoch: importEpoch, opGen: gen })
       })
     }
 
-    if (createdIds.length > 0) {
+    const imported = createdIds.map((id) => viewById(id)).filter((v): v is McpServerView => v !== null)
+    if (imported.length > 0 && apiEpoch === importEpoch) {
       hub.broadcast({ type: 'mcp_changed' })
     }
 
-    const imported = createdIds.map((id) => viewById(id)).filter((v): v is McpServerView => v !== null)
     return c.json({ imported, errors: parsed.errors })
   })
 
@@ -747,15 +784,97 @@ export function mountMcp(
       )
     }
 
+    const patchEpoch = apiEpoch
+    const patchGen = bumpGen(id)
     await manager.disconnect(id)
 
-    if (envVaultPatch !== undefined || headersVaultPatch !== undefined) {
+    const freshExisting = getMcpServer(db, id)
+    if (!freshExisting) {
+      return c.json({ error: 'unknown MCP server', code: 'not_found' }, 404)
+    }
+    if (!isCurrent(id, patchEpoch, patchGen)) {
+      const latest = viewById(id)
+      return latest
+        ? c.json({ server: latest })
+        : c.json({ error: 'unknown MCP server', code: 'not_found' }, 404)
+    }
+
+    // Recompute merged state against fresh post-disconnect DB & secret vault snapshot
+    const finalName = body.name !== undefined ? name : freshExisting.name
+    const finalTransport: McpTransportKind = body.transport ?? freshExisting.transport
+    const finalEnabled = body.enabled ?? freshExisting.enabled
+    const finalTrustHint = body.trustReadOnlyHint ?? freshExisting.trustReadOnlyHint
+    const finalPolicies =
+      body.toolPolicies !== undefined
+        ? parseToolPoliciesPatch(freshExisting.toolPolicies, body.toolPolicies)
+        : freshExisting.toolPolicies
+
+    const latestSecrets = secrets.get(id)
+    const envMerged =
+      body.env !== undefined
+        ? buildVaultPatchAndPreview(latestSecrets.env, parseSecretPatch(body.env, 'env', true), false)
+        : undefined
+    const headersMerged =
+      body.headers !== undefined
+        ? buildVaultPatchAndPreview(latestSecrets.headers, parseSecretPatch(body.headers, 'headers', true), true)
+        : undefined
+    let finalEnv = envMerged ? envMerged.preview : latestSecrets.env
+    let finalHeaders = headersMerged ? headersMerged.preview : latestSecrets.headers
+
+    let finalCommand = freshExisting.command
+    let finalArgs = freshExisting.args
+    let finalCwd = freshExisting.cwd
+    let finalUrl = freshExisting.url
+    try {
+      if (finalTransport === 'stdio') {
+        if (
+          body.transport !== undefined ||
+          body.command !== undefined ||
+          body.args !== undefined ||
+          body.cwd !== undefined
+        ) {
+          const validStdio = validateMcpStdioConfig(
+            (body.command as string | undefined) ?? freshExisting.command,
+            (body.args as string[] | undefined) ?? freshExisting.args,
+            (body.cwd as string | undefined) ?? freshExisting.cwd,
+          )
+          finalCommand = validStdio.command
+          finalArgs = validStdio.args
+          finalCwd = validStdio.cwd
+        }
+        if (freshExisting.transport === 'http') {
+          finalUrl = ''
+        }
+      } else {
+        if (body.transport !== undefined || body.url !== undefined || body.headers !== undefined) {
+          const candidateUrl = (body.url as string | undefined) ?? freshExisting.url
+          const validHttp = validateMcpHttpConfig(candidateUrl, finalHeaders)
+          finalUrl = candidateUrl.trim()
+          finalHeaders = validHttp.headers
+        }
+        if (freshExisting.transport === 'stdio') {
+          finalCommand = ''
+          finalArgs = []
+          finalCwd = ''
+        }
+      }
+    } catch (err) {
+      return c.json(
+        {
+          error: err instanceof Error ? err.message : 'invalid MCP server configuration',
+          code: finalTransport === 'stdio' ? 'invalid_stdio' : 'invalid_http',
+        },
+        400,
+      )
+    }
+
+    if (envMerged || headersMerged) {
       const saved = secrets.patch(id, {
-        ...(envVaultPatch !== undefined ? { env: envVaultPatch } : {}),
-        ...(headersVaultPatch !== undefined ? { headers: headersVaultPatch } : {}),
+        ...(envMerged ? { env: envMerged.vaultPatch } : {}),
+        ...(headersMerged ? { headers: headersMerged.vaultPatch } : {}),
       })
-      previewEnv = saved.env
-      previewHeaders = saved.headers
+      finalEnv = saved.env
+      finalHeaders = saved.headers
     }
 
     const connectionChanged =
@@ -767,24 +886,24 @@ export function mountMcp(
       body.env !== undefined ||
       body.headers !== undefined
 
-    const shouldResetStatus = !nextEnabled || (connectionChanged && existing.status === 'error')
+    const shouldResetStatus = !finalEnabled || (connectionChanged && freshExisting.status === 'error')
 
     const at = clock()
     updateMcpServer(
       db,
       id,
       {
-        name,
-        transport: nextTransport,
-        enabled: nextEnabled,
-        command: nextCommand,
-        args: nextArgs,
-        cwd: nextCwd,
-        url: nextUrl,
-        envKeys: Object.keys(previewEnv),
-        headerKeys: Object.keys(previewHeaders),
-        trustReadOnlyHint: nextTrustHint,
-        toolPolicies: nextPolicies,
+        name: finalName,
+        transport: finalTransport,
+        enabled: finalEnabled,
+        command: finalCommand,
+        args: finalArgs,
+        cwd: finalCwd,
+        url: finalUrl,
+        envKeys: Object.keys(finalEnv),
+        headerKeys: Object.keys(finalHeaders),
+        trustReadOnlyHint: finalTrustHint,
+        toolPolicies: finalPolicies,
         ...(shouldResetStatus ? { status: 'disconnected', lastError: '' } : {}),
       },
       at,
@@ -794,12 +913,18 @@ export function mountMcp(
       setMcpServerBots(db, id, body.botIds, at)
     }
 
-    if (nextEnabled && body.connectNow === true) {
-      await runDiscovery(id)
+    if (finalEnabled && body.connectNow === true) {
+      await runDiscovery(id, { opEpoch: patchEpoch, opGen: patchGen })
     }
 
-    hub.broadcast({ type: 'mcp_changed' })
-    return c.json({ server: viewById(id)! })
+    const patchedView = viewById(id)
+    if (!patchedView) {
+      return c.json({ error: 'unknown MCP server', code: 'not_found' }, 404)
+    }
+    if (apiEpoch === patchEpoch) {
+      hub.broadcast({ type: 'mcp_changed' })
+    }
+    return c.json({ server: patchedView })
   })
 
   app.post('/api/mcp/servers/:id/test', async (c) => {
@@ -809,10 +934,21 @@ export function mountMcp(
       return c.json({ error: 'unknown MCP server', code: 'not_found' }, 404)
     }
 
+    const testEpoch = apiEpoch
+    const testGen = bumpGen(id)
     await manager.disconnect(id)
-    await runDiscovery(id)
-    hub.broadcast({ type: 'mcp_changed' })
-    return c.json({ server: viewById(id)! })
+    if (isCurrent(id, testEpoch, testGen)) {
+      const updated = await runDiscovery(id, { allowPaused: true, opEpoch: testEpoch, opGen: testGen })
+      if (updated && isCurrent(id, testEpoch, testGen)) {
+        hub.broadcast({ type: 'mcp_changed' })
+      }
+    }
+
+    const testedView = viewById(id)
+    if (!testedView) {
+      return c.json({ error: 'unknown MCP server', code: 'not_found' }, 404)
+    }
+    return c.json({ server: testedView })
   })
 
   app.put('/api/mcp/servers/:id/bots', async (c) => {
@@ -828,8 +964,11 @@ export function mountMcp(
     }
 
     setMcpServerBots(db, id, body.botIds, clock())
+    const server = viewById(id)
+    if (!server) {
+      return c.json({ error: 'unknown MCP server', code: 'not_found' }, 404)
+    }
     hub.broadcast({ type: 'mcp_changed' })
-    const server = viewById(id)!
     return c.json({ server, botIds: server.grantedBotIds })
   })
 
@@ -857,10 +996,23 @@ export function mountMcp(
       return c.json({ error: 'unknown MCP server', code: 'not_found' }, 404)
     }
 
+    const delEpoch = apiEpoch
+    bumpGen(id)
     await manager.disconnect(id)
-    deleteMcpServer(db, id)
+    const removed = deleteMcpServer(db, id)
     secrets.remove(id)
-    hub.broadcast({ type: 'mcp_changed' })
+    if (!removed) {
+      return c.json({ error: 'unknown MCP server', code: 'not_found' }, 404)
+    }
+    if (apiEpoch === delEpoch) {
+      hub.broadcast({ type: 'mcp_changed' })
+    }
     return c.json({ ok: true, state: snapshot() })
   })
+
+  return {
+    stop() {
+      apiEpoch += 1
+    },
+  }
 }

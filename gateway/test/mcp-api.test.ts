@@ -602,4 +602,142 @@ describe('MCP HTTP API (/api/mcp/*, /api/bots/:botId/mcp, /api/bots/:botId/compu
     })
     expect(linSrv.headersMasked.Authorization).not.toContain('secret_linear')
   })
+
+  it('guards superseded in-flight discovery on PATCH/DELETE/stopAll and updates lastError on consecutive failures', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'osb-mcp-races-'))
+    const db = openDb(':memory:')
+
+    type PendingDiscover = {
+      resolve: (tools: McpDiscoveredTool[]) => void
+      reject: (err: Error) => void
+    }
+    const inflight = new Map<string, PendingDiscover>()
+    const startedWaiters = new Map<string, () => void>()
+    let mode: 'throw_1' | 'throw_2' | 'hang' = 'throw_1'
+
+    // Pure stateless injected McpManager that NEVER writes directly to SQLite
+    const statelessManager: McpManager = {
+      async discoverTools(serverId: string): Promise<McpDiscoveredTool[]> {
+        if (mode === 'throw_1') {
+          throw new Error('First failure: ECONNREFUSED with tok_secret_1111')
+        }
+        if (mode === 'throw_2') {
+          throw new Error('Second failure: HTTP 401 Unauthorized')
+        }
+        return new Promise<McpDiscoveredTool[]>((resolve, reject) => {
+          inflight.set(serverId, { resolve, reject })
+          startedWaiters.get(serverId)?.()
+        })
+      },
+      async ensureDiscovered() {
+        return null
+      },
+      async callTool() {
+        return { content: [] }
+      },
+      async disconnect(serverId: string): Promise<void> {
+        const cur = inflight.get(serverId)
+        if (cur) {
+          inflight.delete(serverId)
+          cur.reject(new Error('MCP connection superseded during handshake'))
+        }
+      },
+      async closeAll(): Promise<void> {
+        for (const [sid, cur] of inflight.entries()) {
+          inflight.delete(sid)
+          cur.reject(new Error('MCP HTTP session closed'))
+        }
+      },
+    }
+
+    const gw = createApp({ db, llm: okLlm, dataDir, env: {}, mcpManager: statelessManager })
+
+    // 1. Consecutive /test failures update lastError rather than freezing on stale lastError
+    const createdRes = await gw.app.request('http://127.0.0.1:4747/api/mcp/servers', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Flaky HTTP',
+        transport: 'http',
+        url: 'https://flaky.example.com/mcp',
+        headers: { Authorization: 'Bearer tok_secret_1111' },
+      }),
+    })
+    expect(createdRes.status).toBe(201)
+    const srv = (await createdRes.json()).server
+    expect(srv.status).toBe('error')
+    expect(srv.lastError).toBe('First failure: ECONNREFUSED with [REDACTED]')
+
+    mode = 'throw_2'
+    const secondTest = await (
+      await gw.app.request(`http://127.0.0.1:4747/api/mcp/servers/${srv.id}/test`, { method: 'POST' })
+    ).json()
+    expect(secondTest.server.status).toBe('error')
+    expect(secondTest.server.lastError).toBe('Second failure: HTTP 401 Unauthorized')
+
+    // Reset to disconnected via PATCH url
+    const resetPatch = await (
+      await gw.app.request(`http://127.0.0.1:4747/api/mcp/servers/${srv.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url: 'https://clean.example.com/mcp' }),
+      })
+    ).json()
+    expect(resetPatch.server.status).toBe('disconnected')
+    expect(resetPatch.server.lastError).toBe('')
+
+    // 2. Concurrent /test + PATCH: superseded /test must NOT stamp status = 'error' onto patched server
+    mode = 'hang'
+    const waitTest1Started = new Promise<void>((r) => startedWaiters.set(srv.id, r))
+    const pendingTest1 = gw.app.request(`http://127.0.0.1:4747/api/mcp/servers/${srv.id}/test`, {
+      method: 'POST',
+    })
+    await waitTest1Started
+
+    const patchWhileTesting = await gw.app.request(`http://127.0.0.1:4747/api/mcp/servers/${srv.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: 'https://updated.example.com/mcp' }),
+    })
+    expect(patchWhileTesting.status).toBe(200)
+    const patchedDuringTest = await patchWhileTesting.json()
+    const settledTest1 = await (await pendingTest1).json()
+    expect(patchedDuringTest.server).toMatchObject({
+      url: 'https://updated.example.com/mcp',
+      status: 'disconnected',
+      lastError: '',
+    })
+    expect(settledTest1.server).toMatchObject({
+      url: 'https://updated.example.com/mcp',
+      status: 'disconnected',
+      lastError: '',
+    })
+
+    // 3. Concurrent /test + stopAll(): cancelling via stopAll must NOT stamp status = 'error'
+    const waitTestStopStarted = new Promise<void>((r) => startedWaiters.set(srv.id, r))
+    const pendingTestStop = gw.app.request(`http://127.0.0.1:4747/api/mcp/servers/${srv.id}/test`, {
+      method: 'POST',
+    })
+    await waitTestStopStarted
+    gw.stopAll()
+    const afterStop = await (await pendingTestStop).json()
+    expect(afterStop.server.status).toBe('disconnected')
+    expect(afterStop.server.lastError).toBe('')
+
+    // 4. Concurrent /test + DELETE: superseded /test returns 404 cleanly without crashing
+    const gw2 = createApp({ db, llm: okLlm, dataDir, env: {}, mcpManager: statelessManager })
+    const waitTestDelStarted = new Promise<void>((r) => startedWaiters.set(srv.id, r))
+    const pendingTestDel = gw2.app.request(`http://127.0.0.1:4747/api/mcp/servers/${srv.id}/test`, {
+      method: 'POST',
+    })
+    await waitTestDelStarted
+
+    const delDuringTest = await gw2.app.request(`http://127.0.0.1:4747/api/mcp/servers/${srv.id}`, {
+      method: 'DELETE',
+    })
+    expect(delDuringTest.status).toBe(200)
+    const testDelRes = await pendingTestDel
+    expect(testDelRes.status).toBe(404)
+    expect(await testDelRes.json()).toMatchObject({ error: 'unknown MCP server' })
+  })
 })
