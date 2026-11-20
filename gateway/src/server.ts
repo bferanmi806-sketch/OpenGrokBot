@@ -56,6 +56,11 @@ import {
   safeExecuteWrite,
 } from './connectors/tools.js'
 import { ConnectorDriverError, type ConnectorDriver, type FrozenExecution } from './connectors/types.js'
+import { mountMcp } from './mcp/api.js'
+import { createMcpManager } from './mcp/client.js'
+import { createMcpSecretVault } from './mcp/secrets.js'
+import { listBotMcpServerIds, listMcpServers } from './mcp/store.js'
+import type { McpManager } from './mcp/types.js'
 import { mountSettings, type SettingsDeps } from './settings-api.js'
 import { mountSetup, type SetupDeps } from './setup-api.js'
 import { createTurnQueue } from './turns.js'
@@ -115,6 +120,7 @@ export type AppDeps = {
   /** 操作者发来的文件总共最多占多少 MB；0 或不传 = 不限 */
   uploadsMaxMb?: number
   connectorDriver?: ConnectorDriver
+  mcpManager?: McpManager
   env?: Record<string, string | undefined>
 }
 
@@ -251,6 +257,14 @@ export function createApp(deps: AppDeps): GatewayApp {
     getBaseUrl: () => composioBaseUrl(env),
   })
   const hub = deps.hub ?? createHub()
+  const mcpSecrets = createMcpSecretVault(dataDir)
+  const mcpManager = deps.mcpManager ?? createMcpManager({
+    db,
+    secrets: mcpSecrets,
+    hub,
+    hostEnv: env,
+    now: () => now().getTime(),
+  })
   const app = new Hono()
   // 车道只说「忙 / 不忙」；不忙的时候是在等你、卡住了，还是真的闲着，由 presenceOf 看库和上一回合的收场来定
   const turns = createTurnQueue((botId) => publishPresence(botId))
@@ -420,6 +434,13 @@ export function createApp(deps: AppDeps): GatewayApp {
     hub,
     now: () => now().getTime(),
     ...(deps.allowedOrigins ? { allowedOrigins: deps.allowedOrigins } : {}),
+  })
+  mountMcp(app, {
+    db,
+    secrets: mcpSecrets,
+    manager: mcpManager,
+    hub,
+    now: () => now().getTime(),
   })
 
   const botById = (id: string) => db.prepare('SELECT * FROM bots WHERE id = ?').get(id) as BotRow | undefined
@@ -1220,8 +1241,19 @@ export function createApp(deps: AppDeps): GatewayApp {
       status: a.status,
       granted: botGrantSet.has(a.id),
     }))
+    const botMcpGrantSet = new Set(listBotMcpServerIds(db, botId))
+    const mcpServers = listMcpServers(db).map((s) => ({
+      id: s.id,
+      name: s.name,
+      slug: s.slug,
+      transport: s.transport,
+      enabled: s.enabled,
+      status: s.status,
+      toolCount: s.tools.length,
+      granted: botMcpGrantSet.has(s.id),
+    }))
     const base = {
-      botId, routines, usage, rules, memory, skills, actions, connectors,
+      botId, routines, usage, rules, memory, skills, actions, connectors, mcpServers,
       workflowRecording: workflowRecordings.has(botId), workflowDraft: workflowDrafts.has(botId),
     }
     if (!pool) return c.json({ ...base, running: false, vncUrl: null })
@@ -1831,6 +1863,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       turns.stopAll()
       for (const active of workflowRuns.values()) releaseWorkflowRun(active, true)
       waiting.clear()
+      void mcpManager.closeAll()
     },
   }
 }
