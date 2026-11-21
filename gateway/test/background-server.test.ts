@@ -24,7 +24,9 @@ import { createHub, type GatewayEvent } from '../src/hub.js'
 import type { AssistantTurn, ChatMsg, ChatOptions, LLM, LlmPriority, ToolDef } from '../src/llm.js'
 import { createLlmQueue, type LlmQueueSnapshot } from '../src/llm-queue.js'
 import { createPool, type Pool } from '../src/pool.js'
+import { listRuleProposals } from '../src/proactive/rule-proposals.js'
 import { createApp, type GatewayApp } from '../src/server.js'
+import { getWikiPage } from '../src/wiki/store.js'
 import type { WorkflowRecording } from '../src/workflow-recorder.js'
 import { parseWorkflowTrace, saveWorkflowTrace } from '../src/workflows.js'
 
@@ -1019,5 +1021,230 @@ describe('Phase 7 AlterEgo background tasks end-to-end', () => {
       routines: 0,
       backgroundTasks: 0,
     })
+  })
+
+  it('propagates outside-data taint across delegate_background_task and steer_background_task into wiki_upsert and propose_memory_rule, while keeping clean background tasks untainted', async () => {
+    const gated = makeDualLaneGatedLlm()
+    const { gw, db } = setupGateway({ llm: gated.llm })
+
+    // --- Scenario A: Tainted foreground turn (after browser_goto) delegates a background task ---
+    // Background task calls wiki_upsert & propose_memory_rule -> BOTH must carry sourceTainted: true!
+    const dmTainted = await gw.app.request(
+      `/api/threads/dm:${scout.id}/messages`,
+      jsonPost({ text: 'Visit acme.example and offload a wiki + rule update.' }),
+    )
+    expect(dmTainted.status).toBe(202)
+
+    await vi.waitFor(() => expect(gated.fgCalls).toHaveLength(1))
+    gated.fgCalls[0]!.release(toolTurn('fg-goto-taint', 'browser_goto', { url: 'https://untrusted-acme.example/pricing' }))
+
+    await vi.waitFor(() => expect(gated.fgCalls).toHaveLength(2))
+    gated.fgCalls[1]!.release(toolTurn('fg-del-taint', 'delegate_background_task', {
+      title: 'Record Acme pricing from web',
+      instructions: 'Save Acme pricing to wiki and propose a pricing rule.',
+    }))
+
+    await vi.waitFor(() => expect(gated.fgCalls).toHaveLength(3))
+    const delResult = JSON.parse(String(gated.fgCalls[2]!.messages.at(-1)!.content)) as { ok: boolean; taskId: string }
+    expect(delResult.ok).toBe(true)
+    const taintedTaskId = delResult.taskId
+    expect(getBackgroundTask(db, taintedTaskId)?.sourceTainted).toBe(true)
+
+    gated.fgCalls[2]!.release(textTurn('Delegated Acme pricing task in background.'))
+    await vi.waitFor(() => expect(gw.hello()).toEqual({ type: 'hello', statuses: {} }))
+
+    // Background task runs WITHOUT calling any browser/external tools itself -> still tainted from foreground!
+    await vi.waitFor(() => expect(gated.bgCalls).toHaveLength(1))
+    gated.bgCalls[0]!.release(toolTurn('bg-t-wiki', 'wiki_upsert', {
+      kind: 'client',
+      slug: 'acme-tainted',
+      title: 'Acme Tainted',
+      body: 'Pricing pulled via foreground browse.',
+    }))
+
+    await vi.waitFor(() => expect(gated.bgCalls).toHaveLength(2))
+    gated.bgCalls[1]!.release(toolTurn('bg-t-rule', 'propose_memory_rule', {
+      rule: 'Always verify Acme enterprise quotes.',
+      reason: 'Derived from untrusted pricing page.',
+    }))
+
+    await vi.waitFor(() => expect(gated.bgCalls).toHaveLength(3))
+    gated.bgCalls[2]!.release(textTurn('Saved Acme wiki page and proposed rule.'))
+    await vi.waitFor(() => expect(gw.isBusy(scout.id)).toBe(false))
+
+    const taintedPage = getWikiPage(db, 'client', 'acme-tainted')
+    expect(taintedPage).not.toBeNull()
+    expect(taintedPage!.sourceTainted).toBe(true)
+
+    const taintedProposal = listRuleProposals(db, { botId: scout.id }).find(
+      (p) => p.rule === 'Always verify Acme enterprise quotes.',
+    )
+    expect(taintedProposal).toBeDefined()
+    expect(taintedProposal!.sourceTainted).toBe(true)
+
+    // --- Scenario B: Clean background task steered by a tainted foreground turn ---
+    const bgBeforeB = gated.bgCalls.length
+    const steeredTaskId = await delegateTaskViaDm(gw, gated, {
+      dmText: 'Start clean background note task.',
+      title: 'Clean background job later steered',
+      instructions: 'Wait for instructions then update wiki and propose a rule.',
+    })
+    expect(getBackgroundTask(db, steeredTaskId)?.sourceTainted).toBe(false)
+    await vi.waitFor(() => expect(gated.bgCalls.length).toBe(bgBeforeB + 1))
+
+    // Foreground turn browses untrusted URL, then steers the running clean background task!
+    const fgBeforeB = gated.fgCalls.length
+    await gw.app.request(
+      `/api/threads/dm:${scout.id}/messages`,
+      jsonPost({ text: 'Check globex.example and steer the running task.' }),
+    )
+    await vi.waitFor(() => expect(gated.fgCalls.length).toBe(fgBeforeB + 1))
+    gated.fgCalls[fgBeforeB]!.release(toolTurn('fg-b-goto', 'browser_goto', { url: 'https://untrusted-globex.example/terms' }))
+
+    await vi.waitFor(() => expect(gated.fgCalls.length).toBe(fgBeforeB + 2))
+    gated.fgCalls[fgBeforeB + 1]!.release(toolTurn('fg-b-steer', 'steer_background_task', {
+      taskId: steeredTaskId,
+      note: 'Apply Globex terms from the website',
+    }))
+
+    await vi.waitFor(() => expect(gated.fgCalls.length).toBe(fgBeforeB + 3))
+    expect(getBackgroundTask(db, steeredTaskId)?.sourceTainted).toBe(true)
+    gated.fgCalls[fgBeforeB + 2]!.release(textTurn('Steered the running task.'))
+    await vi.waitFor(() => expect(gw.hello()).toEqual({ type: 'hello', statuses: {} }))
+
+    // Background step 1 finishes a clean write_file, then step 2 drains the tainted steering note and calls wiki_upsert + propose_memory_rule
+    gated.bgCalls[bgBeforeB]!.release(toolTurn('bg-b-file', 'write_file', { path: 'scratch.md', content: 'working' }))
+    await vi.waitFor(() => expect(gated.bgCalls.length).toBe(bgBeforeB + 2))
+    expect(gated.bgCalls[bgBeforeB + 1]!.messages.at(-1)).toEqual({
+      role: 'user',
+      content: '[operator steering note for your background task] Apply Globex terms from the website',
+    })
+
+    gated.bgCalls[bgBeforeB + 1]!.release(toolTurn('bg-b-wiki', 'wiki_upsert', {
+      kind: 'client',
+      slug: 'globex-steered',
+      title: 'Globex Steered',
+      body: 'Terms from tainted steering note.',
+    }))
+    await vi.waitFor(() => expect(gated.bgCalls.length).toBe(bgBeforeB + 3))
+
+    gated.bgCalls[bgBeforeB + 2]!.release(toolTurn('bg-b-rule', 'propose_memory_rule', {
+      rule: 'Flag Globex auto-renewal clauses.',
+      reason: 'Requested via tainted steering note.',
+    }))
+    await vi.waitFor(() => expect(gated.bgCalls.length).toBe(bgBeforeB + 4))
+    gated.bgCalls[bgBeforeB + 3]!.release(textTurn('Updated Globex page and rule.'))
+    await vi.waitFor(() => expect(gw.isBusy(scout.id)).toBe(false))
+
+    const steeredPage = getWikiPage(db, 'client', 'globex-steered')
+    expect(steeredPage).not.toBeNull()
+    expect(steeredPage!.sourceTainted).toBe(true)
+
+    const steeredProposal = listRuleProposals(db, { botId: scout.id }).find(
+      (p) => p.rule === 'Flag Globex auto-renewal clauses.',
+    )
+    expect(steeredProposal).toBeDefined()
+    expect(steeredProposal!.sourceTainted).toBe(true)
+
+    // --- Scenario C: Clean foreground turn delegates clean background task (no external reads) ---
+    const bgBeforeC = gated.bgCalls.length
+    const cleanTaskId = await delegateTaskViaDm(gw, gated, {
+      dmText: 'Document our own internal handbook rule in background.',
+      title: 'Internal handbook update',
+      instructions: 'Write clean internal wiki page and propose clean rule.',
+    })
+    expect(getBackgroundTask(db, cleanTaskId)?.sourceTainted).toBe(false)
+    await vi.waitFor(() => expect(gated.bgCalls.length).toBe(bgBeforeC + 1))
+
+    gated.bgCalls[bgBeforeC]!.release(toolTurn('bg-c-wiki', 'wiki_upsert', {
+      kind: 'topic',
+      slug: 'internal-handbook',
+      title: 'Internal Handbook',
+      body: 'Direct operator guidance.',
+    }))
+    await vi.waitFor(() => expect(gated.bgCalls.length).toBe(bgBeforeC + 2))
+
+    gated.bgCalls[bgBeforeC + 1]!.release(toolTurn('bg-c-rule', 'propose_memory_rule', {
+      rule: 'Use ISO dates in all internal summaries.',
+      reason: 'Operator handbook preference.',
+    }))
+    await vi.waitFor(() => expect(gated.bgCalls.length).toBe(bgBeforeC + 3))
+    gated.bgCalls[bgBeforeC + 2]!.release(textTurn('Internal handbook saved.'))
+    await vi.waitFor(() => expect(gw.isBusy(scout.id)).toBe(false))
+
+    const cleanPage = getWikiPage(db, 'topic', 'internal-handbook')
+    expect(cleanPage).not.toBeNull()
+    expect(cleanPage!.sourceTainted).toBe(false)
+
+    const cleanProposal = listRuleProposals(db, { botId: scout.id }).find(
+      (p) => p.rule === 'Use ISO dates in all internal summaries.',
+    )
+    expect(cleanProposal).toBeDefined()
+    expect(cleanProposal!.sourceTainted).toBe(false)
+  })
+
+  it('reads backgroundTasks AFTER await pool.get(botId) in GET /api/bots/:botId/computer so waking a container never returns stale task state', async () => {
+    const gated = makeDualLaneGatedLlm()
+    const computerReady = deferred<ReturnType<typeof createFakeComputer>>()
+    const computerRequested = deferred<void>()
+    let gateNextMake = false
+    const dataDir = makeTempDir('osb-comp-fresh-')
+    const db = openDb(':memory:')
+    upsertBot(db, scout)
+    ensureDmThread(db, scout.id)
+    const hub = createHub()
+    const pool: Pool = createPool({
+      dataDir,
+      makeComputer: async () => {
+        if (gateNextMake) {
+          computerRequested.resolve()
+          return await computerReady.promise
+        }
+        return makeRecordableComputer()
+      },
+    })
+    const gw = createApp({ db, llm: gated.llm, pool, hub, dataDir })
+    trackCleanup(async () => {
+      computerReady.resolve(makeRecordableComputer())
+      await gw.stopAll()
+      await pool.disposeAll()
+      db.close()
+    })
+
+    // 1. Start a real background task (enters running)
+    const taskId = await delegateTaskViaDm(gw, gated, {
+      dmText: 'Start background task before panel wakes.',
+      title: 'Finishes during container wake',
+      instructions: 'Do work.',
+    })
+    await vi.waitFor(() => expect(gated.bgCalls).toHaveLength(1))
+    expect(getBackgroundTask(db, taskId)?.status).toBe('running')
+
+    // 2. Evict cached computer so GET /computer must wake it via pool.get(botId)
+    await pool.forget(scout.id)
+    gateNextMake = true
+
+    // 3. Start GET /computer while task is still 'running' -> blocks on await pool.get(botId)
+    const compPromise = gw.app.request(`/api/bots/${scout.id}/computer`)
+    await computerRequested.promise
+
+    // 4. While pool.get(botId) is pending, finish the background task -> status flips to 'completed'
+    gated.bgCalls[0]!.release(textTurn('Completed while container was waking.'))
+    await vi.waitFor(() => expect(getBackgroundTask(db, taskId)?.status).toBe('completed'))
+
+    // 5. Now finish waking the container -> GET /computer must return the post-pool.get 'completed' snapshot!
+    computerReady.resolve(makeRecordableComputer())
+    const compRes = await compPromise
+    expect(compRes.status).toBe(200)
+    const compBody = (await compRes.json()) as { running: boolean; backgroundTasks: BackgroundTaskView[] }
+    expect(compBody.running).toBe(true)
+    expect(compBody.backgroundTasks).toHaveLength(1)
+    expect(compBody.backgroundTasks[0]).toMatchObject({
+      id: taskId,
+      title: 'Finishes during container wake',
+      status: 'completed',
+      summary: 'Completed while container was waking.',
+    })
+    await vi.waitFor(() => expect(gw.isBusy(scout.id)).toBe(false))
   })
 })

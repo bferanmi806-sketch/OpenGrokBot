@@ -42,7 +42,7 @@ function mockGateway(opts: {
   /** POST /api/rule-proposals/:id 的回答 */
   resolveRuleProposal?: (url: string, body: Record<string, unknown>) => { status?: number; body: unknown }
   /** GET /api/bots/:botId/background-tasks 的回答 */
-  backgroundTasks?: (url: string) => unknown
+  backgroundTasks?: (url: string) => Promise<unknown> | unknown
   /** POST /api/background-tasks/:id/steer 的回答 */
   steerBackgroundTask?: (url: string, body: Record<string, unknown>) => { status?: number; body: unknown }
   /** POST /api/background-tasks/:id/cancel 的回答 */
@@ -99,7 +99,7 @@ function mockGateway(opts: {
       return json(reply.body, reply.status ?? 200)
     }
     if (url.endsWith('/background-tasks') && opts.backgroundTasks) {
-      return json(opts.backgroundTasks(url))
+      return json(await opts.backgroundTasks(url))
     }
     if (url.startsWith('/api/background-tasks/') && url.endsWith('/steer') && init?.method === 'POST' && opts.steerBackgroundTask) {
       const sent = init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {}
@@ -113,7 +113,8 @@ function mockGateway(opts: {
     if (url.startsWith('/api/threads/')) return json(opts.messages ? await opts.messages(url) : [])
     if (url.includes('/computer')) {
       await opts.computerGate
-      return json(opts.computer ?? {})
+      const val = typeof opts.computer === 'function' ? await (opts.computer as (u: string) => unknown)(url) : opts.computer
+      return json(val ?? {})
     }
     return json({ error: 'unexpected' }, 404)
   })
@@ -1178,5 +1179,115 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(await screen.findByText('Finished already on server.')).toBeInTheDocument()
     expect(screen.getByText('Completed')).toBeInTheDocument()
+  })
+
+  it('preserves live WS background_task_changed updates when stale fetchBackgroundTasks or fetchComputer snapshots resolve', async () => {
+    const runningTask: BackgroundTaskView = {
+      id: 'bg-race1111',
+      botId: 'researcher',
+      threadId: 'dm:researcher',
+      title: 'Race-prone scan',
+      instructions: 'Scan vendors',
+      status: 'running',
+      stepCount: 1,
+      lastStep: 'wiki_search: vendors',
+      steps: [{ tool: 'wiki_search', summary: 'vendors', ok: true, at: 100 }],
+      summary: '',
+      error: '',
+      usesBrowser: false,
+      messageId: 70,
+      createdAt: 100,
+      startedAt: 110,
+      finishedAt: null,
+    }
+    const completedTask: BackgroundTaskView = {
+      ...runningTask,
+      status: 'completed',
+      stepCount: 2,
+      lastStep: 'write_file: report.md',
+      summary: 'Live WS completion summary.',
+      finishedAt: 250,
+    }
+    const task2Running: BackgroundTaskView = {
+      ...runningTask,
+      id: 'bg-race2222',
+      title: 'Panel wake race task',
+      messageId: 71,
+      createdAt: 300,
+      startedAt: 310,
+    }
+    const task2Completed: BackgroundTaskView = {
+      ...task2Running,
+      status: 'completed',
+      summary: 'Completed while panel was waking.',
+      finishedAt: 400,
+    }
+
+    let bgFetchCount = 0
+    let releaseBgFetch!: (v: unknown) => void
+    let releaseComputerFetch!: (v: unknown) => void
+    let computerFetchCount = 0
+
+    mockGateway({
+      backgroundTasks: () => {
+        bgFetchCount += 1
+        if (bgFetchCount === 1) return { tasks: [runningTask] }
+        return new Promise((resolve) => { releaseBgFetch = resolve })
+      },
+      computer: () => {
+        computerFetchCount += 1
+        return new Promise((resolve) => { releaseComputerFetch = resolve })
+      },
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    const socket = await ready()
+
+    // Initial load shows "1 background task" pill
+    expect(await screen.findByRole('button', { name: /1 background task/ })).toBeInTheDocument()
+
+    // --- Part A: WS completion arrives while fetchBackgroundTasks (triggered by reconnect hello) is in flight ---
+    await act(async () => { socket.emit({ type: 'hello', statuses: {} }) })
+    await waitFor(() => expect(bgFetchCount).toBe(2))
+
+    await act(async () => {
+      socket.emit({ type: 'background_task_changed', botId: 'researcher', task: completedTask })
+    })
+    // Pill disappears immediately because the task completed over WS
+    await waitFor(() => expect(screen.queryByRole('button', { name: /background task/i })).toBeNull())
+
+    // Now the stale HTTP /background-tasks snapshot (still 'running') resolves -> MUST NOT revert to running!
+    await act(async () => { releaseBgFetch({ tasks: [runningTask] }) })
+    await act(async () => {})
+    expect(screen.queryByRole('button', { name: /background task/i })).toBeNull()
+
+    // --- Part B: WS completion arrives while fetchComputer (loadPanel) is in flight ---
+    await act(async () => {
+      socket.emit({ type: 'background_task_changed', botId: 'researcher', task: task2Running })
+    })
+    const pill2 = await screen.findByRole('button', { name: /1 background task/ })
+    await user.click(pill2)
+    await waitFor(() => expect(computerFetchCount).toBe(1))
+
+    // While /computer is still pending, task2 completes over WS
+    await act(async () => {
+      socket.emit({ type: 'background_task_changed', botId: 'researcher', task: task2Completed })
+    })
+    await waitFor(() => expect(screen.queryByRole('button', { name: /background task/i })).toBeNull())
+
+    // Now the stale /computer snapshot (with task2 still 'running') resolves ->
+    // panel AND header pill MUST reflect task2Completed, NOT revert to running!
+    await act(async () => {
+      releaseComputerFetch({
+        botId: 'researcher',
+        running: false,
+        vncUrl: null,
+        routines: [],
+        backgroundTasks: [task2Running],
+      })
+    })
+    expect(await screen.findByText('Completed while panel was waking.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /background task/i })).toBeNull()
   })
 })

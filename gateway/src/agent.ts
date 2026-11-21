@@ -167,17 +167,19 @@ export type AgentDeps = {
   /** 后台任务车道（AlterEgo）：非阻塞执行、不发 activity 卡片、禁止递归创建后台任务 */
   isBackgroundTask?: boolean
   historyLimit?: number
-  drainSteeringNotes?: () => string[]
+  drainSteeringNotes?: () => Array<string | { note: string; tainted?: boolean }>
   onStepProgress?: (step: { tool: string; summary: string; ok: boolean; ms: number }) => void
   onAcquireBrowser?: (toolName: string) => { ok: true } | { ok: false; reason: string }
   onDelegateBackgroundTask?: (input: {
     title: string
     instructions: string
+    tainted?: boolean
   }) => Promise<{ ok: true; task: BackgroundTaskView } | { ok: false; error: string }>
   onListBackgroundTasks?: () => Promise<BackgroundTaskView[]> | BackgroundTaskView[]
   onSteerBackgroundTask?: (input: {
     taskId: string
     note: string
+    tainted?: boolean
   }) => Promise<{ ok: true; task: BackgroundTaskView } | { ok: false; error: string }>
   onCancelBackgroundTask?: (input: {
     taskId: string
@@ -303,7 +305,8 @@ export async function runTurn(
         content: buildSystemPrompt(bot, soul, {
           hasComputer,
           hasWiki,
-          canBackgroundTasks,
+          canBackgroundTasks:
+            Boolean(deps.onDelegateBackgroundTask) && deps.origin === 'operator' && !isBackgroundTask && effectiveMode === 'act',
           isBackgroundTask,
           computer: deps.computer,
           memory: deps.memory,
@@ -357,7 +360,14 @@ export async function runTurn(
         return 'budget'
       }
       const steering = deps.drainSteeringNotes?.() ?? []
-      for (const note of steering) {
+      for (const raw of steering) {
+        const note = typeof raw === 'string' ? raw : raw.note
+        if (typeof raw !== 'string' && raw.tainted === true) {
+          taintedByOutsideData = true
+          ctx.turnTainted = true
+          ctx.ruleBlock = computeRuleBlock()
+          notifyTainted()
+        }
         messages.push({ role: 'user', content: `[operator steering note for your background task] ${note}` })
       }
       const turn = await llm.chat(messages, tools, { signal, priority })
@@ -918,7 +928,11 @@ async function execBackgroundTool(
       if (!title || !instructions) {
         return { ok: false, text: 'delegate_background_task needs non-empty "title" and "instructions".' }
       }
-      const res = await deps.onDelegateBackgroundTask({ title, instructions })
+      const res = await deps.onDelegateBackgroundTask({
+        title,
+        instructions,
+        ...(deps.turnTainted ? { tainted: true } : {}),
+      })
       if (!res.ok) return { ok: false, text: res.error }
       return {
         ok: true,
@@ -962,7 +976,11 @@ async function execBackgroundTool(
       if (!taskId || !note) {
         return { ok: false, text: 'steer_background_task needs non-empty "taskId" and "note".' }
       }
-      const res = await deps.onSteerBackgroundTask({ taskId, note })
+      const res = await deps.onSteerBackgroundTask({
+        taskId,
+        note,
+        ...(deps.turnTainted ? { tainted: true } : {}),
+      })
       if (!res.ok) return { ok: false, text: res.error }
       return {
         ok: true,

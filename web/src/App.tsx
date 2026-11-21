@@ -48,6 +48,18 @@ function upsertBackgroundTaskList(list: BackgroundTaskView[] | undefined, task: 
   return next.slice(0, 20)
 }
 
+function overlayLiveBackgroundTasks(
+  fetched: BackgroundTaskView[],
+  live: ReadonlyMap<string, BackgroundTaskView>,
+): BackgroundTaskView[] {
+  if (live.size === 0) return fetched
+  let merged = fetched
+  for (const task of live.values()) {
+    merged = upsertBackgroundTaskList(merged, task)
+  }
+  return merged
+}
+
 function bgTaskViewToPayload(task: BackgroundTaskView): BackgroundTaskPayload {
   return {
     taskId: task.id,
@@ -318,20 +330,40 @@ function Workspace({
     }
   }, [])
 
+  /** 拉取后台任务或电脑面板期间经 WS/200 到达的更新先记下来，回来后叠在快照上；重叠拉取按序号只认最新一次 */
+  const bgFetchSeqRef = useRef(new Map<string, number>())
+  const panelFetchSeqRef = useRef(new Map<string, number>())
+  const bgInFlightRef = useRef(new Map<string, number>())
+  const liveBgDuringFetchRef = useRef(new Map<string, Map<string, BackgroundTaskView>>())
+
   /** 某位同事的后台任务列表；老网关没有这个路由时静默忽略 */
   const loadBackgroundTasks = useCallback(async (botId: string) => {
+    const seq = (bgFetchSeqRef.current.get(botId) ?? 0) + 1
+    bgFetchSeqRef.current.set(botId, seq)
+    bgInFlightRef.current.set(botId, (bgInFlightRef.current.get(botId) ?? 0) + 1)
     try {
       const res = await fetchBackgroundTasks(botId)
-      setBgTasksByBot((prev) => ({ ...prev, [botId]: res.tasks }))
+      if (bgFetchSeqRef.current.get(botId) !== seq) return
+      const liveSnapshot = new Map(liveBgDuringFetchRef.current.get(botId) ?? [])
+      const merged = overlayLiveBackgroundTasks(res.tasks, liveSnapshot)
+      setBgTasksByBot((prev) => ({ ...prev, [botId]: merged }))
       if (panelFor.current === botId) {
         setPanel((curr) => (
           curr && curr.botId === botId && curr.info
-            ? { ...curr, info: { ...curr.info, backgroundTasks: res.tasks } }
+            ? { ...curr, info: { ...curr.info, backgroundTasks: merged } }
             : curr
         ))
       }
     } catch (err) {
       if (err instanceof SignedOut) setSignedOut(true)
+    } finally {
+      const remaining = (bgInFlightRef.current.get(botId) ?? 1) - 1
+      if (remaining <= 0) {
+        bgInFlightRef.current.delete(botId)
+        liveBgDuringFetchRef.current.delete(botId)
+      } else {
+        bgInFlightRef.current.set(botId, remaining)
+      }
     }
   }, [])
 
@@ -340,6 +372,14 @@ function Workspace({
     task: BackgroundTaskView,
     opts?: { patchMessage?: boolean },
   ) => {
+    if ((bgInFlightRef.current.get(botId) ?? 0) > 0) {
+      let botLive = liveBgDuringFetchRef.current.get(botId)
+      if (!botLive) {
+        botLive = new Map<string, BackgroundTaskView>()
+        liveBgDuringFetchRef.current.set(botId, botLive)
+      }
+      botLive.set(task.id, task)
+    }
     setBgTasksByBot((prev) => ({
       ...prev,
       [botId]: upsertBackgroundTaskList(prev[botId], task),
@@ -412,17 +452,36 @@ function Workspace({
 
   const signOut = useCallback(() => setSignedOut(true), [])
 
-  /** 拉一次面板数据；只在面板还开给同一位同事时才放进去 */
+  /** 拉一次面板数据；只在面板还开给同一位同事、且未被更新的请求顶掉时才放进去 */
   const loadPanel = useCallback(async (botId: string) => {
+    const seq = (panelFetchSeqRef.current.get(botId) ?? 0) + 1
+    panelFetchSeqRef.current.set(botId, seq)
+    bgInFlightRef.current.set(botId, (bgInFlightRef.current.get(botId) ?? 0) + 1)
     try {
       const info = await fetchComputer(botId)
-      if (Array.isArray(info.backgroundTasks)) {
-        setBgTasksByBot((prev) => ({ ...prev, [botId]: info.backgroundTasks! }))
+      if (panelFetchSeqRef.current.get(botId) !== seq) return
+      const liveSnapshot = new Map(liveBgDuringFetchRef.current.get(botId) ?? [])
+      const mergedTasks = Array.isArray(info.backgroundTasks)
+        ? overlayLiveBackgroundTasks(info.backgroundTasks, liveSnapshot)
+        : undefined
+      const mergedInfo: ComputerInfo = mergedTasks !== undefined
+        ? { ...info, backgroundTasks: mergedTasks }
+        : info
+      if (mergedTasks !== undefined) {
+        setBgTasksByBot((prev) => ({ ...prev, [botId]: mergedTasks }))
       }
-      if (panelFor.current === botId) showPanel({ botId, info })
+      if (panelFor.current === botId) showPanel({ botId, info: mergedInfo })
     } catch (err) {
-      if (panelFor.current === botId) showPanel(null)
+      if (panelFetchSeqRef.current.get(botId) === seq && panelFor.current === botId) showPanel(null)
       guard(err)
+    } finally {
+      const remaining = (bgInFlightRef.current.get(botId) ?? 1) - 1
+      if (remaining <= 0) {
+        bgInFlightRef.current.delete(botId)
+        liveBgDuringFetchRef.current.delete(botId)
+      } else {
+        bgInFlightRef.current.set(botId, remaining)
+      }
     }
   }, [guard, showPanel])
 

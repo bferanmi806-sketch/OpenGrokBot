@@ -17,6 +17,7 @@ import {
   reconcileStaleBackgroundTasks,
   rowToView,
   STALE_RESTART_ERROR,
+  type BackgroundSteeringNote,
   type BackgroundTaskPayload,
   type BackgroundTaskRow,
   type BackgroundTaskRunContext,
@@ -110,6 +111,7 @@ describe('schema v16, background action trigger & hub event', () => {
       'summary',
       'error',
       'uses_browser',
+      'source_tainted',
       'message_id',
       'created_at',
       'started_at',
@@ -154,6 +156,7 @@ describe('schema v16, background action trigger & hub event', () => {
       summary: '',
       error: '',
       usesBrowser: false,
+      sourceTainted: false,
       messageId: 1,
       createdAt: 1000,
       startedAt: null,
@@ -211,6 +214,7 @@ describe('schema v16, background action trigger & hub event', () => {
       summary: '',
       error: '',
       uses_browser: 1,
+      source_tainted: 0,
       message_id: null,
       created_at: 1000,
       started_at: 1050,
@@ -637,7 +641,8 @@ describe('BackgroundTaskManager', () => {
     const t1Release = createDeferred()
     const t2Started = createDeferred()
     const t2MidGate = createDeferred()
-    const t2Notes: string[][] = []
+    const t2Notes: BackgroundSteeringNote[][] = []
+    let t2StartTainted: boolean | null = null
 
     const manager = createBackgroundTaskManager({
       db,
@@ -648,6 +653,7 @@ describe('BackgroundTaskManager', () => {
           await t1Release.promise
           return { summary: 'first done' }
         }
+        t2StartTainted = ctx.task.sourceTainted
         t2Notes.push(ctx.drainSteeringNotes())
         t2Notes.push(ctx.drainSteeringNotes()) // second drain is empty
         t2Started.resolve()
@@ -657,9 +663,11 @@ describe('BackgroundTaskManager', () => {
       },
     })
 
-    const r1 = manager.enqueue({ botId: 'scout', threadId, title: 'First', instructions: 'Run 1' })
+    const r1 = manager.enqueue({ botId: 'scout', threadId, title: 'First', instructions: 'Run 1', sourceTainted: true })
     const r2 = manager.enqueue({ botId: 'scout', threadId, title: 'Second', instructions: 'Run 2' })
     if (!r1.ok || !r2.ok) throw new Error('enqueue failed')
+    expect(r1.task.sourceTainted).toBe(true)
+    expect(r2.task.sourceTainted).toBe(false)
 
     await t1Started.promise
 
@@ -671,11 +679,12 @@ describe('BackgroundTaskManager', () => {
     expect(manager.steer(r2.task.id, 'note', { botId: 'other-bot' }))
       .toMatchObject({ ok: false, code: 'not_found' })
 
-    // Steer queued task r2 before it starts
-    const queuedSteer = manager.steer(r2.task.id, 'Focus on APAC revenue', { botId: 'scout' })
+    // Steer queued task r2 with tainted: true before it starts -> durably flips source_tainted = 1
+    const queuedSteer = manager.steer(r2.task.id, 'Focus on APAC revenue', { botId: 'scout', tainted: true })
     expect(queuedSteer.ok).toBe(true)
     if (!queuedSteer.ok) throw new Error('expected steer ok')
     expect(queuedSteer.task.status).toBe('queued')
+    expect(queuedSteer.task.sourceTainted).toBe(true)
     expect(queuedSteer.task.steps).toHaveLength(1)
     expect(queuedSteer.task.steps[0]).toMatchObject({
       tool: 'steer',
@@ -683,13 +692,16 @@ describe('BackgroundTaskManager', () => {
       ok: true,
     })
 
-    // Let r1 finish and r2 start
+    // Let r1 finish and r2 start -> r2 starts with sourceTainted === true
     t1Release.resolve()
     await t2Started.promise
+    expect(t2StartTainted).toBe(true)
 
-    // Steer running task r2 mid-flight
+    // Steer running task r2 mid-flight (untainted) -> must NOT clear sourceTainted
     const midSteer = manager.steer(r2.task.id, 'Include YoY delta')
     expect(midSteer.ok).toBe(true)
+    if (!midSteer.ok) throw new Error('expected steer ok')
+    expect(midSteer.task.sourceTainted).toBe(true)
     expect(events.some(
       (e) => e.type === 'background_task_changed'
         && e.task.id === r2.task.id
@@ -700,10 +712,11 @@ describe('BackgroundTaskManager', () => {
     await waitFor(() => !manager.hasActive())
 
     expect(t2Notes).toEqual([
-      ['Focus on APAC revenue'],
+      [{ note: 'Focus on APAC revenue', tainted: true }],
       [],
-      ['Include YoY delta'],
+      [{ note: 'Include YoY delta', tainted: false }],
     ])
+    expect(getBackgroundTask(db, r2.task.id)?.sourceTainted).toBe(true)
 
     // Settled task cannot be steered
     expect(manager.steer(r2.task.id, 'too late')).toMatchObject({ ok: false, code: 'settled' })
@@ -913,5 +926,33 @@ describe('BackgroundTaskManager', () => {
     expect(noChip.error).toBe(STALE_RESTART_ERROR)
 
     db.close()
+  })
+
+  it('releases lane.running and entries cleanly without unhandled rejections if DB closes during task teardown', async () => {
+    const db = openDb(':memory:')
+    const threadId = seedBot(db, 'scout', 'Scout')
+    const started = createDeferred()
+    const release = createDeferred()
+
+    const manager = createBackgroundTaskManager({
+      db,
+      runTask: async () => {
+        started.resolve()
+        await release.promise
+        return { summary: 'finished after db closed' }
+      },
+    })
+
+    const r1 = manager.enqueue({ botId: 'scout', threadId, title: 'Teardown race', instructions: 'Run' })
+    expect(r1.ok).toBe(true)
+    await started.promise
+
+    // Simulate DB closing before runTask finishes
+    db.close()
+    release.resolve()
+
+    await waitFor(() => !manager.hasActive())
+    expect(manager.activeCount()).toBe(0)
+    expect(manager.activeBotIds()).toEqual([])
   })
 })

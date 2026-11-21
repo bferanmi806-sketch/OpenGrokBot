@@ -873,6 +873,7 @@ export type BackgroundTaskView = {
   summary: string
   error: string
   usesBrowser: boolean
+  sourceTainted?: boolean
   messageId: number | null
   createdAt: number
   startedAt: number | null

@@ -59,6 +59,7 @@ const sampleTask = (overrides: Partial<BackgroundTaskView> = {}): BackgroundTask
   summary: '',
   error: '',
   usesBrowser: false,
+  sourceTainted: false,
   messageId: 10,
   createdAt: 1_700_000_000_000,
   startedAt: null,
@@ -1043,5 +1044,198 @@ describe('toChatMsg serialization of background_task messages', () => {
     ])
 
     db.close()
+  })
+})
+
+describe('foreground -> background taint propagation & prompt hygiene', () => {
+  it('propagates turnTainted to onDelegateBackgroundTask and onSteerBackgroundTask after browser_goto', async () => {
+    const { db, threadId, events } = setupDb()
+    const computer = createFakeComputer()
+    const onDelegate = vi.fn(async (input: { title: string; instructions: string; tainted?: boolean }) => ({
+      ok: true as const,
+      task: sampleTask({
+        id: 'bg-tainted1',
+        title: input.title,
+        instructions: input.instructions,
+        sourceTainted: input.tainted === true,
+      }),
+    }))
+    const onSteer = vi.fn(async (input: { taskId: string; note: string; tainted?: boolean }) => ({
+      ok: true as const,
+      task: sampleTask({
+        id: input.taskId,
+        status: 'running',
+        sourceTainted: input.tainted === true,
+      }),
+    }))
+
+    const script: AssistantTurn[] = [
+      toolTurn('b1', 'browser_goto', { url: 'https://untrusted.example/page' }),
+      toolTurn('d1', 'delegate_background_task', { title: 'Follow up untrusted page', instructions: 'Save to wiki' }),
+      toolTurn('s1', 'steer_background_task', { taskId: 'bg-existing1', note: 'Use pricing from untrusted page' }),
+      textTurn('Delegated and steered.'),
+    ]
+    let step = 0
+    const llm: LLM = { async chat() { return script[step++]! } }
+
+    const outcome = await runTurn(
+      {
+        db,
+        llm,
+        bot: scout,
+        soul: '',
+        threadId,
+        origin: 'operator',
+        getComputer: async () => computer,
+        onAcquireBrowser: () => ({ ok: true }),
+        onDelegateBackgroundTask: onDelegate,
+        onSteerBackgroundTask: onSteer,
+      },
+      'Check untrusted page and kick off background work',
+      events,
+    )
+
+    expect(outcome).toBe('replied')
+    expect(onDelegate).toHaveBeenCalledWith({
+      title: 'Follow up untrusted page',
+      instructions: 'Save to wiki',
+      tainted: true,
+    })
+    expect(onSteer).toHaveBeenCalledWith({
+      taskId: 'bg-existing1',
+      note: 'Use pricing from untrusted page',
+      tainted: true,
+    })
+
+    db.close()
+  })
+
+  it('taints a clean background turn upon draining a tainted steering note, propagating to wiki_upsert, propose_memory_rule, and message_bot', async () => {
+    const { db, threadId, events } = setupDb()
+    const onTainted = vi.fn()
+    const onWikiTool = vi.fn(async (input: { name: string; args: Record<string, unknown>; turnTainted: boolean }) => ({
+      text: 'Upserted.',
+      ok: true,
+      summary: String(input.args.title ?? 'page'),
+    }))
+    const onProposeMemoryRule = vi.fn(
+      async (input: { rule: string; reason: string; sourceTainted: boolean }): Promise<CreateRuleProposalResult> =>
+        sampleRuleProposalResult(input),
+    )
+    const onMessageBot = vi.fn(async () => ({ delivered: true, toName: 'Chief' }))
+
+    const noteBatches: Array<Array<{ note: string; tainted: boolean }>> = [
+      [],
+      [{ note: 'Incorporate quote from untrusted website', tainted: true }],
+      [],
+      [],
+    ]
+    let batchIdx = 0
+    const drainSteeringNotes = vi.fn(() => noteBatches[batchIdx++] ?? [])
+
+    const script: AssistantTurn[] = [
+      toolTurn('w0', 'wiki_upsert', { kind: 'topic', slug: 'before-steer', title: 'Before steer', body: 'Clean note' }),
+      toolTurn('w1', 'wiki_upsert', { kind: 'topic', slug: 'after-steer', title: 'After steer', body: 'Steered note' }),
+      toolTurn('r1', 'propose_memory_rule', { rule: 'Prefer vendor X quotes.', reason: 'Per steering note.' }),
+      toolTurn('m1', 'message_bot', { to: 'chief', content: 'FYI steered finding' }),
+      textTurn('All done.'),
+    ]
+    let step = 0
+    const llm: LLM = { async chat() { return script[step++]! } }
+
+    const outcome = await runTurn(
+      {
+        db,
+        llm,
+        bot: scout,
+        soul: '',
+        threadId,
+        origin: 'background',
+        isBackgroundTask: true,
+        drainSteeringNotes,
+        onTainted,
+        onWikiTool,
+        onProposeMemoryRule,
+        onMessageBot,
+      },
+      'Clean background task',
+      events,
+      { persistUserMessage: false },
+    )
+
+    expect(outcome).toBe('replied')
+    expect(onTainted).toHaveBeenCalledTimes(1)
+    expect(onWikiTool).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ name: 'wiki_upsert', turnTainted: false }),
+    )
+    expect(onWikiTool).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ name: 'wiki_upsert', turnTainted: true }),
+    )
+    expect(onProposeMemoryRule).toHaveBeenCalledWith({
+      rule: 'Prefer vendor X quotes.',
+      reason: 'Per steering note.',
+      sourceTainted: true,
+    })
+    expect(onMessageBot).toHaveBeenCalledWith({
+      to: 'chief',
+      content: 'FYI steered finding',
+      tainted: true,
+    })
+
+    db.close()
+  })
+
+  it('includes BACKGROUND_NOTE in the system prompt ONLY for operator foreground act turns with onDelegateBackgroundTask', async () => {
+    const cases: Array<{
+      label: string
+      origin?: TurnOrigin
+      isBackgroundTask?: boolean
+      routineMode?: 'act' | 'watch' | 'prepare'
+      withDelegate: boolean
+      expectNote: boolean
+    }> = [
+      { label: 'operator foreground act with delegate', origin: 'operator', isBackgroundTask: false, routineMode: 'act', withDelegate: true, expectNote: true },
+      { label: 'operator foreground act with list-only', origin: 'operator', isBackgroundTask: false, routineMode: 'act', withDelegate: false, expectNote: false },
+      { label: 'operator watch', origin: 'operator', isBackgroundTask: false, routineMode: 'watch', withDelegate: true, expectNote: false },
+      { label: 'operator prepare', origin: 'operator', isBackgroundTask: false, routineMode: 'prepare', withDelegate: true, expectNote: false },
+      { label: 'routine act', origin: 'routine', isBackgroundTask: false, routineMode: 'act', withDelegate: true, expectNote: false },
+      { label: 'webhook act', origin: 'webhook', isBackgroundTask: false, routineMode: 'act', withDelegate: true, expectNote: false },
+      { label: 'relay act', origin: 'relay', isBackgroundTask: false, routineMode: 'act', withDelegate: true, expectNote: false },
+      { label: 'background turn', origin: 'background', isBackgroundTask: true, routineMode: 'act', withDelegate: true, expectNote: false },
+    ]
+
+    for (const tc of cases) {
+      const { db, threadId, events } = setupDb()
+      let systemPrompt = ''
+      const llm: LLM = {
+        async chat(messages) {
+          systemPrompt = String(messages[0]?.content ?? '')
+          return textTurn('ok')
+        },
+      }
+      await runTurn(
+        {
+          db,
+          llm,
+          bot: scout,
+          soul: '',
+          threadId,
+          ...(tc.origin ? { origin: tc.origin } : {}),
+          ...(tc.isBackgroundTask ? { isBackgroundTask: true } : {}),
+          ...(tc.routineMode ? { routineMode: tc.routineMode } : {}),
+          onListBackgroundTasks: () => [],
+          ...(tc.withDelegate
+            ? { onDelegateBackgroundTask: async () => ({ ok: true as const, task: sampleTask() }) }
+            : {}),
+        },
+        'hello',
+        events,
+        { persistUserMessage: false },
+      )
+      expect(systemPrompt.includes('## Background work lane'), tc.label).toBe(tc.expectNote)
+      db.close()
+    }
   })
 })

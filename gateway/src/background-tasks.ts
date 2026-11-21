@@ -23,6 +23,11 @@ export type BackgroundTaskStep = {
   at: number
 }
 
+export type BackgroundSteeringNote = {
+  note: string
+  tainted: boolean
+}
+
 export type BackgroundTaskRow = {
   id: string
   bot_id: string
@@ -36,6 +41,7 @@ export type BackgroundTaskRow = {
   summary: string
   error: string
   uses_browser: number
+  source_tainted: number
   message_id: number | null
   created_at: number
   started_at: number | null
@@ -55,6 +61,7 @@ export type BackgroundTaskView = {
   summary: string
   error: string
   usesBrowser: boolean
+  sourceTainted: boolean
   messageId: number | null
   createdAt: number
   startedAt: number | null
@@ -81,6 +88,7 @@ export type EnqueueBackgroundTaskInput = {
   threadId: string
   title: string
   instructions: string
+  sourceTainted?: boolean
 }
 
 export type EnqueueBackgroundTaskResult =
@@ -98,7 +106,7 @@ export type CancelBackgroundTaskResult =
 export type BackgroundTaskRunContext = {
   task: BackgroundTaskView
   signal: AbortSignal
-  drainSteeringNotes: () => string[]
+  drainSteeringNotes: () => BackgroundSteeringNote[]
   recordStep: (step: { tool: string; summary: string; ok?: boolean; ms?: number }) => void
   markUsesBrowser: () => void
 }
@@ -118,7 +126,7 @@ export type BackgroundTaskManagerOptions = {
 
 export type BackgroundTaskManager = {
   enqueue(input: EnqueueBackgroundTaskInput): EnqueueBackgroundTaskResult
-  steer(taskId: string, rawNote: string, opts?: { botId?: string }): SteerBackgroundTaskResult
+  steer(taskId: string, rawNote: string, opts?: { botId?: string; tainted?: boolean }): SteerBackgroundTaskResult
   cancel(taskId: string, opts?: { botId?: string }): CancelBackgroundTaskResult
   hasActive(botId?: string): boolean
   activeCount(): number
@@ -232,6 +240,7 @@ export function rowToView(row: BackgroundTaskRow): BackgroundTaskView {
     summary: row.summary ?? '',
     error: row.error ?? '',
     usesBrowser: row.uses_browser === 1,
+    sourceTainted: row.source_tainted === 1,
     messageId: row.message_id ?? null,
     createdAt: row.created_at,
     startedAt: row.started_at ?? null,
@@ -346,7 +355,7 @@ type LaneEntry = {
   id: string
   botId: string
   controller: AbortController
-  pendingNotes: string[]
+  pendingNotes: BackgroundSteeringNote[]
   started: boolean
   cancelled: boolean
   settled: boolean
@@ -381,6 +390,7 @@ export function createBackgroundTaskManager(opts: BackgroundTaskManagerOptions):
     if (!lane || lane.drainPromise) return
     const promise = Promise.resolve()
       .then(() => drainLane(botId, lane))
+      .catch(() => {})
       .finally(() => {
         if (lane.drainPromise === promise) {
           lane.drainPromise = null
@@ -399,25 +409,35 @@ export function createBackgroundTaskManager(opts: BackgroundTaskManagerOptions):
       const entry = lane.queue.shift()!
       if (entry.cancelled) {
         entry.settled = true
+        entry.pendingNotes.length = 0
         entries.delete(entry.id)
         continue
       }
 
-      const startedAt = now()
-      const startOutcome = db.transaction(() => {
-        const res = db.prepare(
-          `UPDATE background_tasks
-           SET status = 'running', started_at = ?
-           WHERE id = ? AND status = 'queued'`,
-        ).run(startedAt, entry.id)
-        if (res.changes === 0) return null
-        const updated = rowToView(getTaskRow(db, entry.id)!)
-        const patchedMessage = patchTaskMessage(db, updated)
-        return { view: updated, patchedMessage }
-      })()
+      let startOutcome: { view: BackgroundTaskView; patchedMessage: MessageRow | null } | null = null
+      try {
+        const startedAt = now()
+        startOutcome = db.transaction(() => {
+          const res = db.prepare(
+            `UPDATE background_tasks
+             SET status = 'running', started_at = ?
+             WHERE id = ? AND status = 'queued'`,
+          ).run(startedAt, entry.id)
+          if (res.changes === 0) return null
+          const updated = rowToView(getTaskRow(db, entry.id)!)
+          const patchedMessage = patchTaskMessage(db, updated)
+          return { view: updated, patchedMessage }
+        })()
+      } catch {
+        entry.settled = true
+        entry.pendingNotes.length = 0
+        entries.delete(entry.id)
+        continue
+      }
 
       if (!startOutcome) {
         entry.settled = true
+        entry.pendingNotes.length = 0
         entries.delete(entry.id)
         continue
       }
@@ -535,39 +555,44 @@ export function createBackgroundTaskManager(opts: BackgroundTaskManagerOptions):
           finalError = clampText(msg, MAX_BG_ERROR_CHARS) || 'Background task failed.'
         }
       } finally {
-        const finishedAt = now()
-        const finalizeOutcome = db.transaction(() => {
-          const existing = getTaskRow(db, entry.id)
-          if (!existing || (existing.status !== 'queued' && existing.status !== 'running')) {
-            return null
+        let finalizeOutcome: { view: BackgroundTaskView; patchedMessage: MessageRow | null } | null = null
+        try {
+          const finishedAt = now()
+          finalizeOutcome = db.transaction(() => {
+            const existing = getTaskRow(db, entry.id)
+            if (!existing || (existing.status !== 'queued' && existing.status !== 'running')) {
+              return null
+            }
+            const res = db.prepare(
+              `UPDATE background_tasks
+               SET status = ?, summary = ?, error = ?, finished_at = ?
+               WHERE id = ? AND status IN ('queued', 'running')`,
+            ).run(finalStatus, finalSummary, finalError, finishedAt, entry.id)
+            if (res.changes === 0) return null
+
+            const updated = rowToView(getTaskRow(db, entry.id)!)
+            const patchedMessage = patchTaskMessage(db, updated)
+            recordAction(db, {
+              botId: updated.botId,
+              threadId: updated.threadId,
+              trigger: 'background',
+              tool: 'background_task',
+              summary: `${finalStatus}: ${updated.title}`,
+              ok: finalStatus === 'completed' ? true : finalStatus === 'failed' ? false : null,
+              ms: updated.startedAt !== null ? Math.max(0, finishedAt - updated.startedAt) : null,
+              at: finishedAt,
+            })
+            return { view: updated, patchedMessage }
+          })()
+        } catch {
+          // Teardown or closed DB during unwinding must never strand lane.running or leak entries.
+        } finally {
+          entry.settled = true
+          entry.pendingNotes.length = 0
+          entries.delete(entry.id)
+          if (lane.running === entry) {
+            lane.running = null
           }
-          const res = db.prepare(
-            `UPDATE background_tasks
-             SET status = ?, summary = ?, error = ?, finished_at = ?
-             WHERE id = ? AND status IN ('queued', 'running')`,
-          ).run(finalStatus, finalSummary, finalError, finishedAt, entry.id)
-          if (res.changes === 0) return null
-
-          const updated = rowToView(getTaskRow(db, entry.id)!)
-          const patchedMessage = patchTaskMessage(db, updated)
-          recordAction(db, {
-            botId: updated.botId,
-            threadId: updated.threadId,
-            trigger: 'background',
-            tool: 'background_task',
-            summary: `${finalStatus}: ${updated.title}`,
-            ok: finalStatus === 'completed' ? true : finalStatus === 'failed' ? false : null,
-            ms: updated.startedAt !== null ? Math.max(0, finishedAt - updated.startedAt) : null,
-            at: finishedAt,
-          })
-          return { view: updated, patchedMessage }
-        })()
-
-        entry.settled = true
-        entry.pendingNotes.length = 0
-        entries.delete(entry.id)
-        if (lane.running === entry) {
-          lane.running = null
         }
 
         if (finalizeOutcome) {
@@ -621,11 +646,12 @@ export function createBackgroundTaskManager(opts: BackgroundTaskManagerOptions):
       }
 
       const id = generateTaskId(db)
+      const sourceTainted = input.sourceTainted === true ? 1 : 0
       db.prepare(
         `INSERT INTO background_tasks
-           (id, bot_id, thread_id, title, instructions, status, step_count, last_step, steps_json, summary, error, uses_browser, message_id, created_at, started_at, finished_at)
-         VALUES (?, ?, ?, ?, ?, 'queued', 0, '', '[]', '', '', 0, NULL, ?, NULL, NULL)`,
-      ).run(id, input.botId, input.threadId, cleanTitle, cleanInstructions, at)
+           (id, bot_id, thread_id, title, instructions, status, step_count, last_step, steps_json, summary, error, uses_browser, source_tainted, message_id, created_at, started_at, finished_at)
+         VALUES (?, ?, ?, ?, ?, 'queued', 0, '', '[]', '', '', 0, ?, NULL, ?, NULL, NULL)`,
+      ).run(id, input.botId, input.threadId, cleanTitle, cleanInstructions, sourceTainted, at)
 
       const initialView = rowToView(getTaskRow(db, id)!)
       const message = insertMessage(db, {
@@ -674,7 +700,7 @@ export function createBackgroundTaskManager(opts: BackgroundTaskManagerOptions):
     return { ok: true, task: txOutcome.view }
   }
 
-  function steer(taskId: string, rawNote: string, steerOpts?: { botId?: string }): SteerBackgroundTaskResult {
+  function steer(taskId: string, rawNote: string, steerOpts?: { botId?: string; tainted?: boolean }): SteerBackgroundTaskResult {
     const cleanNote = sanitizeSteerNote(rawNote)
     if (!cleanNote) {
       return {
@@ -697,6 +723,7 @@ export function createBackgroundTaskManager(opts: BackgroundTaskManagerOptions):
     }
 
     const at = now()
+    const tainted = steerOpts?.tainted === true
     const stepSummary = sanitizeSingleLine(cleanNote, 120)
     const steerStep: BackgroundTaskStep = {
       tool: 'steer',
@@ -717,11 +744,17 @@ export function createBackgroundTaskManager(opts: BackgroundTaskManagerOptions):
       const steps = parseSteps(current.steps_json)
       steps.push(steerStep)
       const bounded = steps.length > MAX_BG_STEPS ? steps.slice(-MAX_BG_STEPS) : steps
-      const res = db.prepare(
-        `UPDATE background_tasks
-         SET last_step = ?, steps_json = ?
-         WHERE id = ? AND status IN ('queued', 'running')`,
-      ).run(lastStep, JSON.stringify(bounded), taskId)
+      const res = tainted
+        ? db.prepare(
+            `UPDATE background_tasks
+             SET last_step = ?, steps_json = ?, source_tainted = 1
+             WHERE id = ? AND status IN ('queued', 'running')`,
+          ).run(lastStep, JSON.stringify(bounded), taskId)
+        : db.prepare(
+            `UPDATE background_tasks
+             SET last_step = ?, steps_json = ?
+             WHERE id = ? AND status IN ('queued', 'running')`,
+          ).run(lastStep, JSON.stringify(bounded), taskId)
       if (res.changes === 0) {
         return { kind: 'settled' as const, status: current.status }
       }
@@ -752,7 +785,7 @@ export function createBackgroundTaskManager(opts: BackgroundTaskManagerOptions):
 
     const entry = entries.get(taskId)
     if (entry && !entry.cancelled && !entry.settled) {
-      entry.pendingNotes.push(cleanNote)
+      entry.pendingNotes.push({ note: cleanNote, tainted })
     }
 
     broadcastUpdate(hub, txOutcome.view, txOutcome.patchedMessage)

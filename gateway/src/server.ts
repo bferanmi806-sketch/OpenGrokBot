@@ -17,6 +17,7 @@ import {
   createBackgroundTaskManager,
   listBackgroundTasks,
   reconcileStaleBackgroundTasks,
+  type BackgroundSteeringNote,
   type BackgroundTaskRunContext,
   type BackgroundTaskRunnerResult,
 } from './background-tasks.js'
@@ -656,7 +657,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     routineName?: string
     isBackgroundTask?: boolean
     historyLimit?: number
-    drainSteeringNotes?: () => string[]
+    drainSteeringNotes?: () => BackgroundSteeringNote[]
     onStepProgress?: (step: { tool: string; summary: string; ok: boolean; ms: number }) => void
     onAcquireBrowser?: (toolName: string) => { ok: true } | { ok: false; reason: string }
     onFinalText?: (text: string) => void
@@ -742,12 +743,18 @@ export function createApp(deps: AppDeps): GatewayApp {
       ...(params.onReportFiled ? { onReportFiled: params.onReportFiled } : {}),
       onListBackgroundTasks: () => listBackgroundTasks(db, { botId: bot.id, limit: 20 }),
       ...(params.includeBackgroundControls ? {
-        onDelegateBackgroundTask: async ({ title, instructions }) => {
-          const res = backgroundTasks.enqueue({ botId: bot.id, threadId, title, instructions })
+        onDelegateBackgroundTask: async ({ title, instructions, tainted }) => {
+          const res = backgroundTasks.enqueue({
+            botId: bot.id,
+            threadId,
+            title,
+            instructions,
+            sourceTainted: tainted === true,
+          })
           return res.ok ? { ok: true, task: res.task } : { ok: false, error: res.error }
         },
-        onSteerBackgroundTask: async ({ taskId, note }) => {
-          const res = backgroundTasks.steer(taskId, note, { botId: bot.id })
+        onSteerBackgroundTask: async ({ taskId, note, tainted }) => {
+          const res = backgroundTasks.steer(taskId, note, { botId: bot.id, tainted: tainted === true })
           return res.ok ? { ok: true, task: res.task } : { ok: false, error: res.error }
         },
         onCancelBackgroundTask: async ({ taskId }) => {
@@ -907,6 +914,7 @@ export function createApp(deps: AppDeps): GatewayApp {
         priority: 'background',
         trigger: 'background',
         effectiveMode: 'act',
+        ...(ctx.task.sourceTainted ? { tainted: true } : {}),
         ...(group ? { group } : {}),
         isBackgroundTask: true,
         historyLimit: 12,
@@ -1002,7 +1010,7 @@ export function createApp(deps: AppDeps): GatewayApp {
           ...(opts.quietBuffer ? { quietBuffer: true } : {}),
           ...(opts.routineId !== undefined ? { routineId: opts.routineId } : {}),
           ...(opts.routineName !== undefined ? { routineName: opts.routineName } : {}),
-          includeBackgroundControls: true,
+          includeBackgroundControls: opts.origin === 'operator' && effectiveMode === 'act',
           onAcquireBrowser: () => {
             const r = browserLeases.acquire(bot.id, fgHolder)
             if (!r.ok) return { ok: false, reason: formatBrowserConflict('foreground', r.holder) }
@@ -1962,26 +1970,37 @@ export function createApp(deps: AppDeps): GatewayApp {
       toolCount: s.tools.length,
       granted: botMcpGrantSet.has(s.id),
     }))
-    const backgroundTaskList = listBackgroundTasks(db, { botId, limit: 20 })
     const base = {
       botId, routines, usage, rules, memory, skills, actions, connectors, mcpServers,
-      backgroundTasks: backgroundTaskList,
       workflowRecording: workflowRecordings.has(botId), workflowDraft: workflowDrafts.has(botId),
     }
-    if (!pool) return c.json({ ...base, running: false, vncUrl: null })
+    if (!pool) {
+      return c.json({
+        ...base,
+        backgroundTasks: listBackgroundTasks(db, { botId, limit: 20 }),
+        running: false,
+        vncUrl: null,
+      })
+    }
     try {
       const computer = await pool.get(botId)
       const vncUrl = computer.screen ? screenPagePath(botId, computer.screen.password) : null
       // 两种屏幕：容器给 noVNC 页面，本机给浏览器截屏流；面板按 kind 选怎么看
       const screen = vncUrl ? { kind: 'vnc', url: vncUrl } : computer.screencast ? { kind: 'cdp', url: screencastPath(botId) } : null
       return c.json({
-        ...base, running: true, kind: computer.kind, vncUrl, screen, window: computer.windowShown?.() ?? false,
+        ...base,
+        backgroundTasks: listBackgroundTasks(db, { botId, limit: 20 }),
+        running: true, kind: computer.kind, vncUrl, screen, window: computer.windowShown?.() ?? false,
         shell: shellView(botById(botId)!),
       })
     } catch (err) {
       // 面板要显示"为什么没屏幕"——白屏是最难查的故障
       const { error, code, params } = errorBody(err)
-      return c.json({ ...base, running: false, vncUrl: null, error, ...(code ? { errorCode: code } : {}), ...(params ? { errorParams: params } : {}) })
+      return c.json({
+        ...base,
+        backgroundTasks: listBackgroundTasks(db, { botId, limit: 20 }),
+        running: false, vncUrl: null, error, ...(code ? { errorCode: code } : {}), ...(params ? { errorParams: params } : {}),
+      })
     }
   })
 
@@ -2224,6 +2243,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       return c.json({ error: problem.message }, problem.status)
     }
 
+    const threadId = ensureDmThread(db, botId)
     const releaseTurns = turns.hold(botId)
     if (!releaseTurns) return c.json({ error: 'the teammate is busy' }, 409)
     const runHolder: BrowserLeaseHolder = { kind: 'foreground', token: randomUUID(), label: 'workflow run' }
@@ -2238,21 +2258,28 @@ export function createApp(deps: AppDeps): GatewayApp {
       }
       return c.json({ error: 'the teammate is busy' }, 409)
     }
-    const active: ActiveWorkflowRun = {
-      runId: randomUUID(),
-      workflowId: c.req.param('workflowId'),
-      botId,
-      threadId: ensureDmThread(db, botId),
-      trace,
-      bindings,
-      rulesAllowed,
-      releaseTurns,
-      releaseBrowser: () => { browserLeases.release(botId, runHolder) },
-      controller: new AbortController(),
-      phase: { kind: 'running' },
-      released: false,
+    let active: ActiveWorkflowRun
+    try {
+      active = {
+        runId: randomUUID(),
+        workflowId: c.req.param('workflowId'),
+        botId,
+        threadId,
+        trace,
+        bindings,
+        rulesAllowed,
+        releaseTurns,
+        releaseBrowser: () => { browserLeases.release(botId, runHolder) },
+        controller: new AbortController(),
+        phase: { kind: 'running' },
+        released: false,
+      }
+      workflowRuns.set(botId, active)
+    } catch (err) {
+      browserLeases.release(botId, runHolder)
+      releaseTurns()
+      throw err
     }
-    workflowRuns.set(botId, active)
     publishPresence(botId)
     void continueWorkflowRun(active)
     return c.json({ runId: active.runId, status: 'running' }, 202)

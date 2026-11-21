@@ -429,6 +429,7 @@ const MIGRATIONS: Migration[] = [
         summary TEXT NOT NULL DEFAULT '',
         error TEXT NOT NULL DEFAULT '',
         uses_browser INTEGER NOT NULL DEFAULT 0,
+        source_tainted INTEGER NOT NULL DEFAULT 0,
         message_id INTEGER,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
