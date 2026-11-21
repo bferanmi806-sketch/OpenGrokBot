@@ -883,4 +883,53 @@ describe('App', () => {
     })
     await waitFor(() => expect(calls.filter((u) => u === '/api/bots/researcher/computer').length).toBeGreaterThan(before))
   })
+
+  it('preserves mid-fetch in-place WS updates over stale fetched snapshots', async () => {
+    let releaseFetch!: (rows: unknown[]) => void
+    let fetchCount = 0
+    const pendingCard = {
+      id: 5,
+      thread_id: 'dm:researcher',
+      sender: 'researcher',
+      kind: 'rule_proposal',
+      content: '',
+      payload: {
+        proposalId: 99,
+        rule: 'Always check wiki first',
+        reason: 'Suggested by teammate',
+        source: 'agent',
+        sourceTainted: false,
+        status: 'pending',
+      },
+      created_at: 5,
+    }
+    const acceptedCard = {
+      ...pendingCard,
+      payload: { ...pendingCard.payload, status: 'accepted', resolvedAt: 999 },
+    }
+    mockGateway({
+      messages: () => {
+        fetchCount += 1
+        if (fetchCount === 1) return [pendingCard]
+        return new Promise((resolve) => { releaseFetch = resolve })
+      },
+    })
+
+    render(<App />)
+    const socket = await ready()
+    expect(await screen.findByRole('button', { name: 'Save to MEMORY.md' })).toBeInTheDocument()
+
+    // Trigger a reconnect resync so fetchMessages is in flight while an in-place WS update arrives
+    await act(async () => { socket.emit({ type: 'hello', statuses: {} }) })
+    await waitFor(() => expect(fetchCount).toBe(2))
+    await act(async () => {
+      socket.emit({ type: 'message', threadId: 'dm:researcher', message: acceptedCard })
+    })
+    expect(await screen.findByText('Saved to MEMORY.md')).toBeInTheDocument()
+
+    // Now the stale snapshot (id: 5 still pending) resolves — must NOT overwrite the accepted WS update!
+    await act(async () => { releaseFetch([pendingCard]) })
+    expect(screen.getByText('Saved to MEMORY.md')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save to MEMORY.md' })).not.toBeInTheDocument()
+  })
 })

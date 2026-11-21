@@ -205,10 +205,11 @@ function Workspace({
     try {
       const fetched = await fetchMessages(thread)
       if (seq !== msgFetchSeq.current || threadIdRef.current !== thread) return
-      const live = liveDuringFetch.current
+      const liveInThread = new Map<number, Message>()
+      for (const [id, m] of liveDuringFetch.current) {
+        if (m.thread_id === thread) liveInThread.set(id, m)
+      }
       setMessages((prev) => {
-        const liveInThread = new Map<number, Message>()
-        for (const [id, m] of live) if (m.thread_id === thread) liveInThread.set(id, m)
         const merged = fetched.map((m) => liveInThread.get(m.id) ?? m)
         const known = new Set(merged.map((m) => m.id))
         const maxFetchedId = fetched.reduce((mx, m) => Math.max(mx, m.id), 0)
