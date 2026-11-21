@@ -23,7 +23,7 @@ import { errorText } from './i18n/describe'
 import { applyHello, applyStatus, clearDone } from './presence'
 import { applyTheme, hasStoredTheme, readStoredTheme, resolveTheme, systemTheme, writeStoredTheme } from './theme'
 import type {
-  BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, SetupInfo, ThemeSetting,
+  BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, RuleProposalPayload, SetupInfo, ThemeSetting,
 } from './types'
 
 const EMPTY_CONNECTORS: ConnectorsSnapshot = {
@@ -207,14 +207,22 @@ function Workspace({
       if (seq !== msgFetchSeq.current || threadIdRef.current !== thread) return
       const live = liveDuringFetch.current
       setMessages((prev) => {
-        const recent = new Map<number, Message>()
-        for (const m of prev) if (m.thread_id === thread) recent.set(m.id, m)
-        for (const [id, m] of live) if (m.thread_id === thread) recent.set(id, m)
-        const merged = fetched.map((m) => recent.get(m.id) ?? m)
+        const liveInThread = new Map<number, Message>()
+        for (const [id, m] of live) if (m.thread_id === thread) liveInThread.set(id, m)
+        const merged = fetched.map((m) => liveInThread.get(m.id) ?? m)
         const known = new Set(merged.map((m) => m.id))
         const maxFetchedId = fetched.reduce((mx, m) => Math.max(mx, m.id), 0)
-        for (const m of recent.values()) {
-          if (!known.has(m.id) && (live.has(m.id) || m.id > maxFetchedId)) merged.push(m)
+        for (const m of liveInThread.values()) {
+          if (!known.has(m.id)) {
+            merged.push(m)
+            known.add(m.id)
+          }
+        }
+        for (const m of prev) {
+          if (m.thread_id === thread && !known.has(m.id) && m.id > maxFetchedId) {
+            merged.push(m)
+            known.add(m.id)
+          }
         }
         return merged.sort((a, b) => a.id - b.id)
       })
@@ -373,8 +381,8 @@ function Workspace({
       if (['approval_request', 'approval_resolved', 'question'].includes(e.message.kind)) {
         void refreshConversations().catch(guard)
       }
-      // 面板开着时，记忆规则变动、规矩提议、放行规则落地或例行任务改动都实时刷新
-      if (panelFor.current && ['memory_updated', 'approval_resolved', 'activity', 'rule_proposal'].includes(e.message.kind)) {
+      // 面板开着时，记忆规则变动、规矩提议、晨报汇总、放行规则落地或例行任务改动都实时刷新
+      if (panelFor.current && ['memory_updated', 'approval_resolved', 'activity', 'rule_proposal', 'quiet_digest'].includes(e.message.kind)) {
         void loadPanel(panelFor.current)
       }
       if (e.threadId === threadIdRef.current) {
@@ -450,17 +458,46 @@ function Workspace({
   const onResolveRuleProposal = useCallback(
     async (proposalId: number, decision: 'accept' | 'dismiss', rule?: string) => {
       try {
-        await resolveRuleProposal(proposalId, decision, rule)
+        const res = await resolveRuleProposal(proposalId, decision, rule)
+        setMessages((ms) => {
+          let changed = false
+          const next = ms.map((m) => {
+            if (m.kind !== 'rule_proposal') return m
+            const payload = m.payload as RuleProposalPayload | null
+            if (!payload || payload.proposalId !== proposalId || payload.status !== 'pending') return m
+            changed = true
+            const originalRule = payload.rule
+            const updated: Message = {
+              ...m,
+              payload: {
+                ...payload,
+                status: res.proposal.status,
+                rule: res.proposal.rule,
+                edited: res.proposal.status === 'accepted' && res.proposal.rule !== originalRule,
+                resolvedAt: res.proposal.resolvedAt ?? Date.now(),
+              },
+            }
+            if (inFlightFetches.current > 0) liveDuringFetch.current.set(updated.id, updated)
+            return updated
+          })
+          return changed ? next : ms
+        })
       } catch (err: unknown) {
         if (err instanceof SignedOut) {
           setSignedOut(true)
           return
         }
+        if (err instanceof ApiError && err.status === 409) {
+          const current = threadIdRef.current
+          if (current) void loadMessages(current).catch(guard)
+          else void resync()
+          throw err
+        }
         guard(err)
         throw err
       }
     },
-    [guard],
+    [guard, loadMessages, resync],
   )
 
   const onForgetRule = (rule: string) => {

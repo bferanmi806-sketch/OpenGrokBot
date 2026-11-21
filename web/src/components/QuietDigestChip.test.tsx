@@ -122,4 +122,26 @@ describe('QuietDigestChip', () => {
     expect(screen.getByText('备料')).toBeInTheDocument()
     expect(screen.getByText('值守')).toBeInTheDocument()
   })
+
+  it('handles missing or malformed items without crashing and omits empty items container', () => {
+    const malformed = {
+      windowStart: '22:00',
+      windowEnd: '08:00',
+      itemCount: 0,
+      items: undefined,
+    } as unknown as QuietDigestPayload
+
+    const { container, rerender } = render(<QuietDigestChip payload={malformed} />)
+    expect(screen.getByText('Morning digest · 0 updates')).toBeInTheDocument()
+    expect(screen.getByText('Held during Quiet Hours (22:00–08:00)')).toBeInTheDocument()
+    expect(container.querySelector('.quiet-digest-items')).toBeNull()
+
+    rerender(
+      <QuietDigestChip
+        payload={{ ...malformed, itemCount: 2, items: null as unknown as QuietDigestPayload['items'] }}
+      />,
+    )
+    expect(screen.getByText('Morning digest · 2 updates')).toBeInTheDocument()
+    expect(container.querySelector('.quiet-digest-items')).toBeNull()
+  })
 })

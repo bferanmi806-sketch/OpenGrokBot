@@ -70,16 +70,28 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
   const [saving, setSaving] = useState(false)
   const [downloading, setDownloading] = useState(false)
 
+  const mountedRef = useRef(true)
+  const digestReqSeqRef = useRef(0)
+  const deliveringRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
   useEffect(() => {
     let live = true
+    const digestSeq = ++digestReqSeqRef.current
     const api = desktopApi()
     const desktopPromise: Promise<DesktopInfo | null> = api
       ? Promise.resolve(api.info()).catch(() => null)
       : Promise.resolve(null)
-    const digestPromise: Promise<QuietDigestSummary | null> = fetchQuietDigest().catch((err: unknown) => {
-      if (err instanceof SignedOut) throw err
-      return null
-    })
+    const digestPromise: Promise<{ ok: true; value: QuietDigestSummary } | { ok: false; notFound: boolean }> = fetchQuietDigest()
+      .then((value) => ({ ok: true as const, value }))
+      .catch((err: unknown) => {
+        if (err instanceof SignedOut) throw err
+        return { ok: false as const, notFound: err instanceof ApiError && err.status === 404 }
+      })
     Promise.all([fetchSettings(), fetchSetup(), fetchAbout(), desktopPromise, digestPromise])
       .then(([s, su, a, d, qd]) => {
         if (!live) return
@@ -90,7 +102,10 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
         setSetup(su)
         setAbout(a)
         setDesktop(d)
-        setQuietDigest(qd)
+        if (digestSeq === digestReqSeqRef.current) {
+          if (qd.ok) setQuietDigest(qd.value)
+          else if (qd.notFound) setQuietDigest(null)
+        }
       })
       .catch((err: unknown) => {
         if (err instanceof SignedOut) onSignedOut()
@@ -104,38 +119,71 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
     if (prevDigestTick.current === quietDigestTick) return
     prevDigestTick.current = quietDigestTick
     let live = true
+    const seq = ++digestReqSeqRef.current
     void fetchQuietDigest()
-      .then((qd) => { if (live) setQuietDigest(qd) })
+      .then((qd) => {
+        if (!live || seq !== digestReqSeqRef.current) return
+        setQuietDigest(qd)
+        if (qd.pendingCount > 0) setDeliverMessage(null)
+      })
       .catch((err: unknown) => {
         if (err instanceof SignedOut) onSignedOut()
-        else if (live) setQuietDigest(null)
+        else if (live && seq === digestReqSeqRef.current && err instanceof ApiError && err.status === 404) {
+          setQuietDigest(null)
+        }
       })
     return () => { live = false }
   }, [quietDigestTick, onSignedOut])
 
   const refreshQuietDigest = async () => {
+    const seq = ++digestReqSeqRef.current
     try {
-      setQuietDigest(await fetchQuietDigest())
+      const qd = await fetchQuietDigest()
+      if (!mountedRef.current || seq !== digestReqSeqRef.current) return
+      setQuietDigest(qd)
     } catch (err: unknown) {
       if (err instanceof SignedOut) onSignedOut()
+      else if (mountedRef.current && seq === digestReqSeqRef.current && err instanceof ApiError && err.status === 404) {
+        setQuietDigest(null)
+      }
     }
   }
 
   const deliverNow = async () => {
+    if (delivering || saving || deliveringRef.current) return
+    deliveringRef.current = true
     setDelivering(true)
+    setErrors([])
     setDeliverMessage(null)
     setDeliverError(null)
     try {
       const res = await flushQuietDigest()
-      setDeliverMessage(t('settings.quietHours.delivered', { count: res.flushed }))
+      if (!mountedRef.current) return
+      setDeliverMessage(
+        res.flushed === 1
+          ? t('settings.quietHours.deliveredOne')
+          : t('settings.quietHours.delivered', { count: res.flushed }),
+      )
       await refreshQuietDigest()
     } catch (err: unknown) {
       if (err instanceof SignedOut) { onSignedOut(); return }
+      if (!mountedRef.current) return
       const msg = err instanceof ApiError ? errorText(t, err).trim() : ''
       setDeliverError(msg || t('settings.quietHours.deliverFailed'))
     } finally {
-      setDelivering(false)
+      deliveringRef.current = false
+      if (mountedRef.current) setDelivering(false)
     }
+  }
+
+  const clearQuietFeedback = () => {
+    setErrors((prev) => (
+      prev.some((x) => x.key === 'quietHoursStart' || x.key === 'quietHoursEnd')
+        ? prev.filter((x) => x.key !== 'quietHoursStart' && x.key !== 'quietHoursEnd')
+        : prev
+    ))
+    setDeliverMessage(null)
+    setDeliverError(null)
   }
 
   const save = async (patch: Record<string, unknown>) => {
@@ -298,7 +346,10 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
                         type="time"
                         value={quietStart}
                         disabled={saving}
-                        onChange={(e) => setQuietStart(e.target.value)}
+                        onChange={(e) => {
+                          setQuietStart(e.target.value)
+                          clearQuietFeedback()
+                        }}
                       />
                     </label>
                     <label className="settings-quiet-time">
@@ -307,7 +358,10 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
                         type="time"
                         value={quietEnd}
                         disabled={saving}
-                        onChange={(e) => setQuietEnd(e.target.value)}
+                        onChange={(e) => {
+                          setQuietEnd(e.target.value)
+                          clearQuietFeedback()
+                        }}
                       />
                     </label>
                     <div className="settings-buttons settings-quiet-save">

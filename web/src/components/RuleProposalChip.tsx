@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { ApiError } from '../api'
 import { useT } from '../i18n'
 import { errorText } from '../i18n/describe'
@@ -7,7 +7,15 @@ import type { RuleProposalPayload } from '../types'
 export const MAX_RULE_CHARS = 300
 
 function normalizeRuleDraft(raw: string): string {
-  return raw.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim()
+  let clean = raw
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  while (/^-\s*/.test(clean)) {
+    clean = clean.replace(/^-+\s*/, '').trim()
+  }
+  return clean
 }
 
 export function RuleProposalChip({
@@ -19,19 +27,27 @@ export function RuleProposalChip({
 }) {
   const t = useT()
   const inputId = useId()
+  const inFlightRef = useRef(false)
+  const activeIdRef = useRef(payload.proposalId)
+  activeIdRef.current = payload.proposalId
   const [draft, setDraft] = useState(payload.rule)
   const [busy, setBusy] = useState<'accept' | 'dismiss' | null>(null)
+  const [settledLocal, setSettledLocal] = useState<'accepted' | 'dismissed' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    inFlightRef.current = false
     setDraft(payload.rule)
     setBusy(null)
+    setSettledLocal(null)
     setError(null)
   }, [payload.proposalId])
 
   useEffect(() => {
     if (payload.status !== 'pending') {
+      inFlightRef.current = false
       setBusy(null)
+      setSettledLocal(null)
       setError(null)
     }
   }, [payload.status])
@@ -65,6 +81,7 @@ export function RuleProposalChip({
 
   const normalized = normalizeRuleDraft(draft)
   const overLimit = normalized.length > MAX_RULE_CHARS
+  const locked = busy !== null || settledLocal !== null
 
   const formatFailure = (err: unknown): string => {
     if (err instanceof ApiError) {
@@ -75,7 +92,7 @@ export function RuleProposalChip({
   }
 
   const handleAccept = async () => {
-    if (busy !== null) return
+    if (inFlightRef.current || locked) return
     if (!normalized) {
       setError(t('ruleProposal.emptyError'))
       return
@@ -85,27 +102,43 @@ export function RuleProposalChip({
       return
     }
     if (!onResolve) return
+    const proposalId = payload.proposalId
+    inFlightRef.current = true
     setError(null)
     setBusy('accept')
     try {
-      await onResolve(payload.proposalId, 'accept', normalized)
+      await onResolve(proposalId, 'accept', normalized)
+      if (activeIdRef.current === proposalId) {
+        setSettledLocal('accepted')
+      }
     } catch (err: unknown) {
-      setError(formatFailure(err))
-    } finally {
-      setBusy(null)
+      if (activeIdRef.current === proposalId) {
+        inFlightRef.current = false
+        setBusy(null)
+        setSettledLocal(null)
+        setError(formatFailure(err))
+      }
     }
   }
 
   const handleDismiss = async () => {
-    if (busy !== null || !onResolve) return
+    if (inFlightRef.current || locked || !onResolve) return
+    const proposalId = payload.proposalId
+    inFlightRef.current = true
     setError(null)
     setBusy('dismiss')
     try {
-      await onResolve(payload.proposalId, 'dismiss')
+      await onResolve(proposalId, 'dismiss')
+      if (activeIdRef.current === proposalId) {
+        setSettledLocal('dismissed')
+      }
     } catch (err: unknown) {
-      setError(formatFailure(err))
-    } finally {
-      setBusy(null)
+      if (activeIdRef.current === proposalId) {
+        inFlightRef.current = false
+        setBusy(null)
+        setSettledLocal(null)
+        setError(formatFailure(err))
+      }
     }
   }
 
@@ -138,7 +171,7 @@ export function RuleProposalChip({
           rows={2}
           value={draft}
           placeholder={t('ruleProposal.rulePlaceholder')}
-          disabled={busy !== null}
+          disabled={locked}
           onChange={(e) => {
             setDraft(e.target.value)
             if (error) setError(null)
@@ -152,18 +185,18 @@ export function RuleProposalChip({
         <button
           type="button"
           className="rule-proposal-accept"
-          disabled={busy !== null}
+          disabled={locked || !onResolve}
           onClick={() => void handleAccept()}
         >
-          {busy === 'accept' ? t('ruleProposal.saving') : t('ruleProposal.accept')}
+          {busy === 'accept' || settledLocal === 'accepted' ? t('ruleProposal.saving') : t('ruleProposal.accept')}
         </button>
         <button
           type="button"
           className="rule-proposal-dismiss"
-          disabled={busy !== null}
+          disabled={locked || !onResolve}
           onClick={() => void handleDismiss()}
         >
-          {busy === 'dismiss' ? t('ruleProposal.dismissing') : t('ruleProposal.dismiss')}
+          {busy === 'dismiss' || settledLocal === 'dismissed' ? t('ruleProposal.dismissing') : t('ruleProposal.dismiss')}
         </button>
       </div>
 

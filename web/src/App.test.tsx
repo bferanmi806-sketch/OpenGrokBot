@@ -39,6 +39,8 @@ function mockGateway(opts: {
   bots?: unknown[]
   /** /api/wiki/* 的回答 */
   wiki?: (url: string, init?: RequestInit) => unknown | Promise<unknown>
+  /** POST /api/rule-proposals/:id 的回答 */
+  resolveRuleProposal?: (url: string, body: Record<string, unknown>) => { status?: number; body: unknown }
 } = {}) {
   const calls: string[] = []
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -84,6 +86,11 @@ function mockGateway(opts: {
     }
     if (url === '/api/settings' && opts.language !== undefined) {
       return opts.session === 401 ? json({ error: 'sign in' }, 401) : json({ values: { language: opts.language } })
+    }
+    if (url.startsWith('/api/rule-proposals/') && init?.method === 'POST' && opts.resolveRuleProposal) {
+      const sent = init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {}
+      const reply = opts.resolveRuleProposal(url, sent)
+      return json(reply.body, reply.status ?? 200)
     }
     if (url.startsWith('/api/threads/')) return json(opts.messages ? await opts.messages(url) : [])
     if (url.includes('/computer')) {
@@ -756,5 +763,124 @@ describe('App', () => {
     expect(screen.getByText('v2 · Updated by Scout')).toBeInTheDocument()
     expect(calls.filter((u) => u === '/api/wiki?limit=200').length).toBeGreaterThan(listCallsBefore)
     expect(calls.filter((u) => u === '/api/wiki/client/acme').length).toBeGreaterThan(pageCallsBefore)
+  })
+
+  it('patches rule_proposal immediately on 200 without waiting for WS and resyncs stale pending cards on 409', async () => {
+    let serverMessages = [
+      {
+        id: 20,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'rule_proposal',
+        content: '',
+        payload: {
+          proposalId: 41,
+          rule: 'Do not email bob@acme.com',
+          reason: 'Discarded twice',
+          source: 'discard_pattern',
+          sourceTainted: false,
+          status: 'pending',
+        },
+        created_at: 20,
+      },
+      {
+        id: 21,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'rule_proposal',
+        content: '',
+        payload: {
+          proposalId: 42,
+          rule: 'Never post to #general',
+          reason: 'Suggested by teammate',
+          source: 'agent',
+          sourceTainted: false,
+          status: 'pending',
+        },
+        created_at: 21,
+      },
+    ]
+
+    mockGateway({
+      messages: () => serverMessages,
+      resolveRuleProposal: (url, body) => {
+        if (url === '/api/rule-proposals/41') {
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              proposal: {
+                id: 41,
+                botId: 'researcher',
+                threadId: 'dm:researcher',
+                rule: String(body.rule ?? 'Do not email bob@acme.com'),
+                reason: 'Discarded twice',
+                source: 'discard_pattern',
+                sourceTainted: false,
+                status: 'accepted',
+                messageId: 20,
+                createdAt: 20,
+                resolvedAt: 500,
+              },
+              memoryUpdated: true,
+            },
+          }
+        }
+        // Simulate proposal 42 already resolved in another tab -> 409 settled
+        serverMessages = serverMessages.map((m) => (
+          m.id === 21
+            ? { ...m, payload: { ...m.payload, status: 'dismissed', resolvedAt: 600 } }
+            : m
+        ))
+        return { status: 409, body: { error: 'rule proposal already resolved', code: 'settled' } }
+      },
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    await ready()
+
+    // Edit proposal 41 and accept -> flips immediately even with no WS event
+    const inputs = await screen.findAllByLabelText('Standing rule (editable)')
+    await user.clear(inputs[0]!)
+    await user.type(inputs[0]!, 'Ask before emailing bob@acme.com')
+    const saveBtns = screen.getAllByRole('button', { name: 'Save to MEMORY.md' })
+    await user.click(saveBtns[0]!)
+
+    expect(await screen.findByText('Saved to MEMORY.md · edited')).toBeInTheDocument()
+    expect(screen.getByText('Ask before emailing bob@acme.com')).toBeInTheDocument()
+
+    // Proposal 42 returns 409 settled -> triggers thread refresh so stale pending card flips to dismissed
+    await user.click(screen.getByRole('button', { name: 'Save to MEMORY.md' }))
+    expect(await screen.findByText('Rule proposal dismissed')).toBeInTheDocument()
+  })
+
+  it('refreshes an open computer panel when a quiet_digest message arrives over WebSocket', async () => {
+    const calls = mockGateway({
+      computer: { botId: 'researcher', running: false, vncUrl: null, routines: [] },
+    })
+    render(<App />)
+    const socket = await ready()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open its computer' }))
+    expect(await screen.findByText("Scout's computer")).toBeInTheDocument()
+    const before = calls.filter((u) => u === '/api/bots/researcher/computer').length
+
+    await act(async () => {
+      socket.emit({
+        type: 'message',
+        threadId: 'dm:researcher',
+        message: {
+          id: 30,
+          thread_id: 'dm:researcher',
+          sender: 'researcher',
+          kind: 'quiet_digest',
+          content: '',
+          payload: { windowStart: '22:00', windowEnd: '08:00', itemCount: 1, items: [] },
+          created_at: 30,
+        },
+      })
+    })
+    await waitFor(() => expect(calls.filter((u) => u === '/api/bots/researcher/computer').length).toBeGreaterThan(before))
   })
 })

@@ -418,11 +418,17 @@ describe('the Chinese dictionary', () => {
       'settings.quietHours.pendingNone',
       'settings.quietHours.deliverNow',
       'settings.quietHours.delivering',
+      'settings.quietHours.deliveredOne',
       'settings.quietHours.delivered',
       'settings.quietHours.deliverFailed',
       'sidebar.preview.ruleProposal',
       'sidebar.preview.quietDigestOne',
       'sidebar.preview.quietDigestMany',
+      'error.invalid_rule',
+      'error.settled',
+      'error.gone',
+      'error.memory_unavailable',
+      'error.invalid_decision',
     ]
     for (const key of requiredProactiveKeys) {
       expect(en[key]).toBeTruthy()
@@ -433,6 +439,9 @@ describe('the Chinese dictionary', () => {
     expect(zhCN['routine.createdPrepare']).toBe('已创建备料任务')
     expect(en['panel.prepareTag']).toBe('prepare')
     expect(zhCN['panel.prepareTag']).toBe('备料')
+    expect(zhCN['settings.quietHours.hint']).toContain('值守（watch）')
+    expect(en['settings.quietHours.deliveredOne']).toBe('Delivered 1 buffered update.')
+    expect(zhCN['settings.quietHours.deliveredOne']).toBe('已投递 1 条暂存更新。')
     expect(en['ruleProposal.taintedBadge']).toBe('External source — review carefully')
     expect(zhCN['ruleProposal.taintedBadge']).toBe('来自外部内容，请仔细核对')
     expect(translate('en', 'ruleProposal.tooLongError', { max: 300 })).toBe('Rule must be 300 characters or fewer.')

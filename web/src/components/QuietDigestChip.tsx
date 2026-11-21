@@ -39,7 +39,8 @@ function DigestEntryBody({ entry }: { entry: QuietDigestEntry }) {
 
 export function QuietDigestChip({ payload }: { payload: QuietDigestPayload }) {
   const t = useT()
-  const count = payload.itemCount || payload.items.length
+  const items = Array.isArray(payload.items) ? payload.items : []
+  const count = payload.itemCount || items.length
   const title = count === 1
     ? t('quietDigest.titleOne')
     : t('quietDigest.titleMany', { count })
@@ -58,36 +59,38 @@ export function QuietDigestChip({ payload }: { payload: QuietDigestPayload }) {
         </div>
       </div>
 
-      <div className="quiet-digest-items">
-        {payload.items.map((entry) => {
-          const time = formatDigestTime(entry.createdAt, t.locale)
-          const modeLabel = entry.routineMode === 'watch'
-            ? t('panel.watchTag')
-            : entry.routineMode === 'prepare'
-              ? t('panel.prepareTag')
-              : null
-          return (
-            <div className="quiet-digest-item" key={entry.id}>
-              <div className="quiet-digest-item-meta">
-                <span className="quiet-digest-item-name">
-                  {entry.routineName || t('quietDigest.routineFallback')}
-                </span>
-                {modeLabel ? (
-                  <span className={`quiet-digest-mode ${entry.routineMode}`}>{modeLabel}</span>
-                ) : null}
-                {time ? (
-                  <time className="quiet-digest-time" dateTime={new Date(entry.createdAt).toISOString()}>
-                    {time}
-                  </time>
-                ) : null}
+      {items.length > 0 ? (
+        <div className="quiet-digest-items">
+          {items.map((entry) => {
+            const time = formatDigestTime(entry.createdAt, t.locale)
+            const modeLabel = entry.routineMode === 'watch'
+              ? t('panel.watchTag')
+              : entry.routineMode === 'prepare'
+                ? t('panel.prepareTag')
+                : null
+            return (
+              <div className="quiet-digest-item" key={entry.id}>
+                <div className="quiet-digest-item-meta">
+                  <span className="quiet-digest-item-name">
+                    {entry.routineName || t('quietDigest.routineFallback')}
+                  </span>
+                  {modeLabel ? (
+                    <span className={`quiet-digest-mode ${entry.routineMode}`}>{modeLabel}</span>
+                  ) : null}
+                  {time ? (
+                    <time className="quiet-digest-time" dateTime={new Date(entry.createdAt).toISOString()}>
+                      {time}
+                    </time>
+                  ) : null}
+                </div>
+                <div className="quiet-digest-item-body">
+                  <DigestEntryBody entry={entry} />
+                </div>
               </div>
-              <div className="quiet-digest-item-body">
-                <DigestEntryBody entry={entry} />
-              </div>
-            </div>
-          )
-        })}
-      </div>
+            )
+          })}
+        </div>
+      ) : null}
     </div>
   )
 }
