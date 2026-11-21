@@ -1,6 +1,6 @@
 import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
 import type {
-  ActivityPayload, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, Conversation, LoginPayload, MemoryPayload,
+  ActivityPayload, ApprovalEditInput, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, Conversation, LoginPayload, MemoryPayload,
   Message, QuestionPayload, ReportPayload, RoutinePayload, RuleDuration, ScreenshotPayload, WebhookPayload,
 } from '../types'
 import { ApiError } from '../api'
@@ -66,7 +66,7 @@ const ThreadMessageRow = memo(function ThreadMessageRow({
   sameSpeakerNext: boolean
   speaker: { name: string; emoji: string } | undefined
   t: T
-  onDecide: (approvalId: number, decision: 'approve' | 'discard', remember?: RuleDuration, items?: number[]) => void | Promise<void>
+  onDecide: (approvalId: number, decision: 'approve' | 'discard', remember?: RuleDuration, items?: number[], edit?: ApprovalEditInput) => void | Promise<void>
   onAnswer?: ((messageId: number, choices: string[]) => void | Promise<void>) | undefined
   onOpenScreen?: (() => void) | undefined
   onPreview: (img: LightboxImage) => void
@@ -113,7 +113,8 @@ const ThreadMessageRow = memo(function ThreadMessageRow({
         const p = m.payload as ApprovalResolvedPayload
         return (
           <div className="decision">
-            {p.decision === 'approve' ? `✓ ${t('thread.approved')}` : `✕ ${t('thread.discarded')}`} · {p.action}
+            {p.decision === 'approve' ? `✓ ${t('thread.approved')}` : `✕ ${t('thread.discarded')}`}
+            {p.edited ? ` · ${t('thread.editedBadge')}` : ''} · {p.action}
             {p.count ? ` · ${t('thread.itemsOf', { approved: p.count.approved, of: p.count.of })}` : ''}
             {p.remembered ? ` · ${t('thread.ruleSaved', { scope: `${p.remembered.kind} → ${p.remembered.target}` })}` : ''}
           </div>
@@ -182,7 +183,7 @@ export function Thread({
    * 回一个 Promise 的话，它失败了就把字和文件放回输入框，并说明没发出去。
    */
   onSend: (text: string, mentions?: string[], attachments?: string[]) => void | Promise<void>
-  onDecide: (approvalId: number, decision: 'approve' | 'discard', remember?: RuleDuration, items?: number[]) => void | Promise<void>
+  onDecide: (approvalId: number, decision: 'approve' | 'discard', remember?: RuleDuration, items?: number[], edit?: ApprovalEditInput) => void | Promise<void>
   /** 问题卡片上点了选项 */
   onAnswer?: (messageId: number, choices: string[]) => void | Promise<void>
   roster: Record<string, { name: string; emoji: string }>

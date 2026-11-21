@@ -1,6 +1,8 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../api'
+import type { ApprovalPayload } from '../types'
 import { ApprovalChip } from './ApprovalChip'
 
 const pending = { approvalId: 7, action: 'send the 4 queued drafts', detail: 'to the Globex thread', status: 'pending' as const }
@@ -171,5 +173,531 @@ describe('ApprovalChip', () => {
     expect(screen.getByText('Allowed by your rule')).toBeInTheDocument()
     expect(screen.getByText('✓ Executed')).toBeInTheDocument()
     expect(screen.queryByRole('button')).toBeNull()
+  })
+
+  it('omits Edit when payload.editable is absent and hides Always allow while editing', async () => {
+    const { rerender } = render(<ApprovalChip payload={pending} onDecide={() => {}} />)
+    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull()
+
+    const editablePayload: ApprovalPayload = {
+      ...pending,
+      kind: 'email',
+      target: 'bob@acme.com',
+      canRemember: true,
+      editable: {
+        kind: 'connector',
+        tool: 'mail_send',
+        accountLabel: 'work@acme.com',
+        to: ['bob@acme.com'],
+        cc: [],
+        bcc: [],
+        subject: 'Status update',
+        body: 'All good.',
+      },
+    }
+    rerender(<ApprovalChip payload={editablePayload} onDecide={() => {}} />)
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Always allow…' })).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.queryByRole('button', { name: 'Always allow…' })).toBeNull()
+  })
+
+  it('edits, resets, cancels, validates, and submits a mail_send approval', async () => {
+    const onDecide = vi.fn()
+    const payload: ApprovalPayload = {
+      approvalId: 11,
+      action: 'Send email via work@acme.com to bob@acme.com',
+      detail: 'To: bob@acme.com\nSubject: Q1 Report\n\nInitial body',
+      status: 'pending',
+      editable: {
+        kind: 'connector',
+        tool: 'mail_send',
+        accountLabel: 'work@acme.com',
+        to: ['bob@acme.com'],
+        cc: ['carol@acme.com'],
+        bcc: [],
+        subject: 'Q1 Report',
+        body: 'Initial body',
+      },
+    }
+    render(<ApprovalChip payload={payload} onDecide={onDecide} />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+
+    const toInput = screen.getByLabelText('To')
+    const ccInput = screen.getByLabelText('Cc')
+    const subjectInput = screen.getByLabelText('Subject')
+    const bodyInput = screen.getByLabelText('Body')
+
+    await userEvent.clear(toInput)
+    expect(screen.getByRole('alert')).toHaveTextContent('To is required.')
+    expect(screen.getByRole('button', { name: 'Approve edited' })).toBeDisabled()
+
+    await userEvent.type(toInput, 'alice@acme.com; dave@acme.com\neve@acme.com')
+    await userEvent.clear(ccInput)
+    await userEvent.clear(subjectInput)
+    await userEvent.type(subjectInput, 'Q1 Final Report')
+    await userEvent.clear(bodyInput)
+    await userEvent.type(bodyInput, 'Updated body text')
+
+    expect(screen.getByRole('button', { name: 'Approve edited' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeEnabled()
+
+    // Reset restores original values
+    await userEvent.click(screen.getByRole('button', { name: 'Reset' }))
+    expect(toInput).toHaveValue('bob@acme.com')
+    expect(ccInput).toHaveValue('carol@acme.com')
+    expect(subjectInput).toHaveValue('Q1 Report')
+    expect(bodyInput).toHaveValue('Initial body')
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+
+    // Cancel closes without calling onDecide
+    await userEvent.type(subjectInput, ' draft')
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onDecide).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument()
+
+    // Re-open, edit, and submit
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await userEvent.clear(screen.getByLabelText('To'))
+    await userEvent.type(screen.getByLabelText('To'), 'alice@acme.com, dave@acme.com')
+    await userEvent.clear(screen.getByLabelText('Cc'))
+    await userEvent.clear(screen.getByLabelText('Subject'))
+    await userEvent.type(screen.getByLabelText('Subject'), 'Q1 Final')
+    await userEvent.clear(screen.getByLabelText('Body'))
+    await userEvent.type(screen.getByLabelText('Body'), 'Ship it.')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+    expect(onDecide).toHaveBeenCalledWith(11, 'approve', undefined, undefined, {
+      kind: 'connector',
+      tool: 'mail_send',
+      to: ['alice@acme.com', 'dave@acme.com'],
+      cc: [],
+      bcc: [],
+      subject: 'Q1 Final',
+      body: 'Ship it.',
+    })
+  })
+
+  it('toggles replyAll on mail_reply, previews Cc dynamically, and submits edit', async () => {
+    const onDecide = vi.fn()
+    const payload: ApprovalPayload = {
+      approvalId: 12,
+      action: 'Reply via work@acme.com to alice@acme.com',
+      detail: 'To: alice@acme.com\nSubject: Re: Sync\n\nSounds good.',
+      status: 'pending',
+      editable: {
+        kind: 'connector',
+        tool: 'mail_reply',
+        accountLabel: 'work@acme.com',
+        to: ['alice@acme.com'],
+        replyAllCc: ['bob@acme.com', 'carol@acme.com'],
+        subject: 'Re: Sync',
+        body: 'Sounds good.',
+        replyAll: false,
+      },
+    }
+    const { container } = render(<ApprovalChip payload={payload} onDecide={onDecide} />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const header = container.querySelector('.approval-edit-header') as HTMLElement
+    expect(within(header).getByText(/alice@acme\.com/)).toBeInTheDocument()
+    expect(within(header).getByText(/Re: Sync/)).toBeInTheDocument()
+    expect(within(header).queryByText(/bob@acme\.com/)).toBeNull()
+
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Reply all' }))
+    expect(within(header).getByText(/bob@acme\.com, carol@acme\.com/)).toBeInTheDocument()
+
+    const body = screen.getByLabelText('Body')
+    await userEvent.clear(body)
+    await userEvent.type(body, 'Looping everyone in.')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+    expect(onDecide).toHaveBeenCalledWith(12, 'approve', undefined, undefined, {
+      kind: 'connector',
+      tool: 'mail_reply',
+      body: 'Looping everyone in.',
+      replyAll: true,
+    })
+  })
+
+  it('edits slack_send_message, notion_create_page, notion_append, and calendar_create_event', async () => {
+    const onDecide = vi.fn()
+    const { rerender } = render(
+      <ApprovalChip
+        payload={{
+          approvalId: 13,
+          action: 'Post Slack message to #ops',
+          status: 'pending',
+          editable: {
+            kind: 'connector',
+            tool: 'slack_send_message',
+            accountLabel: 'Acme Slack',
+            channelId: '#ops',
+            threadTs: '1700000000.000100',
+            text: 'Deploy starting',
+          },
+        }}
+        onDecide={onDecide}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByText(/1700000000\.000100/)).toBeInTheDocument()
+    await userEvent.clear(screen.getByLabelText('Channel'))
+    await userEvent.type(screen.getByLabelText('Channel'), '#releases')
+    await userEvent.clear(screen.getByLabelText('Message'))
+    await userEvent.type(screen.getByLabelText('Message'), 'Deploy done')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+    expect(onDecide).toHaveBeenLastCalledWith(13, 'approve', undefined, undefined, {
+      kind: 'connector',
+      tool: 'slack_send_message',
+      channelId: '#releases',
+      text: 'Deploy done',
+    })
+
+    rerender(
+      <ApprovalChip
+        payload={{
+          approvalId: 14,
+          action: 'Create Notion page',
+          status: 'pending',
+          editable: {
+            kind: 'connector',
+            tool: 'notion_create_page',
+            accountLabel: 'Team Notion',
+            parentPageId: 'pg-1',
+            title: 'Weekly Notes',
+            markdown: '# Draft',
+          },
+        }}
+        onDecide={onDecide}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await userEvent.clear(screen.getByLabelText('Title'))
+    await userEvent.type(screen.getByLabelText('Title'), 'Final Notes')
+    await userEvent.clear(screen.getByLabelText('Markdown'))
+    await userEvent.type(screen.getByLabelText('Markdown'), '# Final')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+    expect(onDecide).toHaveBeenLastCalledWith(14, 'approve', undefined, undefined, {
+      kind: 'connector',
+      tool: 'notion_create_page',
+      title: 'Final Notes',
+      markdown: '# Final',
+    })
+
+    rerender(
+      <ApprovalChip
+        payload={{
+          approvalId: 15,
+          action: 'Append to Notion page',
+          status: 'pending',
+          editable: {
+            kind: 'connector',
+            tool: 'notion_append',
+            accountLabel: 'Team Notion',
+            pageId: 'pg-2',
+            markdown: '- item 1',
+          },
+        }}
+        onDecide={onDecide}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await userEvent.type(screen.getByLabelText('Markdown'), '\n- item 2')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+    expect(onDecide).toHaveBeenLastCalledWith(15, 'approve', undefined, undefined, {
+      kind: 'connector',
+      tool: 'notion_append',
+      markdown: '- item 1\n- item 2',
+    })
+
+    rerender(
+      <ApprovalChip
+        payload={{
+          approvalId: 16,
+          action: 'Create calendar event',
+          status: 'pending',
+          editable: {
+            kind: 'connector',
+            tool: 'calendar_create_event',
+            accountLabel: 'Work Calendar',
+            title: 'Design Review',
+            start: '2026-11-22T10:00:00Z',
+            end: '2026-11-22T11:00:00Z',
+            location: 'Zoom',
+            attendees: ['alice@acme.com'],
+            description: 'Review mocks',
+          },
+        }}
+        onDecide={onDecide}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await userEvent.clear(screen.getByLabelText('Location'))
+    await userEvent.type(screen.getByLabelText('Location'), 'Room 3B')
+    await userEvent.clear(screen.getByLabelText('Attendees'))
+    await userEvent.type(screen.getByLabelText('Attendees'), 'alice@acme.com, bob@acme.com')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+    expect(onDecide).toHaveBeenLastCalledWith(16, 'approve', undefined, undefined, {
+      kind: 'connector',
+      tool: 'calendar_create_event',
+      title: 'Design Review',
+      start: '2026-11-22T10:00:00Z',
+      end: '2026-11-22T11:00:00Z',
+      location: 'Room 3B',
+      attendees: ['alice@acme.com', 'bob@acme.com'],
+      description: 'Review mocks',
+    })
+  })
+
+  it('omits untouched optional fields on calendar_update_event and blocks empty patches', async () => {
+    const onDecide = vi.fn()
+    const payload: ApprovalPayload = {
+      approvalId: 17,
+      action: 'Update calendar event evt-9',
+      status: 'pending',
+      editable: {
+        kind: 'connector',
+        tool: 'calendar_update_event',
+        accountLabel: 'Work Calendar',
+        eventId: 'evt-9',
+        title: 'Standup',
+      },
+    }
+    render(<ApprovalChip payload={payload} onDecide={onDecide} />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const titleInput = screen.getByLabelText('Title')
+
+    // Clearing the only populated field shows validation error and disables submit
+    await userEvent.clear(titleInput)
+    expect(screen.getByRole('alert')).toHaveTextContent('Provide at least one field to update.')
+    expect(screen.getByRole('button', { name: 'Approve edited' })).toBeDisabled()
+
+    await userEvent.type(titleInput, 'Daily Standup')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+
+    // Location, attendees, description, start, end were untouched and undefined -> must NOT be sent as ''
+    const submitted = onDecide.mock.calls[0]?.[4]
+    expect(submitted).toEqual({
+      kind: 'connector',
+      tool: 'calendar_update_event',
+      title: 'Daily Standup',
+    })
+    expect('location' in submitted).toBe(false)
+    expect('attendees' in submitted).toBe(false)
+    expect('description' in submitted).toBe(false)
+  })
+
+  it('includes an explicit empty location on calendar_update_event when clearing an initially defined location', async () => {
+    const onDecide = vi.fn()
+    render(
+      <ApprovalChip
+        payload={{
+          approvalId: 21,
+          action: 'Update calendar event evt-10',
+          status: 'pending',
+          editable: {
+            kind: 'connector',
+            tool: 'calendar_update_event',
+            accountLabel: 'Work Calendar',
+            eventId: 'evt-10',
+            title: 'Standup',
+            location: 'Room A',
+          },
+        }}
+        onDecide={onDecide}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await userEvent.clear(screen.getByLabelText('Location'))
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+    expect(onDecide).toHaveBeenCalledWith(21, 'approve', undefined, undefined, {
+      kind: 'connector',
+      tool: 'calendar_update_event',
+      title: 'Standup',
+      location: '',
+    })
+  })
+
+  it('renders primitive MCP form mode, validates numbers, toggles to Raw JSON, and validates JSON objects', async () => {
+    const onDecide = vi.fn()
+    const payload: ApprovalPayload = {
+      approvalId: 18,
+      action: 'Linear · create_issue',
+      status: 'pending',
+      editable: {
+        kind: 'mcp',
+        serverName: 'Linear',
+        toolName: 'create_issue',
+        args: { title: 'Fix login', priority: 2, urgent: false },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: 'Short summary' },
+            priority: { type: 'integer' },
+            urgent: { type: 'boolean' },
+          },
+          required: ['title'],
+        },
+      },
+    }
+    render(<ApprovalChip payload={payload} onDecide={onDecide} />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByRole('button', { name: 'Form' })).toHaveAttribute('aria-pressed', 'true')
+
+    const titleInput = screen.getByLabelText('title')
+    const priorityInput = screen.getByLabelText('priority')
+    const urgentBox = screen.getByRole('checkbox', { name: 'urgent' })
+
+    // Invalid integer blocks submit
+    await userEvent.clear(priorityInput)
+    await userEvent.type(priorityInput, '2.5')
+    expect(screen.getByRole('alert')).toHaveTextContent('priority must be a valid number.')
+    expect(screen.getByRole('button', { name: 'Approve edited' })).toBeDisabled()
+
+    // Valid primitive edits
+    await userEvent.clear(priorityInput)
+    await userEvent.type(priorityInput, '1')
+    await userEvent.clear(titleInput)
+    await userEvent.type(titleInput, 'Fix OAuth')
+    await userEvent.click(urgentBox)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+    expect(onDecide).toHaveBeenLastCalledWith(18, 'approve', undefined, undefined, {
+      kind: 'mcp',
+      args: { title: 'Fix OAuth', priority: 1, urgent: true },
+    })
+
+    // Toggle to Raw JSON carrying form values forward
+    await userEvent.click(screen.getByRole('button', { name: 'Raw JSON' }))
+    const jsonArea = screen.getByLabelText('Arguments (JSON)')
+    expect(JSON.parse((jsonArea as HTMLTextAreaElement).value)).toEqual({
+      title: 'Fix OAuth',
+      priority: 1,
+      urgent: true,
+    })
+
+    // Invalid JSON blocks submit
+    fireEvent.change(jsonArea, { target: { value: '{bad json' } })
+    expect(screen.getByRole('alert')).toHaveTextContent('Arguments must be valid JSON.')
+    expect(screen.getByRole('button', { name: 'Approve edited' })).toBeDisabled()
+
+    // Non-object JSON ([]) blocks submit
+    fireEvent.change(jsonArea, { target: { value: '["not", "an", "object"]' } })
+    expect(screen.getByRole('alert')).toHaveTextContent('Arguments must be a JSON object.')
+    expect(screen.getByRole('button', { name: 'Approve edited' })).toBeDisabled()
+
+    // Valid edited JSON submits
+    fireEvent.change(jsonArea, { target: { value: '{"title":"From JSON","priority":3,"urgent":false}' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+    expect(onDecide).toHaveBeenLastCalledWith(18, 'approve', undefined, undefined, {
+      kind: 'mcp',
+      args: { title: 'From JSON', priority: 3, urgent: false },
+    })
+
+    // Toggling back to Form hydrates values from valid primitive JSON
+    await userEvent.click(screen.getByRole('button', { name: 'Form' }))
+    expect(screen.getByLabelText('title')).toHaveValue('From JSON')
+    expect(screen.getByLabelText('priority')).toHaveValue('3')
+    expect(screen.getByRole('checkbox', { name: 'urgent' })).not.toBeChecked()
+  })
+
+  it('defaults schemaless or nested MCP approvals directly to Raw JSON mode', async () => {
+    const onDecide = vi.fn()
+    render(
+      <ApprovalChip
+        payload={{
+          approvalId: 22,
+          action: 'GitHub · create_pr',
+          status: 'pending',
+          editable: {
+            kind: 'mcp',
+            serverName: 'GitHub',
+            toolName: 'create_pr',
+            args: { title: 'Feat', labels: ['ui'] },
+          },
+        }}
+        onDecide={onDecide}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.queryByRole('button', { name: 'Form' })).toBeNull()
+    const jsonArea = screen.getByLabelText('Arguments (JSON)')
+    fireEvent.change(jsonArea, { target: { value: '{"title":"Feat 2","labels":["ui","web"]}' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+    expect(onDecide).toHaveBeenCalledWith(22, 'approve', undefined, undefined, {
+      kind: 'mcp',
+      args: { title: 'Feat 2', labels: ['ui', 'web'] },
+    })
+  })
+
+  it('edits prompt approvals and submits action and detail', async () => {
+    const onDecide = vi.fn()
+    const payload: ApprovalPayload = {
+      approvalId: 19,
+      action: 'Post release note',
+      detail: 'v0.7.0 is live',
+      status: 'pending',
+      editable: {
+        kind: 'prompt',
+        action: 'Post release note',
+        detail: 'v0.7.0 is live',
+      },
+    }
+    render(<ApprovalChip payload={payload} onDecide={onDecide} />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await userEvent.clear(screen.getByLabelText('Action'))
+    await userEvent.type(screen.getByLabelText('Action'), 'Publish release note')
+    await userEvent.clear(screen.getByLabelText('Details'))
+    await userEvent.type(screen.getByLabelText('Details'), 'v0.8.0 is live with editable approvals')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+
+    expect(onDecide).toHaveBeenCalledWith(19, 'approve', undefined, undefined, {
+      kind: 'prompt',
+      action: 'Publish release note',
+      detail: 'v0.8.0 is live with editable approvals',
+    })
+  })
+
+  it('keeps edits open and displays inline server ApiError on rejection, then closes and shows Edited by you once approved', async () => {
+    const onDecide = vi.fn().mockRejectedValueOnce(new ApiError('invalid email header', 400, 'invalid_edit'))
+    const payload: ApprovalPayload = {
+      approvalId: 20,
+      action: 'Send email',
+      status: 'pending',
+      editable: {
+        kind: 'connector',
+        tool: 'mail_send',
+        accountLabel: 'work@acme.com',
+        to: ['bob@acme.com'],
+        cc: [],
+        bcc: [],
+        subject: 'Hello',
+        body: 'Original body',
+      },
+    }
+    const { rerender } = render(<ApprovalChip payload={payload} onDecide={onDecide} />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const bodyInput = screen.getByLabelText('Body')
+    await userEvent.clear(bodyInput)
+    await userEvent.type(bodyInput, 'Keep this draft intact')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('invalid email header')
+    // Editor stays open and preserves typed draft
+    expect(screen.getByLabelText('Body')).toHaveValue('Keep this draft intact')
+
+    // When WS transitions the chip to approved + edited, editor exits and badge renders
+    rerender(<ApprovalChip payload={{ ...payload, status: 'approved', edited: true }} onDecide={onDecide} />)
+    expect(screen.queryByLabelText('Body')).toBeNull()
+    expect(screen.getByText('Approved · Edited by you')).toBeInTheDocument()
   })
 })
