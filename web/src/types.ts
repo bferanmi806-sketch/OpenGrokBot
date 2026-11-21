@@ -326,7 +326,7 @@ export type ProviderPreset = {
   docsUrl: string
 }
 
-/** 一个模型连接：一家服务商 + 一个 key + 默认模型。builtIn 的是默认连接（向导配的那个） */
+/** 一个模型连接：一家服务商 + 一个 key + 默认模型。builtIn 是内置槽位；isDefault 是当前默认连接 */
 export type ModelConnection = {
   id: string
   name: string
@@ -336,6 +336,8 @@ export type ModelConnection = {
   model: string
   vision: boolean
   builtIn: boolean
+  /** 没单独选过连接的同事都会用这一条（老网关不回此字段时退回 builtIn） */
+  isDefault?: boolean
   key: { set: boolean; masked: string; source: 'env' | 'file' | 'none' }
   /** 被环境变量定死、界面上改不了的字段 */
   locked: string[]

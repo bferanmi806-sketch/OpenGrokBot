@@ -1271,6 +1271,11 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim);
   border: 1px solid var(--border-strong); border-radius: 999px; padding: 1px 6px;
 }
+.conn-badge-default {
+  color: var(--blue);
+  border-color: color-mix(in srgb, var(--blue) 40%, transparent);
+  background: color-mix(in srgb, var(--blue) 9%, transparent);
+}
 .conn-model {
   margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--text-dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;

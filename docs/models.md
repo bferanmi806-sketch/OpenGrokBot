@@ -4,15 +4,19 @@ Every teammate can run on its own model. Open **AI models** in the sidebar to ma
 and a default model — then click the model label at the top of a teammate's thread to pick one for it. A change
 takes effect from that teammate's next turn.
 
-The connection you set up first (with env vars or the settings API) is the **default**. Every teammate that has
-not picked a connection uses it, and env vars still pin its fields (`OPENSUPERBOT_API_BASE`, `_MODEL`, `_VISION`,
-`_API_KEY`). A key pinned by `OPENSUPERBOT_API_KEY` also pins the service and address, since that key belongs to
-one service. When a connection moves to another service or address, its stored key is dropped unless a new one
-comes with it, and the models teammates picked on it go back to the connection's default.
+The connection you set up first (with env vars or the settings API) starts as the **default**. Every teammate that has
+not explicitly picked a connection uses the active default, and env vars still pin the built-in connection's fields
+(`OPENSUPERBOT_API_BASE`, `_MODEL`, `_VISION`, `_API_KEY`). A key pinned by `OPENSUPERBOT_API_KEY` also pins the
+service and address, since that key belongs to one service. You can click **Set as default** on any connection in
+**AI models** (`POST /api/connections/:id/default`) to switch every default-following teammate to that connection from
+its next turn — teammates that already picked their own connection or custom model stay unchanged. When a connection
+moves to another service or address, its stored key is dropped unless a new one comes with it, and the models
+teammates picked on it go back to the connection's default.
 
 Extra connections live in the database. Each key lives in `<data>/llm-keys/<id>`, readable only by your account
 (mode `0600`; on Windows, an ACL for your account alone), and is only ever shown masked. Deleting a connection
-moves its teammates back to the default.
+moves its teammates back to the default; the active default connection cannot be deleted until another connection is
+made default.
 
 ## Services
 

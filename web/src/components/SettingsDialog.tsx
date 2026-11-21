@@ -4,7 +4,7 @@ import { desktopApi, type DesktopInfo } from '../desktop'
 import { useT, type MessageKey } from '../i18n'
 import { errorText } from '../i18n/describe'
 import type { AboutInfo, BrowserStatus, ConnectionsState, FieldError, ProviderPreset, SettingsView, SetupInfo, ThemeSetting } from '../types'
-import { connectionLabel, fieldText } from './ModelsDialog'
+import { connectionLabel, fieldText, isDefaultConnection } from './ModelsDialog'
 import { BrowserLine, type LanguageSetting } from './SetupWizard'
 import { StartAtLogin } from './StartAtLogin'
 import { useEscape } from './ConfirmDialog'
@@ -116,8 +116,8 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
   const locked = (key: string) => settings?.sources[key] === 'env'
   const lockedNote = (name: string) => <p className="settings-locked">{t('settings.lockedBy', { name })}</p>
 
-  const main = llms?.connections.find((c) => c.builtIn)
-  const demo = settings?.values.model === 'stub'
+  const main = llms?.connections.find((c) => isDefaultConnection(c, llms.connections))
+  const demo = main && !main.builtIn ? main.model === 'stub' : settings?.values.model === 'stub'
   const others = llms ? llms.connections.length - 1 : 0
   const running = about?.computers ?? setup?.computers.kind ?? null
   const live: BrowserStatus | null = browser ?? setup?.computers.browser ?? null

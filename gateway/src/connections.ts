@@ -15,6 +15,7 @@ import {
  * 另加的连接存表里，key 放 <data>/llm-keys/<id>（0600），和默认连接的 <data>/llm-key 一个待遇。
  */
 export const MAIN = 'main'
+const DEFAULT_CONNECTION_KEY = 'default_connection'
 
 export type Connection = {
   id: string
@@ -46,6 +47,39 @@ export function listConnections(db: Db): Connection[] {
 export function getConnection(db: Db, id: string): Connection | undefined {
   const row = db.prepare('SELECT * FROM connections WHERE id = ?').get(id) as Row | undefined
   return row ? fromRow(row) : undefined
+}
+
+/** 当前哪条连接是「默认」：没设过或指向的连接不在了，就回到内置连接 main */
+export function defaultConnectionId(db: Db): string {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(DEFAULT_CONNECTION_KEY) as { value: string } | undefined
+  if (!row) return MAIN
+  try {
+    const id = JSON.parse(row.value)
+    if (typeof id === 'string' && id !== MAIN && getConnection(db, id)) return id
+  } catch { /* 坏值按回退处理 */ }
+  return MAIN
+}
+
+/**
+ * 切换默认连接：所有沿用默认（llm_connection IS NULL）的同事自动切到新默认；
+ * 已经单独选过其它连接（含明确选了第 2/3/4 个连接或自定义型号）的同事保持原样不动。
+ */
+export function setDefaultConnection(
+  db: Db, id: string, now = Date.now(),
+): { ok: true; defaultConnectionId: string } | { ok: false; errors: ConnectionError[] } {
+  if (id !== MAIN && !getConnection(db, id)) return { ok: false, errors: [{ key: 'id', code: 'not_found' }] }
+  db.transaction(() => {
+    if (id === MAIN) {
+      db.prepare('DELETE FROM settings WHERE key = ?').run(DEFAULT_CONNECTION_KEY)
+    } else {
+      db.prepare(
+        'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      ).run(DEFAULT_CONNECTION_KEY, JSON.stringify(id), now)
+    }
+    // 跟随默认的同事如果有遗留的 llm_model 覆盖，一起清掉，免得把旧服务商的模型名带到新默认服务商
+    db.prepare('UPDATE bots SET llm_model = NULL WHERE llm_connection IS NULL').run()
+  })()
+  return { ok: true, defaultConnectionId: id }
 }
 
 /** 默认连接此刻的样子：设置 + 环境变量 + key 文件现读 */
@@ -215,8 +249,11 @@ export function createConnection(
  * MAIN = 没选过连接、只在默认连接上换了模型的那些同事
  */
 export function resetBotModels(db: Db, connectionId: string): void {
-  if (connectionId === MAIN) db.prepare('UPDATE bots SET llm_model = NULL WHERE llm_connection IS NULL').run()
-  else db.prepare('UPDATE bots SET llm_model = NULL WHERE llm_connection = ?').run(connectionId)
+  if (connectionId === defaultConnectionId(db)) {
+    db.prepare('UPDATE bots SET llm_model = NULL WHERE llm_connection IS NULL OR llm_connection = ?').run(connectionId)
+  } else {
+    db.prepare('UPDATE bots SET llm_model = NULL WHERE llm_connection = ?').run(connectionId)
+  }
 }
 
 /** 改一个另加的连接（默认连接走设置那一套，见 connections-api）。换了地址又没给新 key，旧 key 删掉：绝不把一家的 key 发给另一家 */
@@ -253,9 +290,10 @@ export function updateConnection(
   return { ok: true, connection: next }
 }
 
-/** 删掉一个连接：用它的同事回到默认连接（返回是哪几位），它的 key 一起删 */
+/** 删掉一个连接：不能删当前默认连接；其余用它的同事回到默认连接（返回是哪几位），它的 key 一起删 */
 export function deleteConnection(db: Db, dataDir: string, id: string): { ok: true; moved: string[] } | { ok: false; errors: ConnectionError[] } {
   if (!getConnection(db, id)) return { ok: false, errors: [{ key: 'id', code: 'not_found' }] }
+  if (id === defaultConnectionId(db)) return { ok: false, errors: [{ key: 'id', code: 'in_use' }] }
   const moved = (db.prepare('SELECT id FROM bots WHERE llm_connection = ? ORDER BY id').all(id) as { id: string }[]).map((r) => r.id)
   db.transaction(() => {
     db.prepare('UPDATE bots SET llm_connection = NULL, llm_model = NULL WHERE llm_connection = ?').run(id)
@@ -269,13 +307,16 @@ export function deleteConnection(db: Db, dataDir: string, id: string): { ok: tru
 
 export type BotLlm = { connectionId: string; model: string | null }
 
-/** 同事的选择；选的连接已经没了（或从没选过）就是默认连接 */
+/** 同事的选择；没单独选过（NULL）或选的连接已经没了，就是当前默认连接 */
 export function botLlm(db: Db, botId: string): BotLlm {
+  const def = defaultConnectionId(db)
   const row = db.prepare('SELECT llm_connection, llm_model FROM bots WHERE id = ?').get(botId) as
     { llm_connection: string | null; llm_model: string | null } | undefined
   const id = row?.llm_connection
-  if (!id || !getConnection(db, id)) return { connectionId: MAIN, model: row?.llm_model && !id ? row.llm_model : null }
-  return { connectionId: id, model: row?.llm_model ?? null }
+  if (!id) return { connectionId: def, model: row?.llm_model ?? null }
+  if (id === MAIN) return { connectionId: MAIN, model: row?.llm_model ?? null }
+  if (getConnection(db, id)) return { connectionId: id, model: row?.llm_model ?? null }
+  return { connectionId: def, model: null }
 }
 
 export function listBotLlms(db: Db): Record<string, BotLlm> {
@@ -283,22 +324,32 @@ export function listBotLlms(db: Db): Record<string, BotLlm> {
   return Object.fromEntries(ids.map((id) => [id, botLlm(db, id)]))
 }
 
-/** 给同事换模型连接：connectionId = main 或 null 回到默认；model = null 用连接自己的默认模型 */
+/**
+ * 给同事换模型连接：
+ * - 选当前默认连接且不指定自定义型号（或 connectionId 为 null）→ 存 NULL（跟随默认，后续切默认会跟着走）
+ * - 选非默认连接（含明确指定 main）或指定了自定义型号 → 钉住该连接，后续切默认不会覆盖它
+ */
 export function setBotLlm(
   db: Db, botId: string, input: { connectionId?: unknown; model?: unknown },
 ): { ok: true; llm: BotLlm } | { ok: false; errors: ConnectionError[] } {
   const errors: ConnectionError[] = []
   if (!db.prepare('SELECT 1 FROM bots WHERE id = ?').get(botId)) return { ok: false, errors: [{ key: 'botId', code: 'not_found' }] }
-  let connection: string | null = null
-  if (input.connectionId !== undefined && input.connectionId !== null && input.connectionId !== MAIN) {
-    if (typeof input.connectionId !== 'string' || !getConnection(db, input.connectionId)) errors.push({ key: 'connectionId', code: 'not_found' })
-    else connection = input.connectionId
-  }
+  const def = defaultConnectionId(db)
   let model: string | null = null
   if (input.model !== undefined && input.model !== null && input.model !== '') {
     const m = parseSetting('model', input.model)
     if (m === undefined) errors.push({ key: 'model', code: 'invalid' })
     else model = m
+  }
+  let connection: string | null = null
+  if (input.connectionId !== undefined && input.connectionId !== null) {
+    if (typeof input.connectionId !== 'string' || (input.connectionId !== MAIN && !getConnection(db, input.connectionId))) {
+      errors.push({ key: 'connectionId', code: 'not_found' })
+    } else if (input.connectionId === def && !model) {
+      connection = null
+    } else {
+      connection = input.connectionId
+    }
   }
   if (errors.length) return { ok: false, errors }
   db.prepare('UPDATE bots SET llm_connection = ?, llm_model = ? WHERE id = ?').run(connection, model, botId)

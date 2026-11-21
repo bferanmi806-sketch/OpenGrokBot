@@ -1,11 +1,17 @@
 import { useMemo, useRef, useState } from 'react'
-import { FieldErrors, SignedOut, createConnection, deleteConnection, testConnection, updateConnection, type ConnectionFields } from '../api'
+import { FieldErrors, SignedOut, createConnection, deleteConnection, setDefaultConnection, testConnection, updateConnection, type ConnectionFields } from '../api'
 import { useT, type MessageKey, type T } from '../i18n'
 import type { CheckResult, ConnectionsState, FieldError, LlmApi, ModelConnection, ProviderPreset } from '../types'
 import { ConfirmDialog, useEscape } from './ConfirmDialog'
 import { PlusIcon, XIcon } from './Icons'
 
 type Roster = Record<string, { name: string; emoji: string }>
+
+/** 这条连接是不是当前默认连接（兼容老网关或只带 builtIn 的测试数据） */
+export function isDefaultConnection(c: ModelConnection, all?: ModelConnection[]): boolean {
+  if (typeof c.isDefault === 'boolean') return c.isDefault
+  return all ? !all.some((x) => x.isDefault === true) && c.builtIn : c.builtIn
+}
 
 const REGIONS: ProviderPreset['region'][] = ['cn', 'global', 'local', 'custom']
 const APIS: LlmApi[] = ['chat', 'anthropic', 'responses']
@@ -60,6 +66,7 @@ export function ModelsDialog({ state, providers, roster, onChange, onSignedOut, 
   const t = useT()
   const [editing, setEditing] = useState<{ id: string } | 'new' | null>(null)
   const [checks, setChecks] = useState<Record<string, CheckResult | 'testing'>>({})
+  const [settingDefault, setSettingDefault] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<ModelConnection | null>(null)
   useEscape(editing ? () => setEditing(null) : onClose)
@@ -85,11 +92,25 @@ export function ModelsDialog({ state, providers, roster, onChange, onSignedOut, 
   }
 
   const doRemove = async (c: ModelConnection) => {
+    setError(null)
     try {
       onChange(await deleteConnection(c.id))
     } catch (err) {
       if (err instanceof SignedOut) { onSignedOut?.(); return }
       setError(err instanceof FieldErrors && err.errors[0] ? fieldText(t, err.errors[0]) : String(err))
+    }
+  }
+
+  const makeDefault = async (c: ModelConnection) => {
+    setSettingDefault(c.id)
+    setError(null)
+    try {
+      onChange(await setDefaultConnection(c.id))
+    } catch (err) {
+      if (err instanceof SignedOut) { onSignedOut?.(); return }
+      setError(err instanceof FieldErrors && err.errors[0] ? fieldText(t, err.errors[0]) : String(err))
+    } finally {
+      setSettingDefault(null)
     }
   }
 
@@ -125,11 +146,12 @@ export function ModelsDialog({ state, providers, roster, onChange, onSignedOut, 
               {state.connections.map((c) => {
                 const p = providers.find((x) => x.id === c.provider)
                 const who = users[c.id]
+                const isDef = isDefaultConnection(c, state.connections)
                 return (
                   <div className="conn-card" key={c.id}>
                     <div className="conn-card-head">
                       <span className="conn-name">{connectionLabel(c, providers, t)}</span>
-                      {c.builtIn ? <span className="conn-badge" title={t('models.defaultHint')}>{t('models.default')}</span> : null}
+                      {isDef ? <span className="conn-badge conn-badge-default" title={t('models.defaultHint')}>{t('models.default')}</span> : null}
                       <span className="conn-model">{c.model}</span>
                     </div>
                     <div className="conn-meta">
@@ -145,7 +167,17 @@ export function ModelsDialog({ state, providers, roster, onChange, onSignedOut, 
                     <div className="conn-actions">
                       <button type="button" onClick={() => void test(c)} disabled={checks[c.id] === 'testing'}>{t('models.test')}</button>
                       <button type="button" onClick={() => setEditing({ id: c.id })}>{t('models.edit')}</button>
-                      {c.builtIn ? null : <button type="button" className="danger" onClick={() => setConfirmDelete(c)}>{t('models.delete')}</button>}
+                      {isDef ? null : (
+                        <button
+                          type="button"
+                          onClick={() => void makeDefault(c)}
+                          disabled={settingDefault !== null}
+                          title={t('models.setDefaultHint')}
+                        >
+                          {settingDefault === c.id ? t('models.settingDefault') : t('models.setDefault')}
+                        </button>
+                      )}
+                      {c.builtIn || isDef ? null : <button type="button" className="danger" onClick={() => setConfirmDelete(c)}>{t('models.delete')}</button>}
                     </div>
                   </div>
                 )

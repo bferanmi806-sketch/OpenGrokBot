@@ -7,6 +7,24 @@ names.
 
 ## [Unreleased]
 
+### Added
+
+- **One-click "Set as default" for AI model connections.** Any connection in **AI models** can now be marked as the
+  default (`POST /api/connections/:id/default`): every teammate still following the default switches to it from its
+  next turn, while teammates that explicitly picked another connection or model stay unchanged. The active default
+  connection is protected from deletion until another connection becomes default.
+- **Light theme & appearance switcher.** Added a light theme alongside Dark and Follow system modes in **Settings →
+  Appearance** and a one-click toggle in the sidebar header, persisted to both `localStorage` (with pre-paint theme
+  bootstrap to avoid flash) and gateway settings (`theme`).
+
+### Fixed
+
+- **Settings modal flickering on macOS / Electron and "Follow browser" language reset.** Removed `backdrop-filter` blur
+  layers over continuously animated avatars and scrollable dialogs, paused background avatar and typing animations
+  while a modal or lightbox is open, marked modal scrims `-webkit-app-region: no-drag`, batched `desktopApi().info()`
+  into the initial Settings load, and accepted `language: ""` in gateway settings so switching back to "Follow browser"
+  persists cleanly.
+
 ## [0.7.0] - 2026-11-20
 
 App connectors for Gmail, Outlook, Google & Outlook Calendar, Notion and Slack; a zero-dependency native Model Context

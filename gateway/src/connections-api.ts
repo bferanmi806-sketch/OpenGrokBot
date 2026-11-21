@@ -1,8 +1,9 @@
 import type { Hono } from 'hono'
 import type { Config, LlmApi } from './config.js'
 import {
-  MAIN, connectionKeyView, createConnection, deleteConnection, getConnection, isConnectionId, listBotLlms, listConnections,
-  mainConnection, parseKey, readConnectionKey, resetBotModels, setBotLlm, updateConnection, type Connection, type ConnectionError, type ConnectionInput,
+  MAIN, connectionKeyView, createConnection, defaultConnectionId, deleteConnection, getConnection, isConnectionId, listBotLlms, listConnections,
+  mainConnection, parseKey, readConnectionKey, resetBotModels, setBotLlm, setDefaultConnection, updateConnection,
+  type Connection, type ConnectionError, type ConnectionInput,
 } from './connections.js'
 import type { Db } from './db.js'
 import { checkConnection, listModels } from './llm-check.js'
@@ -35,19 +36,23 @@ export function mountConnections(app: Hono, deps: ConnectionsDeps): void {
   const fetchOpts = deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}
 
   /** key 只回掩码和来源，原文从不离开网关 */
-  const view = (c: Connection) => {
+  const view = (c: Connection, defId: string) => {
     const key = connectionKeyView(env, dataDir, c.id)
     return {
       id: c.id, name: c.name, provider: c.provider, api: c.api, baseURL: c.baseURL, model: c.model, vision: c.vision,
       builtIn: c.id === MAIN,
+      isDefault: c.id === defId,
       key: { set: key.set, masked: maskKey(key.key), source: key.source },
       locked: c.id === MAIN ? mainLocks(env) : [],
     }
   }
-  const all = () => ({
-    connections: [mainConnection(startedWith, env, db), ...listConnections(db)].map(view),
-    bots: listBotLlms(db),
-  })
+  const all = () => {
+    const defId = defaultConnectionId(db)
+    return {
+      connections: [mainConnection(startedWith, env, db), ...listConnections(db)].map((c) => view(c, defId)),
+      bots: listBotLlms(db),
+    }
+  }
   /** 连接此刻的完整样子（含 key 原文），只在网关里用 */
   const resolved = (id: string) => {
     if (id === MAIN) {
@@ -121,8 +126,16 @@ export function mountConnections(app: Hono, deps: ConnectionsDeps): void {
     if (id === MAIN) return c.json(bad([{ key: 'id', code: 'in_use' }]), 409)
     if (!isConnectionId(id)) return c.json(bad([{ key: 'id', code: 'not_found' }]), 404)
     const done = deleteConnection(db, dataDir, id)
-    if (!done.ok) return c.json(bad(done.errors), 404)
+    if (!done.ok) return c.json(bad(done.errors), done.errors.some((e) => e.code === 'in_use') ? 409 : 404)
     return c.json({ ...all(), moved: done.moved })
+  })
+
+  app.post('/api/connections/:id/default', (c) => {
+    const id = c.req.param('id')
+    if (!isConnectionId(id)) return c.json(bad([{ key: 'id', code: 'not_found' }]), 404)
+    const done = setDefaultConnection(db, id)
+    if (!done.ok) return c.json(bad(done.errors), 404)
+    return c.json(all())
   })
 
   /**

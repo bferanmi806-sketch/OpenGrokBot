@@ -135,6 +135,32 @@ describe('ModelsDialog', () => {
     await userEvent.click(within(card).getByRole('button', { name: 'Test' }))
     expect(await within(card).findByRole('status')).toHaveTextContent('out of credit or quota')
   })
+
+  it('lets you set another connection as default and moves the badge and delete guard', async () => {
+    const nextState: ConnectionsState = {
+      connections: [
+        { ...main, isDefault: false },
+        { ...claude, isDefault: true },
+      ],
+      bots: { researcher: { connectionId: 'c-12345678', model: 'claude-haiku-5-5' }, chief: { connectionId: 'c-12345678', model: null } },
+    }
+    const calls = mockFetch({ 'POST /api/connections/c-12345678/default': () => ({ body: nextState }) })
+    const onChange = vi.fn()
+    const { rerender } = render(
+      <ModelsDialog state={state} providers={providers} roster={roster} onChange={onChange} onClose={() => {}} />,
+    )
+    const claudeCard = screen.getByText('Used by Scout').closest('.conn-card') as HTMLElement
+    await userEvent.click(within(claudeCard).getByRole('button', { name: 'Set as default' }))
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(nextState))
+    expect(calls[0]).toEqual({ method: 'POST', path: '/api/connections/c-12345678/default', body: undefined })
+
+    rerender(<ModelsDialog state={nextState} providers={providers} roster={roster} onChange={onChange} onClose={() => {}} />)
+    const cards = screen.getAllByText(/Key sk-…/).map((el) => el.closest('.conn-card') as HTMLElement)
+    expect(within(cards[0]!).getByRole('button', { name: 'Set as default' })).toBeInTheDocument()
+    expect(within(cards[1]!).getByText('Default')).toBeInTheDocument()
+    expect(within(cards[1]!).queryByRole('button', { name: 'Set as default' })).toBeNull()
+    expect(within(cards[1]!).queryByRole('button', { name: 'Delete' })).toBeNull()
+  })
 })
 
 describe('picking a teammate’s AI', () => {
@@ -158,5 +184,17 @@ describe('picking a teammate’s AI', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith('researcher', { connectionId: 'main', model: null }))
     expect(calls.find((c) => c.method === 'PUT')!.body).toEqual({ connectionId: 'main', model: null })
+  })
+
+  it('labels whichever connection is currently default in the picker dropdown', async () => {
+    const calls = mockFetch({ 'GET /api/connections/c-12345678/models': () => ({ body: { ok: true, models: [] } }) })
+    const customDefault: ConnectionsState = {
+      connections: [{ ...main, isDefault: false }, { ...claude, isDefault: true }],
+      bots: { chief: { connectionId: 'c-12345678', model: null } },
+    }
+    render(<BotModelPicker botId="chief" botName="Chief" state={customDefault} providers={providers} onSaved={() => {}} onManage={() => {}} onClose={() => {}} />)
+    await waitFor(() => expect(calls).toHaveLength(1))
+    const options = screen.getAllByRole('option').map((o) => o.textContent)
+    expect(options).toEqual(['DeepSeek', 'Claude (default)'])
   })
 })

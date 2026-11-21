@@ -257,9 +257,16 @@ export function resolveApiKey(env: Record<string, string | undefined>, dataDir: 
 /** 配了这些环境变量的人是用环境变量管模型的（源码版老用户），向导不出来打扰 */
 const MODEL_ENV = ['OPENSUPERBOT_API_KEY', 'OPENSUPERBOT_API_BASE', 'OPENSUPERBOT_MODEL']
 
-/** 要不要出首次启动向导：没 key、不是不要 key 的服务商、也没选演示模式 */
+/** 要不要出首次启动向导：没 key、不是不要 key 的服务商、也没选演示模式，且没把其它连接设为默认 */
 export function needsSetup(env: Record<string, string | undefined>, db: Db, dataDir: string): boolean {
   if (MODEL_ENV.some((name) => envSet(env, name))) return false
+  const defRow = db.prepare(`SELECT value FROM settings WHERE key = 'default_connection'`).get() as { value: string } | undefined
+  if (defRow) {
+    try {
+      const defId = JSON.parse(defRow.value)
+      if (typeof defId === 'string' && db.prepare('SELECT 1 FROM connections WHERE id = ?').get(defId)) return false
+    } catch { /* ignore */ }
+  }
   const { values } = resolveSettings(env, readSavedSettings(db))
   if (values.model === 'stub') return false
   if (resolveApiKey(env, dataDir).source !== 'none') return false

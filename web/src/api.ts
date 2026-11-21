@@ -196,6 +196,8 @@ export const updateConnection = (id: string, fields: ConnectionFields) =>
   sendForm<ConnectionsState>('PATCH', `/api/connections/${encodeURIComponent(id)}`, fields)
 export const deleteConnection = (id: string) =>
   sendForm<ConnectionsState & { moved: string[] }>('DELETE', `/api/connections/${encodeURIComponent(id)}`)
+export const setDefaultConnection = (id: string) =>
+  sendForm<ConnectionsState>('POST', `/api/connections/${encodeURIComponent(id)}/default`)
 /** 测一个连接；connectionId 给了就从存着的那个出发，其余字段是还没存的改动 */
 export const testConnection = (fields: ConnectionFields & { connectionId?: string }) =>
   sendForm<CheckResult>('POST', '/api/connections/test', fields)

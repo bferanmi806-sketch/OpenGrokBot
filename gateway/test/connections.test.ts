@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { loadConfig } from '../src/config.js'
 import {
-  MAIN, botConfig, botLlm, createConnection, deleteConnection, readConnectionKey, saveConnectionKey, setBotLlm, updateConnection,
+  MAIN, botConfig, botLlm, createConnection, defaultConnectionId, deleteConnection, readConnectionKey, saveConnectionKey, setBotLlm,
+  setDefaultConnection, updateConnection,
 } from '../src/connections.js'
 import { ensureDmThread, openDb, upsertBot } from '../src/db.js'
 import type { AssistantTurn, LLM } from '../src/llm.js'
@@ -282,5 +283,62 @@ describe('turns pick the teammate’s own model', () => {
     })
     await vi.waitFor(() => expect(own.chat).toHaveBeenCalled())
     expect(shared.chat).not.toHaveBeenCalled()
+  })
+})
+
+describe('setting another connection as default', () => {
+  it('moves teammates using default to the new default while keeping explicitly chosen teammates unchanged', async () => {
+    const { db, dataDir, startup, env } = setup()
+    const chief = { id: 'chief', name: 'Chief', role: 'lead', emoji: '🎖', soul_path: '' }
+    upsertBot(db, chief)
+    saveSettings(db, { provider: 'deepseek', baseURL: 'https://api.deepseek.com', model: 'deepseek-flash' })
+    saveApiKey(dataDir, 'sk-deepseek-123456')
+
+    const llm: LLM = { chat: async () => ({ content: 'ok', toolCalls: [], raw: { role: 'assistant', content: 'ok' } }) }
+    const gw = createApp({ db, llm, dataDir, settings: { env, startedWith: startup } })
+    const call = (method: string, path: string, body?: unknown) => gw.app.request(path, {
+      method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+
+    const gemRes = await (await call('POST', '/api/connections', { provider: 'gemini', apiKey: 'AIzaSyTestKey1234567890' })).json() as { created: string }
+    const cldRes = await (await call('POST', '/api/connections', { provider: 'anthropic', apiKey: CLAUDE_KEY })).json() as { created: string }
+    const geminiId = gemRes.created
+    const claudeId = cldRes.created
+
+    // Scout 明确选了第 3 个模型（Claude）；Chief 和 Ticker 沿用默认
+    await call('PUT', `/api/bots/${scout.id}/llm`, { connectionId: claudeId, model: null })
+    expect(defaultConnectionId(db)).toBe(MAIN)
+
+    // 把 Gemini 设为默认：Chief 和 Ticker 统一换到 Gemini；Scout 保持 Claude 不动
+    const sw = await call('POST', `/api/connections/${geminiId}/default`)
+    expect(sw.status).toBe(200)
+    const afterGem = await sw.json() as {
+      connections: { id: string; builtIn: boolean; isDefault: boolean }[]
+      bots: Record<string, { connectionId: string; model: string | null }>
+    }
+    expect(afterGem.connections.find((c) => c.id === geminiId)?.isDefault).toBe(true)
+    expect(afterGem.connections.find((c) => c.id === MAIN)?.isDefault).toBe(false)
+    expect(afterGem.bots[chief.id]).toEqual({ connectionId: geminiId, model: null })
+    expect(afterGem.bots[ticker.id]).toEqual({ connectionId: geminiId, model: null })
+    expect(afterGem.bots[scout.id]).toEqual({ connectionId: claudeId, model: null })
+    expect(botConfig(startup, env, db, chief.id)).toMatchObject({ model: 'gemini-3.5-flash-lite', apiKey: 'AIzaSyTestKey1234567890' })
+    expect(botConfig(startup, env, db, scout.id)).toMatchObject({ api: 'anthropic', model: 'claude-opus-5-5', apiKey: CLAUDE_KEY })
+
+    // 当前默认连接不能直接删除
+    expect((await call('DELETE', `/api/connections/${geminiId}`)).status).toBe(409)
+
+    // Ticker 明确单独改回 DeepSeek（main）后，再把默认切去 Claude：Chief 跟着去 Claude，Ticker 留在 DeepSeek，Scout 留在 Claude
+    await call('PUT', `/api/bots/${ticker.id}/llm`, { connectionId: MAIN, model: null })
+    expect(setDefaultConnection(db, claudeId)).toEqual({ ok: true, defaultConnectionId: claudeId })
+    expect(botLlm(db, chief.id)).toEqual({ connectionId: claudeId, model: null })
+    expect(botLlm(db, ticker.id)).toEqual({ connectionId: MAIN, model: null })
+    expect(botLlm(db, scout.id)).toEqual({ connectionId: claudeId, model: null })
+
+    // Gemini 不再是默认，可以正常删除
+    expect((await call('DELETE', `/api/connections/${geminiId}`)).status).toBe(200)
+
+    // 切回 main 也能成功，Chief 随之回到 DeepSeek
+    expect((await call('POST', `/api/connections/${MAIN}/default`)).status).toBe(200)
+    expect(botLlm(db, chief.id)).toEqual({ connectionId: MAIN, model: null })
   })
 })

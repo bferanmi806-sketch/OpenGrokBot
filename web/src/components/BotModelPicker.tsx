@@ -4,19 +4,24 @@ import { useT } from '../i18n'
 import type { BotLlm, ConnectionsState, ProviderPreset } from '../types'
 import { useEscape } from './ConfirmDialog'
 import { XIcon } from './Icons'
-import { connectionLabel, fieldText } from './ModelsDialog'
+import { connectionLabel, fieldText, isDefaultConnection } from './ModelsDialog'
+
+const defaultConnection = (state: ConnectionsState) =>
+  state.connections.find((x) => isDefaultConnection(x, state.connections)) ?? state.connections[0]
 
 /** 这位同事此刻实际用的模型：自己选的，否则它那个连接的默认模型（连接不在了就退回默认连接）。'stub' = 演示模式 */
 export function botModel(state: ConnectionsState, botId: string): string | null {
-  const choice = state.bots[botId] ?? { connectionId: 'main', model: null }
-  const c = state.connections.find((x) => x.id === choice.connectionId) ?? state.connections[0]
+  const def = defaultConnection(state)
+  const choice = state.bots[botId] ?? { connectionId: def?.id ?? 'main', model: null }
+  const c = state.connections.find((x) => x.id === choice.connectionId) ?? def
   return c ? choice.model ?? c.model : null
 }
 
 /** 这位同事此刻用的连接看不看得了图（发图片给它之前提醒一句用） */
 export function botSeesImages(state: ConnectionsState, botId: string): boolean | undefined {
-  const choice = state.bots[botId] ?? { connectionId: 'main', model: null }
-  return (state.connections.find((x) => x.id === choice.connectionId) ?? state.connections[0])?.vision
+  const def = defaultConnection(state)
+  const choice = state.bots[botId] ?? { connectionId: def?.id ?? 'main', model: null }
+  return (state.connections.find((x) => x.id === choice.connectionId) ?? def)?.vision
 }
 
 /** 对话顶部那一小块：这位同事此刻用哪个 AI。点开就能换 */
@@ -27,8 +32,9 @@ export function BotModelChip({ botId, state, providers, onOpen }: {
   onOpen: () => void
 }) {
   const t = useT()
-  const choice = state.bots[botId] ?? { connectionId: 'main', model: null }
-  const c = state.connections.find((x) => x.id === choice.connectionId) ?? state.connections[0]
+  const def = defaultConnection(state)
+  const choice = state.bots[botId] ?? { connectionId: def?.id ?? 'main', model: null }
+  const c = state.connections.find((x) => x.id === choice.connectionId) ?? def
   if (!c) return null
   const model = choice.model ?? c.model
   const text = model === 'stub' ? t('picker.chipDemo') : t('picker.chip', { connection: connectionLabel(c, providers, t), model })
@@ -52,7 +58,8 @@ export function BotModelPicker({ botId, botName, state, providers, onSaved, onMa
 }) {
   const t = useT()
   useEscape(onClose)
-  const current = state.bots[botId] ?? { connectionId: 'main', model: null }
+  const def = defaultConnection(state)
+  const current = state.bots[botId] ?? { connectionId: def?.id ?? 'main', model: null }
   const [connectionId, setConnectionId] = useState(current.connectionId)
   const [model, setModel] = useState(current.model ?? '')
   const [models, setModels] = useState<string[]>([])
@@ -108,7 +115,7 @@ export function BotModelPicker({ botId, botName, state, providers, onSaved, onMa
           <select value={connectionId} onChange={(e) => { setConnectionId(e.target.value); setModel('') }}>
             {state.connections.map((c) => (
               <option key={c.id} value={c.id}>
-                {c.builtIn ? t('picker.defaultSuffix', { name: connectionLabel(c, providers, t) }) : connectionLabel(c, providers, t)}
+                {isDefaultConnection(c, state.connections) ? t('picker.defaultSuffix', { name: connectionLabel(c, providers, t) }) : connectionLabel(c, providers, t)}
               </option>
             ))}
           </select>
