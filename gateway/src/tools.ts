@@ -1,6 +1,7 @@
 import { APPROVAL_KINDS } from './approvals.js'
 import { CONNECTOR_READ_TOOL_NAMES } from './connectors/tools.js'
 import type { ToolDef } from './llm.js'
+import type { RoutineMode } from './routines.js'
 import { WIKI_READ_TOOL_NAMES, WIKI_TOOLS } from './wiki/tools.js'
 
 export const MESSAGE_USER_TOOL: ToolDef = {
@@ -32,6 +33,10 @@ export const MESSAGE_USER_TOOL: ToolDef = {
             closing: { type: 'string', description: 'ONE plain sentence surfacing only what needs the human.' },
           },
           required: ['lines'],
+        },
+        urgent: {
+          type: 'boolean',
+          description: 'Set true ONLY for time-critical alerts that must break through Quiet Hours immediately instead of waiting for the morning digest.',
         },
       },
       required: ['kind', 'payload'],
@@ -292,8 +297,11 @@ const WORKFLOW_TOOLS: ToolDef[] = [
           webhook: { type: 'boolean', description: 'Also start this routine whenever its webhook is called (default false).' },
           mode: {
             type: 'string',
-            enum: ['act', 'watch'],
-            description: '"watch" for keeping an eye on something: each run gets read-only tools and stays silent unless something needs your operator. Default "act".',
+            enum: ['act', 'watch', 'prepare'],
+            description:
+              '"watch" gets read-only tools and stays silent unless something needs your operator ("Nothing new."). '
+              + '"prepare" gets read-only tools plus wiki_upsert and workspace write_file to prepare briefs/dossiers locally, and stays silent on "Nothing to prepare.". '
+              + 'Default "act".',
           },
           instructions: { type: 'string', description: 'What to do each time it fires, written to yourself.' },
         },
@@ -333,15 +341,44 @@ const SKILL_TOOL: ToolDef = {
   },
 }
 
+export const PROPOSE_MEMORY_RULE_TOOL: ToolDef = {
+  type: 'function',
+  function: {
+    name: 'propose_memory_rule',
+    description:
+      'Propose a standing behavioral rule for your operator to review via an editable confirmation card. '
+      + 'NEVER mutates MEMORY.md directly — the rule is only saved if your operator accepts the card. '
+      + 'Limited to at most 1 proposal per turn.',
+    parameters: {
+      type: 'object',
+      properties: {
+        rule: { type: 'string', description: 'One clear single-line standing rule (max 300 characters).' },
+        reason: { type: 'string', description: 'Brief reason for suggesting this rule (max 300 characters).' },
+      },
+      required: ['rule', 'reason'],
+    },
+  },
+}
+
 /**
- * watch routine 的回合只拿这些：看网页、读文件、读技能、汇报、提问、把动作扣下来等人批。
- * 能改东西的（shell、写文件、点击、输入、按键）、能把话传出去的（转交）、能改规矩的都不给。
+ * watch routine 的回合只拿这些：看网页、读文件、读技能、汇报、提问、提议规矩、把动作扣下来等人批。
+ * 能改东西的（shell、写文件、点击、输入、按键）、能把话传出去的（转交）、能直接改规矩的都不给。
  */
 export const WATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'message_user', 'hold_for_approval', 'ask_operator', 'read_skill', 'read_file',
+  'message_user', 'hold_for_approval', 'ask_operator', 'propose_memory_rule', 'read_skill', 'read_file',
   'browser_goto', 'browser_extract', 'browser_scroll', 'browser_back', 'browser_screenshot', 'ask_for_login',
   ...CONNECTOR_READ_TOOL_NAMES,
   ...WIKI_READ_TOOL_NAMES,
+])
+
+/**
+ * prepare routine 的回合在 watch 只读工具之上额外给 wiki_upsert 和工作区 write_file，
+ * 用于提前整理资料/简报草稿；仍禁止 shell、页面交互点击输入、同事转交和任何外部写入。
+ */
+export const PREPARE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ...WATCH_TOOL_NAMES,
+  'wiki_upsert',
+  'write_file',
 ])
 
 const RELAY_TOOL: ToolDef = {
@@ -375,7 +412,9 @@ export function buildTools(opts: {
   canRelay?: boolean
   hasSkills?: boolean
   hasWiki?: boolean
+  canProposeRule?: boolean
   watch?: boolean
+  routineMode?: RoutineMode
   /** false = 这一回合不是操作者开的头：改常设安排的工具不列出来（执行时另有一道门） */
   operatorTurn?: boolean
   /** false = 这台电脑没有命令行（本机模式默认）：连工具都不列，模型就不会去试 */
@@ -410,6 +449,7 @@ export function buildTools(opts: {
   const tools = [
     MESSAGE_USER_TOOL,
     ...WORKFLOW_TOOLS,
+    ...(opts.canProposeRule === true ? [PROPOSE_MEMORY_RULE_TOOL] : []),
     ...(opts.hasWiki ? WIKI_TOOLS : []),
     ...(opts.hasSkills ? [SKILL_TOOL] : []),
     ...(opts.canRelay ? [RELAY_TOOL] : []),
@@ -417,7 +457,12 @@ export function buildTools(opts: {
     ...(opts.connectorTools ?? []),
     ...(opts.mcpTools ?? []),
   ].filter((t) => opts.operatorTurn !== false || !OPERATOR_ONLY_TOOL_NAMES.has(t.function.name))
-  return opts.watch
-    ? tools.filter((t) => WATCH_TOOL_NAMES.has(t.function.name) || Boolean(opts.mcpReadToolNames?.has(t.function.name)))
-    : tools
+  const effectiveMode: RoutineMode = opts.routineMode ?? (opts.watch ? 'watch' : 'act')
+  if (effectiveMode === 'watch') {
+    return tools.filter((t) => WATCH_TOOL_NAMES.has(t.function.name) || Boolean(opts.mcpReadToolNames?.has(t.function.name)))
+  }
+  if (effectiveMode === 'prepare') {
+    return tools.filter((t) => PREPARE_TOOL_NAMES.has(t.function.name) || Boolean(opts.mcpReadToolNames?.has(t.function.name)))
+  }
+  return tools
 }

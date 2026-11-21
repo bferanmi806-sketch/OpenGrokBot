@@ -1,8 +1,8 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../i18n'
-import type { AboutInfo, ConnectionsState, ModelConnection, ProviderPreset, SettingsView, SetupInfo } from '../types'
+import type { AboutInfo, ConnectionsState, ModelConnection, ProviderPreset, QuietDigestSummary, SettingsView, SetupInfo } from '../types'
 import { SettingsDialog } from './SettingsDialog'
 
 const providers: ProviderPreset[] = [
@@ -59,14 +59,23 @@ function gateway(settings: SettingsView, extra: Record<string, (body: Record<str
   })
 }
 
-function show(opts: { lang?: 'en' | 'zh-CN'; theme?: 'dark' | 'light' | 'system' } = {}) {
+function show(opts: { lang?: 'en' | 'zh-CN'; theme?: 'dark' | 'light' | 'system'; quietDigestTick?: number } = {}) {
   const props = { onLanguage: vi.fn(), onTheme: vi.fn(), onBrowser: vi.fn(), onModels: vi.fn(), onWizard: vi.fn(), onSignedOut: vi.fn(), onClose: vi.fn() }
-  render(
+  const renderView = (tick?: number) => (
     <I18nProvider lang={opts.lang ?? 'en'}>
-      <SettingsDialog llms={llms} providers={providers} browser={null} language="" theme={opts.theme ?? 'dark'} {...props} />
-    </I18nProvider>,
+      <SettingsDialog
+        llms={llms}
+        providers={providers}
+        browser={null}
+        language=""
+        theme={opts.theme ?? 'dark'}
+        {...(tick !== undefined ? { quietDigestTick: tick } : {})}
+        {...props}
+      />
+    </I18nProvider>
   )
-  return props
+  const rendered = render(renderView(opts.quietDigestTick))
+  return { ...props, rerenderTick: (tick: number) => rendered.rerender(renderView(tick)) }
 }
 
 afterEach(() => { vi.unstubAllGlobals() })
@@ -250,5 +259,204 @@ describe('SettingsDialog', () => {
     await waitFor(() => expect(calls.at(-1)).toEqual({ method: 'PUT', path: '/api/settings', body: { theme: 'light' } }))
     await user.click(screen.getByLabelText('Follow system'))
     expect(p.onTheme).toHaveBeenCalledWith('system')
+  })
+
+  it('toggles Quiet Hours, saves start/end times, shows pending digest count, and delivers now', async () => {
+    let quietState: SettingsView['values'] = {
+      ...view().values,
+      quietHoursEnabled: false,
+      quietHoursStart: '22:00',
+      quietHoursEnd: '08:00',
+    }
+    let digestSummary: QuietDigestSummary = {
+      enabled: false,
+      active: false,
+      start: '22:00',
+      end: '08:00',
+      timeZone: 'America/Los_Angeles',
+      pendingCount: 2,
+      byBot: [{ botId: 'researcher', count: 2, latestAt: Date.now() }],
+    }
+
+    const calls = gateway(view(quietState), {
+      'GET /api/quiet-digest': () => ({ body: digestSummary }),
+      'PUT /api/settings': (b) => {
+        if ('quietHoursEnabled' in b) {
+          quietState = { ...quietState, quietHoursEnabled: Boolean(b.quietHoursEnabled) }
+          digestSummary = { ...digestSummary, enabled: quietState.quietHoursEnabled!, active: quietState.quietHoursEnabled! }
+        }
+        if ('quietHoursStart' in b) {
+          quietState = { ...quietState, quietHoursStart: String(b.quietHoursStart) }
+          digestSummary = { ...digestSummary, start: quietState.quietHoursStart! }
+        }
+        if ('quietHoursEnd' in b) {
+          quietState = { ...quietState, quietHoursEnd: String(b.quietHoursEnd) }
+          digestSummary = { ...digestSummary, end: quietState.quietHoursEnd! }
+        }
+        return { body: view(quietState, { quietHoursEnabled: 'saved', quietHoursStart: 'saved', quietHoursEnd: 'saved' }) }
+      },
+      'POST /api/quiet-digest/flush': () => {
+        const flushed = digestSummary.pendingCount
+        digestSummary = { ...digestSummary, pendingCount: 0, byBot: [] }
+        return { body: { flushed, threads: ['dm:researcher'] } }
+      },
+    })
+
+    const user = userEvent.setup()
+    show()
+
+    const toggle = await screen.findByLabelText('Hold non-urgent scheduled checks for a morning digest')
+    expect(toggle).not.toBeChecked()
+    expect(screen.getByText('Timezone: America/Los_Angeles')).toBeInTheDocument()
+    expect(screen.getByText('2 updates waiting for the morning digest')).toBeInTheDocument()
+
+    await user.click(toggle)
+    await waitFor(() => {
+      expect(calls).toContainEqual({ method: 'PUT', path: '/api/settings', body: { quietHoursEnabled: true } })
+    })
+    expect(await screen.findByText('Quiet Hours active now')).toBeInTheDocument()
+
+    const startInput = screen.getByLabelText('Starts') as HTMLInputElement
+    const endInput = screen.getByLabelText('Ends') as HTMLInputElement
+    const saveQuietBtn = screen.getByRole('button', { name: 'Save (Quiet Hours)' })
+    expect(saveQuietBtn).toBeDisabled()
+
+    fireEvent.change(startInput, { target: { value: '23:30' } })
+    fireEvent.change(endInput, { target: { value: '23:30' } })
+    expect(screen.getByText(/Start and end are the same/)).toBeInTheDocument()
+
+    fireEvent.change(endInput, { target: { value: '07:15' } })
+    expect(saveQuietBtn).not.toBeDisabled()
+    await user.click(saveQuietBtn)
+    await waitFor(() => {
+      expect(calls).toContainEqual({
+        method: 'PUT',
+        path: '/api/settings',
+        body: { quietHoursStart: '23:30', quietHoursEnd: '07:15' },
+      })
+    })
+    await waitFor(() => expect(saveQuietBtn).toBeDisabled())
+
+    const deliverBtn = screen.getByRole('button', { name: 'Deliver now' })
+    await user.click(deliverBtn)
+    await waitFor(() => {
+      expect(calls).toContainEqual({ method: 'POST', path: '/api/quiet-digest/flush', body: {} })
+    })
+    expect(await screen.findByText('Delivered 2 buffered updates.')).toBeInTheDocument()
+    expect(await screen.findByText('No updates waiting')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Deliver now' })).toBeNull()
+  })
+
+  it('uses singular copy when flushing 1 buffered update and clears feedback on quiet time edits or new pending updates', async () => {
+    let digestSummary: QuietDigestSummary = {
+      enabled: true,
+      active: true,
+      start: '22:00',
+      end: '08:00',
+      timeZone: 'UTC',
+      pendingCount: 1,
+      byBot: [{ botId: 'chief', count: 1, latestAt: Date.now() }],
+    }
+    gateway(view({ quietHoursEnabled: true, quietHoursStart: '22:00', quietHoursEnd: '08:00' }), {
+      'GET /api/quiet-digest': () => ({ body: digestSummary }),
+      'PUT /api/settings': () => ({ status: 400, body: { error: 'invalid_settings', errors: [{ key: 'quietHoursStart', code: 'invalid' }] } }),
+      'POST /api/quiet-digest/flush': () => {
+        digestSummary = { ...digestSummary, pendingCount: 0, byBot: [] }
+        return { body: { flushed: 1, threads: ['dm:chief'] } }
+      },
+    })
+
+    const user = userEvent.setup()
+    const { rerenderTick } = show({ quietDigestTick: 0 })
+
+    expect(await screen.findByText('1 update waiting for the morning digest')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Deliver now' }))
+    expect(await screen.findByText('Delivered 1 buffered update.')).toBeInTheDocument()
+    expect(await screen.findByText('No updates waiting')).toBeInTheDocument()
+
+    // Incoming WS refresh with new pending updates clears stale delivery confirmation
+    digestSummary = { ...digestSummary, pendingCount: 1, byBot: [{ botId: 'chief', count: 1, latestAt: Date.now() }] }
+    rerenderTick(1)
+    expect(await screen.findByText('1 update waiting for the morning digest')).toBeInTheDocument()
+    expect(screen.queryByText('Delivered 1 buffered update.')).toBeNull()
+
+    // Editing quietStart clears stale quietHoursStart field errors
+    const startInput = screen.getByLabelText('Starts') as HTMLInputElement
+    fireEvent.change(startInput, { target: { value: '23:00' } })
+    await user.click(screen.getByRole('button', { name: 'Save (Quiet Hours)' }))
+    expect(await screen.findByText('This value is not valid.')).toBeInTheDocument()
+    fireEvent.change(startInput, { target: { value: '21:30' } })
+    expect(screen.queryByText('This value is not valid.')).toBeNull()
+  })
+
+  it('ignores stale out-of-order fetchQuietDigest responses and preserves panel on transient refresh failures', async () => {
+    let digestCall = 0
+    let releaseStale!: (res: Response) => void
+    const initialSummary: QuietDigestSummary = {
+      enabled: true,
+      active: true,
+      start: '22:00',
+      end: '08:00',
+      timeZone: 'America/Los_Angeles',
+      pendingCount: 2,
+      byBot: [{ botId: 'chief', count: 2, latestAt: Date.now() }],
+    }
+    const emptySummary: QuietDigestSummary = { ...initialSummary, pendingCount: 0, byBot: [] }
+
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET'
+      const json = (body: unknown, status = 200) =>
+        new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+      if (method === 'GET' && path === '/api/settings') {
+        return json(view({ quietHoursEnabled: true, quietHoursStart: '22:00', quietHoursEnd: '08:00' }))
+      }
+      if (method === 'GET' && path === '/api/setup') return json(setup)
+      if (method === 'GET' && path === '/api/about') return json(about)
+      if (method === 'POST' && path === '/api/quiet-digest/flush') {
+        return json({ flushed: 2, threads: ['dm:chief'] })
+      }
+      if (method === 'GET' && path === '/api/quiet-digest') {
+        digestCall += 1
+        if (digestCall === 1) return json(initialSummary)
+        if (digestCall === 2) {
+          // Slow response triggered by quietDigestTick=1 before deliverNow finishes
+          return new Promise<Response>((resolve) => { releaseStale = resolve })
+        }
+        if (digestCall === 3) return json(emptySummary)
+        // Call 4: transient 500 error during refresh
+        return json({ error: 'temporary failure' }, 500)
+      }
+      return json({}, 404)
+    }))
+
+    const user = userEvent.setup()
+    const { rerenderTick } = show({ quietDigestTick: 0 })
+
+    expect(await screen.findByText('2 updates waiting for the morning digest')).toBeInTheDocument()
+
+    // Trigger a slow tick refresh (call #2)
+    rerenderTick(1)
+    await waitFor(() => expect(releaseStale).toBeTypeOf('function'))
+
+    // While call #2 is still in flight, user clicks Deliver now -> call #3 returns pendingCount: 0
+    await user.click(screen.getByRole('button', { name: 'Deliver now' }))
+    expect(await screen.findByText('Delivered 2 buffered updates.')).toBeInTheDocument()
+    expect(await screen.findByText('No updates waiting')).toBeInTheDocument()
+
+    // Now the stale call #2 finally resolves with pendingCount: 2 — must be ignored!
+    releaseStale(new Response(JSON.stringify(initialSummary), { status: 200, headers: { 'content-type': 'application/json' } }))
+    await waitFor(() => expect(digestCall).toBe(3))
+    // Give microtasks a chance to flush
+    await Promise.resolve()
+    expect(screen.getByText('No updates waiting')).toBeInTheDocument()
+    expect(screen.getByText('Delivered 2 buffered updates.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Deliver now' })).toBeNull()
+
+    // Transient 500 on call #4 must NOT wipe the Quiet Hours status panel
+    rerenderTick(2)
+    await waitFor(() => expect(digestCall).toBe(4))
+    await Promise.resolve()
+    expect(screen.getByText('Timezone: America/Los_Angeles')).toBeInTheDocument()
+    expect(screen.getByText('No updates waiting')).toBeInTheDocument()
   })
 })

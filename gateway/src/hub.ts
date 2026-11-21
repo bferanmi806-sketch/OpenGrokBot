@@ -16,6 +16,7 @@ export type GatewayEvent =
   | { type: 'connectors_changed' }
   | { type: 'mcp_changed' }
   | { type: 'wiki_changed' }
+  | { type: 'quiet_digest_changed' }
 
 type WsLike = { send(data: string): void }
 

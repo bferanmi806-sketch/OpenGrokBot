@@ -57,6 +57,10 @@
 | memory | 记忆 | |
 | routine | 例行任务 | 定时的、webhook 触发的都叫这个 |
 | watch | 值守 | 只看不动、有事才出声的例行任务 |
+| prepare | 备料 | 介于值守与执行之间的例行任务，可写入团队知识库与工作区，不能发外信或跑命令 |
+| Quiet Hours | 免打扰时段 | 暂存非紧急定时巡检汇报、结束后合并发送的时段设置 |
+| Morning digest | 晨报汇总 | 免打扰时段结束或手动投递后汇总发出的一张更新卡片 |
+| rule proposal | 规矩提议 | 同事或多次驳回触发的、待你核对并存入 `MEMORY.md` 的常驻规矩建议 |
 | handoff | 转交 | 同事之间 |
 | take over / sign in for it | 接管 / 登录 | 你在它的浏览器里亲手操作 |
 | needs you | 等你 | 侧栏状态 |

@@ -425,4 +425,68 @@ describe('Thread', () => {
     })
     expect(prevented).toBe(false)
   })
+
+  it('renders rule_proposal and quiet_digest messages and forwards rule proposal resolution', async () => {
+    const onResolveRuleProposal = vi.fn().mockResolvedValue(undefined)
+    const proactive: Message[] = [
+      {
+        id: 60,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'rule_proposal',
+        content: '',
+        created_at: 60,
+        payload: {
+          proposalId: 7,
+          rule: 'Never send Slack blasts on weekends',
+          reason: 'Suggested by teammate',
+          source: 'agent',
+          sourceTainted: true,
+          status: 'pending',
+        },
+      },
+      {
+        id: 61,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'quiet_digest',
+        content: '',
+        created_at: 61,
+        payload: {
+          windowStart: '22:00',
+          windowEnd: '08:00',
+          itemCount: 1,
+          items: [
+            {
+              id: 1,
+              routineId: 2,
+              routineName: 'Overnight brief',
+              routineMode: 'prepare',
+              kind: 'text',
+              summary: 'Prepared Q3 brief.',
+              createdAt: 61,
+            },
+          ],
+        },
+      },
+    ]
+    render(
+      <Thread
+        conversation={dm}
+        roster={roster}
+        messages={proactive}
+        thinking={false}
+        onSend={() => {}}
+        onDecide={() => {}}
+        onResolveRuleProposal={onResolveRuleProposal}
+      />,
+    )
+    expect(screen.getByText('Rule proposal')).toBeInTheDocument()
+    expect(screen.getByText('External source — review carefully')).toBeInTheDocument()
+    expect(screen.getByText('Morning digest · 1 update')).toBeInTheDocument()
+    expect(screen.getByText('Prepared Q3 brief.')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save to MEMORY.md' }))
+    expect(onResolveRuleProposal).toHaveBeenCalledWith(7, 'accept', 'Never send Slack blasts on weekends')
+  })
 })

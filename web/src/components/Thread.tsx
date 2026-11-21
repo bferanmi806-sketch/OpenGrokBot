@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
 import type {
   ActivityPayload, ApprovalEditInput, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, Conversation, LoginPayload, MemoryPayload,
-  Message, QuestionPayload, ReportPayload, RoutinePayload, RuleDuration, ScreenshotPayload, WebhookPayload,
+  Message, QuestionPayload, QuietDigestPayload, ReportPayload, RoutinePayload, RuleDuration, RuleProposalPayload, ScreenshotPayload, WebhookPayload,
 } from '../types'
 import { ApiError } from '../api'
 import { ACCEPT, isImageType } from '../attachments'
@@ -20,8 +20,10 @@ import { LoginChip } from './LoginChip'
 import { Markdown } from './Markdown'
 import { MemoryChip } from './MemoryChip'
 import { QuestionChip } from './QuestionChip'
+import { QuietDigestChip } from './QuietDigestChip'
 import { ReportChip } from './ReportChip'
 import { RoutineChip } from './RoutineChip'
+import { RuleProposalChip } from './RuleProposalChip'
 import { ScreenshotChip } from './ScreenshotChip'
 import { WebhookChip } from './WebhookChip'
 
@@ -58,7 +60,7 @@ type Mention = { id: string; name: string; emoji: string }
 /** 单条消息独立 memo：底部输入框每次敲键盘、挪光标都不再把上面 ~200 条 Markdown 重新编译一遍 */
 const ThreadMessageRow = memo(function ThreadMessageRow({
   message, dayHeader, showTime, sameSpeakerNext, speaker, t,
-  onDecide, onAnswer, onOpenScreen, onPreview, onRemoveFile, onRequestRemoveFile,
+  onDecide, onAnswer, onResolveRuleProposal, onOpenScreen, onPreview, onRemoveFile, onRequestRemoveFile,
 }: {
   message: Message
   dayHeader: string | null
@@ -68,6 +70,7 @@ const ThreadMessageRow = memo(function ThreadMessageRow({
   t: T
   onDecide: (approvalId: number, decision: 'approve' | 'discard', remember?: RuleDuration, items?: number[], edit?: ApprovalEditInput) => void | Promise<void>
   onAnswer?: ((messageId: number, choices: string[]) => void | Promise<void>) | undefined
+  onResolveRuleProposal?: ((proposalId: number, decision: 'accept' | 'dismiss', rule?: string) => void | Promise<void>) | undefined
   onOpenScreen?: (() => void) | undefined
   onPreview: (img: LightboxImage) => void
   onRemoveFile?: ((id: string) => void) | undefined
@@ -109,6 +112,15 @@ const ThreadMessageRow = memo(function ThreadMessageRow({
         )
       case 'question':
         return <QuestionChip payload={m.payload as QuestionPayload} onAnswer={(choices) => onAnswer?.(m.id, choices)} />
+      case 'rule_proposal':
+        return (
+          <RuleProposalChip
+            payload={m.payload as RuleProposalPayload}
+            {...(onResolveRuleProposal ? { onResolve: onResolveRuleProposal } : {})}
+          />
+        )
+      case 'quiet_digest':
+        return <QuietDigestChip payload={m.payload as QuietDigestPayload} />
       case 'approval_resolved': {
         const p = m.payload as ApprovalResolvedPayload
         return (
@@ -172,7 +184,7 @@ const stillMentioned = (text: string, name: string) =>
 const carriesFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files')
 
 export function Thread({
-  conversation, messages, thinking, onSend, onDecide, onAnswer, roster,
+  conversation, messages, thinking, onSend, onDecide, onAnswer, onResolveRuleProposal, roster,
   onOpenScreen, onToggleScreen, panelOpen, onStop, headerExtra, banner, files, onToggleSidebar,
 }: {
   conversation: Conversation
@@ -186,6 +198,8 @@ export function Thread({
   onDecide: (approvalId: number, decision: 'approve' | 'discard', remember?: RuleDuration, items?: number[], edit?: ApprovalEditInput) => void | Promise<void>
   /** 问题卡片上点了选项 */
   onAnswer?: (messageId: number, choices: string[]) => void | Promise<void>
+  /** 接受或忽略一条规矩提议 */
+  onResolveRuleProposal?: (proposalId: number, decision: 'accept' | 'dismiss', rule?: string) => void | Promise<void>
   roster: Record<string, { name: string; emoji: string }>
   onOpenScreen?: () => void
   onToggleScreen?: () => void
@@ -446,13 +460,18 @@ export function Thread({
     submit()
   }
 
-  const callbacksRef = useRef({ onDecide, onAnswer, onOpenScreen, removeFile: files?.remove })
-  callbacksRef.current = { onDecide, onAnswer, onOpenScreen, removeFile: files?.remove }
+  const callbacksRef = useRef({ onDecide, onAnswer, onResolveRuleProposal, onOpenScreen, removeFile: files?.remove })
+  callbacksRef.current = { onDecide, onAnswer, onResolveRuleProposal, onOpenScreen, removeFile: files?.remove }
   const stableDecide = useCallback(
     (...args: Parameters<typeof onDecide>) => callbacksRef.current.onDecide(...args),
     [],
   )
   const stableAnswer = useCallback((messageId: number, choices: string[]) => callbacksRef.current.onAnswer?.(messageId, choices), [])
+  const stableResolveRuleProposal = useCallback(
+    (proposalId: number, decision: 'accept' | 'dismiss', rule?: string) =>
+      callbacksRef.current.onResolveRuleProposal?.(proposalId, decision, rule),
+    [],
+  )
   const stableOpenScreen = useCallback(() => callbacksRef.current.onOpenScreen?.(), [])
   const stableRemoveFile = useCallback((id: string) => callbacksRef.current.removeFile?.(id), [])
   const hasRemoveFile = Boolean(files?.remove)
@@ -579,6 +598,7 @@ export function Thread({
               t={t}
               onDecide={stableDecide}
               onAnswer={onAnswer ? stableAnswer : undefined}
+              onResolveRuleProposal={onResolveRuleProposal ? stableResolveRuleProposal : undefined}
               onOpenScreen={onOpenScreen ? stableOpenScreen : undefined}
               onPreview={setLightbox}
               onRemoveFile={hasRemoveFile ? stableRemoveFile : undefined}

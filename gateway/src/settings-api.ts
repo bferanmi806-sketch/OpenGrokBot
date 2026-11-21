@@ -7,7 +7,7 @@ import { checkConnection, listModels } from './llm-check.js'
 import { PROVIDERS, providerById } from './providers.js'
 import {
   checkSettings, currentConfig, isSubscriptionToken, lockedKeys, maskKey, parseSetting, readSavedSettings, resolveApiKey, resolveSettings,
-  saveApiKey, saveSettings, validApiKey, type SettingError, type SettingKey,
+  saveApiKey, saveSettings, validApiKey, type SettingError, type SettingKey, type Settings,
 } from './settings.js'
 
 export type SettingsDeps = {
@@ -16,6 +16,7 @@ export type SettingsDeps = {
   /** 网关启动时生效的配置：用来判断哪些改动要重启才算数 */
   startedWith: Config
   fetchImpl?: typeof fetch
+  onSettingsSaved?: (before: Settings, after: Settings) => void | Promise<void>
 }
 
 /** 只在启动时读一次的设置，改了要重启网关（浏览器镜像下载前现读，不在其列） */
@@ -90,12 +91,15 @@ export function mountSettings(app: Hono, deps: SettingsDeps & { db: Db; /** 启�
         if (patch.vision === undefined && !locked.has('vision')) enriched.vision = preset.vision
       }
     }
+    const beforeSettings = resolveSettings(env, readSavedSettings(db)).values
     saveSettings(db, enriched)
     const after = mainConnection(startedWith, env, db)
     if (apiKey !== undefined) saveApiKey(dataDir, typeof apiKey === 'string' ? apiKey : '')
     else if (after.baseURL !== before.baseURL) saveApiKey(dataDir, '') // 换了地址没给新 key：旧 key 不跟过去
     // 默认连接换了地方：同事在它上面单独选的模型多半不存在了
     if (after.provider !== before.provider || after.baseURL !== before.baseURL || after.api !== before.api) resetBotModels(db, MAIN)
+    const afterSettings = resolveSettings(env, readSavedSettings(db)).values
+    await deps.onSettingsSaved?.(beforeSettings, afterSettings)
     return c.json(view())
   })
 

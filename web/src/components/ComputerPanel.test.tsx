@@ -151,12 +151,14 @@ describe('ComputerPanel', () => {
 
   it('marks watch routines, lists shared skills and the recent actions', () => {
     const watch = { ...running.routines[0]!, id: 3, name: 'Status watch', human: 'every 30 minutes', mode: 'watch' as const }
+    const prepare = { ...running.routines[0]!, id: 4, name: 'Nightly prep', human: 'every day at 06:00', mode: 'prepare' as const }
     render(<ComputerPanel
       info={{
         ...running,
-        routines: [watch],
+        routines: [watch, prepare],
         skills: [{ name: 'weekly-report', description: 'How the Friday report is laid out' }],
         actions: [
+          { id: 3, thread_id: 'dm:researcher', trigger: 'prepare', tool: 'wiki_upsert', summary: 'client/acme', ok: true, ms: 120, created_at: Date.now() },
           { id: 2, thread_id: 'dm:researcher', trigger: 'webhook', tool: 'browser_goto', summary: 'status.example.com', ok: false, ms: 900, created_at: Date.now() },
           { id: 1, thread_id: 'dm:researcher', trigger: 'you', tool: 'approval', summary: 'approved by you: send it', ok: null, ms: null, created_at: Date.now() },
         ],
@@ -165,6 +167,8 @@ describe('ComputerPanel', () => {
       onClose={() => {}}
     />)
     expect(screen.getByText('watch')).toBeInTheDocument()
+    expect(screen.getByText('prepare')).toBeInTheDocument()
+    expect(screen.getByText(/· prepare$/)).toBeInTheDocument()
     expect(screen.getByText('weekly-report')).toBeInTheDocument()
     expect(screen.getByText('How the Friday report is laid out')).toBeInTheDocument()
     expect(screen.getByText('status.example.com').closest('li')).toHaveClass('failed')

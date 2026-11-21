@@ -267,6 +267,7 @@ export type ResolveApprovalPatch = {
   detail?: string
   target?: string
   executionJson?: string
+  now?: number
 }
 
 /** 只有 pending 能被解决；重复点击返回 null，调用方据此跳过重复放行。 */
@@ -278,7 +279,7 @@ export function resolveApproval(
 ): ApprovalRow | null {
   const status: ApprovalStatus = decision === 'approve' ? 'approved' : 'discarded'
   const sets = ['status = ?', 'resolved_at = ?']
-  const params: unknown[] = [status, Date.now()]
+  const params: unknown[] = [status, patch?.now ?? Date.now()]
   if (patch) {
     if (patch.action !== undefined) {
       sets.push('action = ?')

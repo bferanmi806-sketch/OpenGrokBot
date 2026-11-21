@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiError, SignedOut, answerQuestion, checkSession, connectEvents, createBot, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
-  fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchUiPrefs, forgetMemoryRule, removeUpload, resolveApproval, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers,
+  fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchUiPrefs, forgetMemoryRule, removeUpload, resolveApproval, resolveRuleProposal, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers,
   setComputerShell, setComputerWindow, stopThread, updateRoutine, uploadFile,
 } from './api'
 import { BotModelChip, BotModelPicker, botModel, botSeesImages } from './components/BotModelPicker'
@@ -23,7 +23,7 @@ import { errorText } from './i18n/describe'
 import { applyHello, applyStatus, clearDone } from './presence'
 import { applyTheme, hasStoredTheme, readStoredTheme, resolveTheme, systemTheme, writeStoredTheme } from './theme'
 import type {
-  BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, SetupInfo, ThemeSetting,
+  BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, RuleProposalPayload, SetupInfo, ThemeSetting,
 } from './types'
 
 const EMPTY_CONNECTORS: ConnectorsSnapshot = {
@@ -142,6 +142,7 @@ function Workspace({
   const [connectorsOpen, setConnectorsOpen] = useState(false)
   const [wikiOpen, setWikiOpen] = useState(false)
   const [wikiRefreshTick, setWikiRefreshTick] = useState(0)
+  const [quietDigestTick, setQuietDigestTick] = useState(0)
   const [pickerFor, setPickerFor] = useState<string | null>(null)
   /** 首次启动向导：网关说要（needsSetup）才出；走完之前一直开着，哪怕中途已经存好了 key */
   const [setup, setSetup] = useState<SetupInfo | null>(null)
@@ -204,16 +205,25 @@ function Workspace({
     try {
       const fetched = await fetchMessages(thread)
       if (seq !== msgFetchSeq.current || threadIdRef.current !== thread) return
-      const live = liveDuringFetch.current
+      const liveInThread = new Map<number, Message>()
+      for (const [id, m] of liveDuringFetch.current) {
+        if (m.thread_id === thread) liveInThread.set(id, m)
+      }
       setMessages((prev) => {
-        const recent = new Map<number, Message>()
-        for (const m of prev) if (m.thread_id === thread) recent.set(m.id, m)
-        for (const [id, m] of live) if (m.thread_id === thread) recent.set(id, m)
-        const merged = fetched.map((m) => recent.get(m.id) ?? m)
+        const merged = fetched.map((m) => liveInThread.get(m.id) ?? m)
         const known = new Set(merged.map((m) => m.id))
         const maxFetchedId = fetched.reduce((mx, m) => Math.max(mx, m.id), 0)
-        for (const m of recent.values()) {
-          if (!known.has(m.id) && (live.has(m.id) || m.id > maxFetchedId)) merged.push(m)
+        for (const m of liveInThread.values()) {
+          if (!known.has(m.id)) {
+            merged.push(m)
+            known.add(m.id)
+          }
+        }
+        for (const m of prev) {
+          if (m.thread_id === thread && !known.has(m.id) && m.id > maxFetchedId) {
+            merged.push(m)
+            known.add(m.id)
+          }
         }
         return merged.sort((a, b) => a.id - b.id)
       })
@@ -325,6 +335,7 @@ function Workspace({
         void resync()
         if (panelFor.current) void loadPanel(panelFor.current)
         setWikiRefreshTick((n) => n + 1)
+        setQuietDigestTick((n) => n + 1)
         return
       }
       if (e.type === 'status') {
@@ -353,6 +364,10 @@ function Workspace({
         setWikiRefreshTick((n) => n + 1)
         return
       }
+      if (e.type === 'quiet_digest_changed') {
+        setQuietDigestTick((n) => n + 1)
+        return
+      }
       if (e.type !== 'message') return // 更新的网关发来不认识的事件，不归这里管
       if (e.message.sender !== 'user' && e.message.kind !== 'activity') postedRef.current.add(e.message.sender)
       // 就地更新的旧消息（activity 卡片收尾、审批 chip 翻转）不该顶掉更新的那条预览；没变就不换数组引用
@@ -367,8 +382,8 @@ function Workspace({
       if (['approval_request', 'approval_resolved', 'question'].includes(e.message.kind)) {
         void refreshConversations().catch(guard)
       }
-      // 面板开着时，记忆规则变动、放行规则落地或例行任务改动都实时刷新
-      if (panelFor.current && ['memory_updated', 'approval_resolved', 'activity'].includes(e.message.kind)) {
+      // 面板开着时，记忆规则变动、规矩提议、晨报汇总、放行规则落地或例行任务改动都实时刷新
+      if (panelFor.current && ['memory_updated', 'approval_resolved', 'activity', 'rule_proposal', 'quiet_digest'].includes(e.message.kind)) {
         void loadPanel(panelFor.current)
       }
       if (e.threadId === threadIdRef.current) {
@@ -440,6 +455,51 @@ function Workspace({
       guard(err)
     }
   }
+
+  const onResolveRuleProposal = useCallback(
+    async (proposalId: number, decision: 'accept' | 'dismiss', rule?: string) => {
+      try {
+        const res = await resolveRuleProposal(proposalId, decision, rule)
+        setMessages((ms) => {
+          let changed = false
+          const next = ms.map((m) => {
+            if (m.kind !== 'rule_proposal') return m
+            const payload = m.payload as RuleProposalPayload | null
+            if (!payload || payload.proposalId !== proposalId || payload.status !== 'pending') return m
+            changed = true
+            const originalRule = payload.rule
+            const updated: Message = {
+              ...m,
+              payload: {
+                ...payload,
+                status: res.proposal.status,
+                rule: res.proposal.rule,
+                edited: res.proposal.status === 'accepted' && res.proposal.rule !== originalRule,
+                resolvedAt: res.proposal.resolvedAt ?? Date.now(),
+              },
+            }
+            if (inFlightFetches.current > 0) liveDuringFetch.current.set(updated.id, updated)
+            return updated
+          })
+          return changed ? next : ms
+        })
+      } catch (err: unknown) {
+        if (err instanceof SignedOut) {
+          setSignedOut(true)
+          return
+        }
+        if (err instanceof ApiError && err.status === 409) {
+          const current = threadIdRef.current
+          if (current) void loadMessages(current).catch(guard)
+          else void resync()
+          throw err
+        }
+        guard(err)
+        throw err
+      }
+    },
+    [guard, loadMessages, resync],
+  )
 
   const onForgetRule = (rule: string) => {
     if (!panel) return
@@ -630,6 +690,7 @@ function Workspace({
             })
           )}
           onAnswer={(messageId, choices) => answerQuestion(messageId, choices).catch((err) => { guard(err); throw err })}
+          onResolveRuleProposal={onResolveRuleProposal}
           onOpenScreen={openScreen}
           onToggleScreen={toggleScreen}
           panelOpen={Boolean(selected.kind === 'dm' && selected.members[0] && panel?.botId === selected.members[0])}
@@ -681,6 +742,7 @@ function Workspace({
           onBrowser={setSetupBrowser}
           onModels={() => setModelsOpen(true)}
           onWizard={() => void reopenWizard()}
+          quietDigestTick={quietDigestTick}
           onSignedOut={signOut}
           onClose={() => setSettingsOpen(false)}
         />

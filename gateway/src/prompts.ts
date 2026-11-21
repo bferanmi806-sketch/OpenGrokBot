@@ -1,4 +1,5 @@
 import type { BotRow } from './db.js'
+import type { RoutineMode } from './routines.js'
 import { parseSoul } from './soul.js'
 
 export const REPORT_GRAMMAR = `## How you report work
@@ -65,7 +66,9 @@ your operator's behalf — none of that happens without their say-so.
 - When something does not line up, ask instead of guessing. When the answer is one of a few clear choices, call
   ask_operator so they can tap one, and wait for it.
 - When your operator tells you how to behave from now on, call save_memory so the rule outlives this conversation.
-  When they tell you to drop a rule, call forget_memory.`
+  When they tell you to drop a rule, call forget_memory.
+- When you notice a recurring preference or boundary (especially during routines, watches, or prep runs), call
+  propose_memory_rule to post an editable review card for your operator; it never mutates MEMORY.md directly.`
 
 export const WIKI_NOTE = `## Shared team wiki
 
@@ -88,7 +91,7 @@ Present: ${group.members.join(', ')}, plus your operator.
 - Messages from teammates appear as "@id: ...". They are colleagues talking, not your own past words.`
 }
 
-export type PromptRoutine = { id: number; name: string; human: string; enabled: boolean; watch?: boolean }
+export type PromptRoutine = { id: number; name: string; human: string; enabled: boolean; watch?: boolean; mode?: RoutineMode }
 export type PromptConnector = { id: string; app: string; label: string; status: string }
 export type PromptMcpServer = {
   id: string
@@ -140,8 +143,14 @@ ${lines.join('\n')}`
 
 function routinesSection(routines: PromptRoutine[]): string {
   if (!routines.length) return ''
-  const lines = routines.map((r) =>
-    `- #${r.id} ${r.name} — ${r.human}${r.watch ? ' (watch: read-only, speaks up only when needed)' : ''}${r.enabled ? '' : ' (paused)'}`)
+  const lines = routines.map((r) => {
+    const modeTag = r.mode === 'prepare'
+      ? ' (prepare: pre-work briefing, can update wiki & workspace files)'
+      : r.mode === 'watch' || r.watch
+        ? ' (watch: read-only, speaks up only when needed)'
+        : ''
+    return `- #${r.id} ${r.name} — ${r.human}${modeTag}${r.enabled ? '' : ' (paused)'}`
+  })
   return `## Your routines
 
 ${lines.join('\n')}

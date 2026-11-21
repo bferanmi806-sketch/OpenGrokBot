@@ -20,9 +20,10 @@ import {
   type PromptMcpServer,
   type PromptRoutine,
 } from './prompts.js'
-import { validateReportPayload } from './report.js'
+import type { CreateRuleProposalResult } from './proactive/rule-proposals.js'
+import { validateReportPayload, type ReportPayload } from './report.js'
 import { normalizeMode, type RoutineMode } from './routines.js'
-import { buildTools, OPERATOR_ONLY_TOOL_NAMES, WATCH_TOOL_NAMES } from './tools.js'
+import { buildTools, OPERATOR_ONLY_TOOL_NAMES, PREPARE_TOOL_NAMES, WATCH_TOOL_NAMES } from './tools.js'
 import { WIKI_READ_TOOL_NAMES, WIKI_TOOL_NAMES } from './wiki/tools.js'
 
 export type AgentEvents = {
@@ -97,6 +98,17 @@ export type AgentDeps = {
   timeZone?: string
   /** watch routine 的回合：只有只读工具，不出 activity 卡片，没事就不说话 */
   watch?: boolean
+  /** 例行任务模式（优先于 watch 布尔值）：act | watch | prepare */
+  routineMode?: RoutineMode
+  /** Quiet Hours 静音缓冲模式：抑制 activity 卡片，非紧急 report / 最终正文存入晨报队列 */
+  quietBuffer?: boolean
+  onQuietBuffer?: (item: { kind: 'report' | 'text'; summary: string; payload: unknown }) => Promise<void> | void
+  /** 提议一条待操作者确认的常驻规矩（不会直接写入 MEMORY.md） */
+  onProposeMemoryRule?: (input: {
+    rule: string
+    reason: string
+    sourceTainted: boolean
+  }) => Promise<CreateRuleProposalResult>
   /** 每调一次工具记一笔（动作日志） */
   onAction?: (action: { tool: string; summary: string; ok: boolean; ms: number }) => void
   /** 共享技能的名字和一句话说明；正文经 onReadSkill 取 */
@@ -157,7 +169,16 @@ export type AttachmentBrief = {
 }
 
 /** 工具执行时要的回合级信息 */
-type TurnContext = AgentDeps & { ruleBlock: RuleBlock | null; turnTainted: boolean }
+type TurnContext = AgentDeps & {
+  ruleBlock: RuleBlock | null
+  turnTainted: boolean
+  effectiveMode: RoutineMode
+  proposedRuleThisTurn: boolean
+}
+
+function effectiveRoutineMode(deps: Pick<AgentDeps, 'routineMode' | 'watch'>): RoutineMode {
+  return deps.routineMode ?? (deps.watch ? 'watch' : 'act')
+}
 
 /** 真实的浏览器活（开页、读、点、再读、填）十几步就用完了；40 步够干完一件事，又挡得住死循环 */
 export const DEFAULT_MAX_STEPS = 40
@@ -196,8 +217,9 @@ export async function runTurn(
   if (persistUserMessage) {
     events.onMessage(insertMessage(db, { threadId, sender: 'user', kind: 'text', content: userText }))
   }
+  const effectiveMode = effectiveRoutineMode(deps)
   events.onStatus(bot.id, 'thinking')
-  const activity = createActivity(deps, events)
+  const activity = createActivity(deps, effectiveMode, events)
   try {
     const canRelay = Boolean(deps.onMessageBot)
     const hasWiki = Boolean(deps.onWikiTool)
@@ -216,6 +238,8 @@ export async function runTurn(
       ...deps,
       ruleBlock: computeRuleBlock(),
       turnTainted: initiallyTainted,
+      effectiveMode,
+      proposedRuleThisTurn: false,
     }
     let taintNotified = false
     const notifyTainted = () => {
@@ -245,8 +269,19 @@ export async function runTurn(
     const messages = withTimeNote(history, timeNote(now, timeZone))
     const hasSkills = Boolean(deps.skills?.length && deps.onReadSkill)
     const tools = buildTools({
-      hasComputer, hasWiki, canRelay, hasSkills, watch: deps.watch === true, shell: deps.computer?.shell, kind: deps.computer?.kind,
-      operatorTurn: deps.origin === 'operator', connectorTools: deps.connectorTools, mcpTools: deps.mcpTools, mcpReadToolNames: deps.mcpReadToolNames,
+      hasComputer,
+      hasWiki,
+      canRelay,
+      hasSkills,
+      canProposeRule: Boolean(deps.onProposeMemoryRule),
+      watch: effectiveMode === 'watch',
+      routineMode: effectiveMode,
+      shell: deps.computer?.shell,
+      kind: deps.computer?.kind,
+      operatorTurn: deps.origin === 'operator',
+      connectorTools: deps.connectorTools,
+      mcpTools: deps.mcpTools,
+      mcpReadToolNames: deps.mcpReadToolNames,
     })
     const maxSteps = deps.maxSteps && deps.maxSteps > 0 ? Math.floor(deps.maxSteps) : DEFAULT_MAX_STEPS
     const turnMs = deps.turnTimeoutMs ?? DEFAULT_TURN_MS
@@ -285,8 +320,17 @@ export async function runTurn(
         continue
       }
       const text = turn.content?.trim()
-      // watch 回合看完没发现什么：一句「Nothing new.」不值得落进线程，每半小时一条只会把真正的消息淹掉
-      if (text && !(deps.watch && QUIET.test(text))) say(text)
+      // watch / prepare 回合看完没发现需要打扰操作者的事：安静收场，不落进线程也不进晨报
+      const silent =
+        (effectiveMode === 'watch' && Boolean(text && WATCH_QUIET.test(text))) ||
+        (effectiveMode === 'prepare' && Boolean(text && PREPARE_QUIET.test(text)))
+      if (text && !silent) {
+        if (deps.quietBuffer && deps.onQuietBuffer) {
+          await deps.onQuietBuffer({ kind: 'text', summary: text, payload: { text } })
+        } else {
+          say(text)
+        }
+      }
       return 'replied'
     }
   } catch (err) {
@@ -377,11 +421,15 @@ type Activity = {
 
 /** 一个回合一张「在干什么」的卡片：第一次动电脑时落库，之后同一个 id 就地更新并广播。 */
 /** watch 回合用来说「没什么事」的那一句 */
-const QUIET = /^nothing new\.?$/i
+const WATCH_QUIET = /^nothing new\.?$/i
+/** prepare 回合用来说「无需准备」的那一句 */
+const PREPARE_QUIET = /^nothing (?:new|to prepare)\.?$/i
 
-function createActivity(deps: AgentDeps, events: AgentEvents): Activity {
-  // watch 回合在后台定时跑：每一步都进动作日志，但不在线程里铺 activity 卡片
-  if (deps.watch) return { start: (tool, summary) => ({ tool, summary }), finish: () => {}, close: () => {} }
+function createActivity(deps: AgentDeps, effectiveMode: RoutineMode, events: AgentEvents): Activity {
+  // watch 回合在后台定时跑，或 Quiet Hours 静音缓冲期间：每一步都进动作日志，但不在线程里铺 activity 卡片
+  if (effectiveMode === 'watch' || deps.quietBuffer === true) {
+    return { start: (tool, summary) => ({ tool, summary }), finish: () => {}, close: () => {} }
+  }
   let row: MessageRow | null = null
   const steps: ActivityStep[] = []
   let done = false
@@ -429,7 +477,8 @@ const BROWSER_OUTSIDE_DATA_TOOL_NAMES: ReadonlySet<string> = new Set([
 ])
 
 const WORKFLOW_TOOL_NAMES = new Set([
-  'hold_for_approval', 'ask_operator', 'save_memory', 'forget_memory', 'create_routine', 'stop_routine', 'message_bot',
+  'hold_for_approval', 'ask_operator', 'save_memory', 'forget_memory', 'propose_memory_rule',
+  'create_routine', 'stop_routine', 'message_bot',
 ])
 
 const MAX_OPTIONS = 6
@@ -452,11 +501,19 @@ async function execToolCall(
     return { text: `Tool ${call.name} failed: ${err instanceof Error ? err.message : String(err)}` }
   }
   // 没在清单里给它的工具，模型硬要调也不行：清单是给模型看的，这里才是门
-  if (deps.watch && !WATCH_TOOL_NAMES.has(call.name) && !deps.mcpReadToolNames?.has(call.name)) {
+  if (deps.effectiveMode === 'watch' && !WATCH_TOOL_NAMES.has(call.name) && !deps.mcpReadToolNames?.has(call.name)) {
     log(false)
     return {
       text: `${call.name} is not available in a watch routine: this run only looks. `
         + 'If something should be done, hold it for approval and your operator decides.',
+    }
+  }
+  if (deps.effectiveMode === 'prepare' && !PREPARE_TOOL_NAMES.has(call.name) && !deps.mcpReadToolNames?.has(call.name)) {
+    log(false)
+    return {
+      text: `${call.name} is not available in a prepare routine: this run allows reading, wiki_upsert, write_file, `
+        + 'propose_memory_rule, and hold_for_approval, but not shell commands, browser interaction, teammate relays, '
+        + 'or external writes.',
     }
   }
   // 改常设安排的工具：只有你自己开头的回合能用。来源不明一律当作不是你（和常驻授权同一个口径）
@@ -465,9 +522,13 @@ async function execToolCall(
     return { text: operatorOnlyRefusal(call.name, deps.origin) }
   }
   if (call.name === 'message_user') {
-    const text = execMessageUser(deps, args, events)
-    log(text === 'Report delivered.')
-    return { text }
+    try {
+      const res = await execMessageUser(deps, args, events)
+      log(res.ok)
+      return { text: res.text }
+    } catch (err) {
+      return failed(err)
+    }
   }
   if (call.name === 'read_skill') {
     try {
@@ -518,7 +579,7 @@ async function execToolCall(
     }
   }
   if (WIKI_TOOL_NAMES.has(call.name)) {
-    if (deps.watch && !WIKI_READ_TOOL_NAMES.has(call.name)) {
+    if (deps.effectiveMode === 'watch' && !WIKI_READ_TOOL_NAMES.has(call.name)) {
       log(false)
       return {
         text: `${call.name} is not available in a watch routine: this run only looks. `
@@ -636,8 +697,9 @@ function summarize(tool: string, args: Record<string, unknown>): string {
     }
     case 'ask_operator': return pick('question')
     case 'save_memory':
-    case 'forget_memory': return pick('rule')
-    case 'create_routine': return `${pick('name')}${args.mode === 'watch' ? ' (watch)' : ''}`
+    case 'forget_memory':
+    case 'propose_memory_rule': return pick('rule')
+    case 'create_routine': return `${pick('name')}${args.mode === 'prepare' ? ' (prepare)' : args.mode === 'watch' ? ' (watch)' : ''}`
     case 'stop_routine': return `#${pick('id')}`
     case 'message_bot': return `to ${pick('to')}`
     case 'read_skill': return pick('name')
@@ -709,12 +771,30 @@ function summarize(tool: string, args: Record<string, unknown>): string {
   }
 }
 
-function execMessageUser(deps: AgentDeps, args: Record<string, unknown>, events: AgentEvents): string {
-  if (args.kind !== 'report') return 'Unsupported kind; only "report" exists today.'
+function reportSummary(payload: ReportPayload): string {
+  if (payload.closing) return payload.closing
+  return payload.lines
+    .map((l) => `${l.system} → ${l.result}${l.count ? ` (${l.count})` : ''}`)
+    .join('; ')
+}
+
+async function execMessageUser(
+  deps: TurnContext,
+  args: Record<string, unknown>,
+  events: AgentEvents,
+): Promise<{ text: string; ok: boolean }> {
+  if (args.kind !== 'report') return { ok: false, text: 'Unsupported kind; only "report" exists today.' }
   const payload = validateReportPayload(args.payload)
-  if (!payload) return 'Invalid report payload: need lines[] of {system, result, count?} plus optional closing.'
+  if (!payload) return { ok: false, text: 'Invalid report payload: need lines[] of {system, result, count?} plus optional closing.' }
+  if (deps.quietBuffer && deps.onQuietBuffer && args.urgent !== true) {
+    await deps.onQuietBuffer({ kind: 'report', summary: reportSummary(payload), payload })
+    return {
+      ok: true,
+      text: 'Report buffered for the morning digest (Quiet Hours are active). If this is time-critical and cannot wait, call message_user again with urgent: true.',
+    }
+  }
   events.onMessage(insertMessage(deps.db, { threadId: deps.threadId, sender: deps.bot.id, kind: 'report', payload }))
-  return 'Report delivered.'
+  return { ok: true, text: 'Report delivered.' }
 }
 
 async function execWorkflowTool(
@@ -770,9 +850,37 @@ async function execWorkflowTool(
       }
       events.onMessage(insertMessage(deps.db, {
         threadId: deps.threadId, sender: deps.bot.id, kind: 'question',
-        payload: { question, options, multi: args.multi === true, status: 'open', ...(deps.watch ? { watch: true } : {}) },
+        payload: {
+          question, options, multi: args.multi === true, status: 'open',
+          ...(deps.effectiveMode === 'watch' ? { watch: true } : deps.effectiveMode === 'prepare' ? { routineMode: 'prepare' } : {}),
+        },
       }))
       return 'Question posted as a card. Stop here and wait for the answer — do not guess it.'
+    }
+    case 'propose_memory_rule': {
+      if (!deps.onProposeMemoryRule) return 'Rule proposals are not available on this gateway.'
+      if (deps.proposedRuleThisTurn) {
+        return 'You already proposed a rule in this turn. Wait for your operator to review it before suggesting another.'
+      }
+      const rule = typeof args.rule === 'string' ? args.rule.trim() : ''
+      const reason = typeof args.reason === 'string' ? args.reason.trim() : ''
+      if (!rule || !reason) return 'propose_memory_rule needs non-empty "rule" and "reason".'
+      const sourceTainted = deps.turnTainted || deps.origin === 'webhook'
+      const result = await deps.onProposeMemoryRule({ rule, reason, sourceTainted })
+      if (result.created) {
+        deps.proposedRuleThisTurn = true
+        return 'Proposed the rule to your operator for review. It will only be saved to MEMORY.md if they accept it.'
+      }
+      switch (result.reason) {
+        case 'invalid_rule':
+          return 'Invalid rule: provide a single clear sentence (1–300 characters).'
+        case 'already_in_memory':
+          return 'That rule is already in your MEMORY.md.'
+        case 'already_pending':
+          return 'A matching rule proposal is already waiting for your operator.'
+        case 'previously_dismissed':
+          return 'Your operator already dismissed a matching rule proposal — do not suggest it again.'
+      }
     }
     case 'save_memory': {
       if (!deps.onSaveMemory) return 'Memory is not available on this gateway.'
@@ -1038,6 +1146,31 @@ function webhookForModel(payload: unknown): string {
     + `${open}\n${quoted}\n${close}`
 }
 
+function ruleProposalForModel(payload: unknown): string {
+  const p = (payload && typeof payload === 'object' ? payload : {}) as {
+    proposalId?: unknown
+    rule?: unknown
+    status?: unknown
+  }
+  return JSON.stringify({ proposalId: p.proposalId, rule: p.rule, status: p.status })
+}
+
+function quietDigestForModel(payload: unknown): string {
+  const p = (payload && typeof payload === 'object' ? payload : {}) as {
+    itemCount?: unknown
+    items?: unknown
+  }
+  const rawItems = Array.isArray(p.items) ? p.items : []
+  const items = rawItems.map((raw) => {
+    const item = (raw && typeof raw === 'object' ? raw : {}) as { routineName?: unknown; summary?: unknown }
+    return { routineName: item.routineName ?? '', summary: item.summary ?? '' }
+  })
+  return JSON.stringify({
+    itemCount: typeof p.itemCount === 'number' && Number.isFinite(p.itemCount) ? p.itemCount : items.length,
+    items,
+  })
+}
+
 function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): ChatMsg {
   if (m.kind === 'webhook') return { role: 'user', content: webhookForModel(m.payload) }
   // 操作者发来的文件：一行说明；图只在这位同事第一次见到它的回合带上，并在这一回合里钉住
@@ -1058,7 +1191,9 @@ function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): Chat
     const body = m.kind === 'text' ? m.content
       : m.kind === 'activity' ? `[steps taken] ${describeSteps(m.payload)}`
         : m.kind === 'approval_request' ? `[held for approval] ${approvalForModel(m.payload)}`
-          : `[${m.kind}] ${JSON.stringify(m.payload)}`
+          : m.kind === 'rule_proposal' ? `[proposed rule] ${ruleProposalForModel(m.payload)}`
+            : m.kind === 'quiet_digest' ? `[morning digest delivered] ${quietDigestForModel(m.payload)}`
+              : `[${m.kind}] ${JSON.stringify(m.payload)}`
     return { role: 'user', content: `@${m.sender}: ${body}` }
   }
   if (m.kind === 'activity') return { role: 'assistant', content: `[steps taken] ${describeSteps(m.payload)}` }
@@ -1067,6 +1202,8 @@ function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): Chat
   if (m.kind === 'approval_request') return { role: 'assistant', content: `[held for approval] ${approvalForModel(m.payload)}` }
   if (m.kind === 'memory_updated') return { role: 'assistant', content: `[memory updated] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'routine_created') return { role: 'assistant', content: `[routine created] ${JSON.stringify(m.payload)}` }
+  if (m.kind === 'rule_proposal') return { role: 'assistant', content: `[proposed rule] ${ruleProposalForModel(m.payload)}` }
+  if (m.kind === 'quiet_digest') return { role: 'assistant', content: `[morning digest delivered] ${quietDigestForModel(m.payload)}` }
   if (m.kind === 'bot_ref') return { role: 'user', content: `[message from teammate] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'login_request') return { role: 'assistant', content: `[asked for a sign-in] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'question') return { role: 'assistant', content: `[asked your operator] ${JSON.stringify(m.payload)}` }
