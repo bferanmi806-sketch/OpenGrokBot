@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { listActions } from '../src/actions.js'
-import { getApproval } from '../src/approvals.js'
-import { ensureDmThread, listMessages, openDb, upsertBot } from '../src/db.js'
+import { attachApprovalMessage, createApproval, getApproval } from '../src/approvals.js'
+import { ensureDmThread, insertMessage, listMessages, openDb, upsertBot } from '../src/db.js'
 import { createHub } from '../src/hub.js'
 import type { AssistantTurn, ChatMsg, LLM } from '../src/llm.js'
 import { createApp } from '../src/server.js'
@@ -284,5 +284,72 @@ describe('editable prompt approvals', () => {
     })
     const updatedQuick = listMessages(db, 'dm:researcher').find((m) => m.id === quickChip.id)!
     expect((updatedQuick.payload as { edited?: boolean }).edited).toBeUndefined()
+  })
+
+  it('preserves original chip editable verbatim on no-op edit and reports exact reason when remembering a discarded workflow approval', async () => {
+    const { app, db } = setup()
+
+    // No-op edit must not overwrite the original chip editable or stamp edited: true
+    const originalEditable = {
+      kind: 'prompt',
+      action: 'Send status',
+      detail: 'All green',
+      preserved: 'verbatim',
+    }
+    const promptApproval = createApproval(db, {
+      threadId: 'dm:researcher',
+      botId: 'researcher',
+      action: 'Send status',
+      detail: 'All green',
+      kind: 'other',
+      target: '',
+    })
+    const chipMsg = insertMessage(db, {
+      threadId: 'dm:researcher',
+      sender: 'researcher',
+      kind: 'approval_request',
+      content: promptApproval.action,
+      payload: {
+        approvalId: promptApproval.id,
+        action: promptApproval.action,
+        detail: promptApproval.detail,
+        status: 'pending',
+        editable: originalEditable,
+      },
+    })
+    attachApprovalMessage(db, promptApproval.id, chipMsg.id)
+
+    const noopRes = await app.request(`/api/approvals/${promptApproval.id}/decide`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: { kind: 'prompt', action: 'Send status', detail: 'All green' },
+      }),
+    })
+    expect(noopRes.status).toBe(202)
+    const patchedChip = listMessages(db, 'dm:researcher').find((m) => m.id === chipMsg.id)!
+    expect((patchedChip.payload as { editable?: unknown }).editable).toEqual(originalEditable)
+    expect((patchedChip.payload as { edited?: boolean }).edited).toBeUndefined()
+
+    // Discarding a workflow approval with remember returns the exact "only an approval can be remembered" reason
+    const wfApproval = createApproval(db, {
+      threadId: 'dm:researcher',
+      botId: 'researcher',
+      action: 'Workflow email send',
+      kind: 'email',
+      target: 'bob@acme.com',
+      workflowRunId: 'wf-run-1',
+    })
+    const wfDiscardRemember = await app.request(`/api/approvals/${wfApproval.id}/decide`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision: 'discard', remember: '1h' }),
+    })
+    expect(wfDiscardRemember.status).toBe(400)
+    expect(await wfDiscardRemember.json()).toEqual({
+      error: 'this always asks: only an approval can be remembered',
+    })
+    expect(getApproval(db, wfApproval.id)!.status).toBe('pending')
   })
 })

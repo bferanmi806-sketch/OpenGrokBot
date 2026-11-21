@@ -980,6 +980,7 @@ export type RunConnectorToolOpts = {
   args: Record<string, unknown>
   ruleBlock: RuleBlock | null
   events: AgentEvents
+  readOnly?: boolean
   now?: number
 }
 
@@ -990,6 +991,9 @@ export async function runConnectorToolCall(
   const domain = domainOfTool(name)
   if (!domain || !isConnectorTool(name)) {
     return { text: `Unknown connector tool: ${name}`, ok: false }
+  }
+  if (opts.readOnly && !CONNECTOR_READ_TOOL_NAMES.has(name)) {
+    return { ok: false, text: `${name} is not available in a read-only routine.` }
   }
 
   const activeAccounts = listActiveBotConnectors(db, botId)

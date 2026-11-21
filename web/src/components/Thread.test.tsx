@@ -425,4 +425,201 @@ describe('Thread', () => {
     })
     expect(prevented).toBe(false)
   })
+
+  it('renders rule_proposal and quiet_digest messages and forwards rule proposal resolution', async () => {
+    const onResolveRuleProposal = vi.fn().mockResolvedValue(undefined)
+    const proactive: Message[] = [
+      {
+        id: 60,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'rule_proposal',
+        content: '',
+        created_at: 60,
+        payload: {
+          proposalId: 7,
+          rule: 'Never send Slack blasts on weekends',
+          reason: 'Suggested by teammate',
+          source: 'agent',
+          sourceTainted: true,
+          status: 'pending',
+        },
+      },
+      {
+        id: 61,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'quiet_digest',
+        content: '',
+        created_at: 61,
+        payload: {
+          windowStart: '22:00',
+          windowEnd: '08:00',
+          itemCount: 1,
+          items: [
+            {
+              id: 1,
+              routineId: 2,
+              routineName: 'Overnight brief',
+              routineMode: 'prepare',
+              kind: 'text',
+              summary: 'Prepared Q3 brief.',
+              createdAt: 61,
+            },
+          ],
+        },
+      },
+    ]
+    render(
+      <Thread
+        conversation={dm}
+        roster={roster}
+        messages={proactive}
+        thinking={false}
+        onSend={() => {}}
+        onDecide={() => {}}
+        onResolveRuleProposal={onResolveRuleProposal}
+      />,
+    )
+    expect(screen.getByText('Rule proposal')).toBeInTheDocument()
+    expect(screen.getByText('External source — review carefully')).toBeInTheDocument()
+    expect(screen.getByText('Morning digest · 1 update')).toBeInTheDocument()
+    expect(screen.getByText('Prepared Q3 brief.')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save to MEMORY.md' }))
+    expect(onResolveRuleProposal).toHaveBeenCalledWith(7, 'accept', 'Never send Slack blasts on weekends')
+  })
+
+  it('renders background_task messages and forwards steer and cancel callbacks', async () => {
+    const onSteer = vi.fn().mockResolvedValue(undefined)
+    const onCancel = vi.fn().mockResolvedValue(undefined)
+    const user = userEvent.setup()
+    const bgMessages: Message[] = [
+      {
+        id: 70,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'background_task',
+        content: '',
+        created_at: 70,
+        payload: {
+          taskId: 'bg-abcd1234',
+          title: 'Audit pricing pages',
+          status: 'running',
+          stepCount: 1,
+          lastStep: 'browser_goto: https://example.com',
+          steps: [{ tool: 'browser_goto', summary: 'https://example.com', ok: true, at: 70 }],
+          usesBrowser: true,
+          createdAt: 70,
+        },
+      },
+    ]
+    render(
+      <Thread
+        conversation={dm}
+        roster={roster}
+        messages={bgMessages}
+        thinking={false}
+        onSend={() => {}}
+        onDecide={() => {}}
+        onSteerBackgroundTask={onSteer}
+        onCancelBackgroundTask={onCancel}
+      />,
+    )
+    expect(screen.getByText('Audit pricing pages')).toBeInTheDocument()
+    expect(screen.getByText('Using browser')).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText('Send a steering note…'), 'Focus on Pro plan')
+    await user.click(screen.getByRole('button', { name: 'Steer' }))
+    expect(onSteer).toHaveBeenCalledWith('bg-abcd1234', 'Focus on Pro plan')
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).toHaveBeenCalledWith('bg-abcd1234')
+  })
+
+  it('renders dispatch_plan messages with roster names and forwards start and cancel callbacks', async () => {
+    const onStart = vi.fn().mockResolvedValue(undefined)
+    const onCancel = vi.fn().mockResolvedValue(undefined)
+    const user = userEvent.setup()
+    const planMessages: Message[] = [
+      {
+        id: 80,
+        thread_id: 'group:offsite-crew',
+        sender: 'chief',
+        kind: 'dispatch_plan',
+        content: '',
+        created_at: 80,
+        payload: {
+          planId: 'dp-abcd1234',
+          threadId: 'group:offsite-crew',
+          createdBy: 'chief',
+          title: 'Pricing brief pipeline',
+          status: 'draft',
+          sourceTainted: false,
+          error: '',
+          steps: [
+            {
+              id: 's1',
+              seq: 0,
+              wave: 0,
+              botId: 'researcher',
+              title: 'Research competitors',
+              instructions: 'Collect benchmarks',
+              dependsOn: [],
+              status: 'pending',
+              output: '',
+              error: '',
+              outputTainted: false,
+              waitingApprovalId: null,
+              waitingQuestionId: null,
+              startedAt: null,
+              finishedAt: null,
+            },
+            {
+              id: 's2',
+              seq: 1,
+              wave: 1,
+              botId: 'market-watch',
+              title: 'Model pricing tiers',
+              instructions: 'Build tier model',
+              dependsOn: ['s1'],
+              status: 'pending',
+              output: '',
+              error: '',
+              outputTainted: false,
+              waitingApprovalId: null,
+              waitingQuestionId: null,
+              startedAt: null,
+              finishedAt: null,
+            },
+          ],
+          createdAt: 80,
+          startedAt: null,
+          finishedAt: null,
+        },
+      },
+    ]
+    render(
+      <Thread
+        conversation={group}
+        roster={roster}
+        messages={planMessages}
+        thinking={false}
+        onSend={() => {}}
+        onDecide={() => {}}
+        onStartDispatchPlan={onStart}
+        onCancelDispatchPlan={onCancel}
+      />,
+    )
+    expect(screen.getByText('Pricing brief pipeline')).toBeInTheDocument()
+    expect(screen.getByText('🔎 Scout')).toBeInTheDocument()
+    expect(screen.getByText('📈 Ticker')).toBeInTheDocument()
+    expect(screen.getByText('After s1')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Start pipeline' }))
+    expect(onStart).toHaveBeenCalledWith('dp-abcd1234')
+
+    await user.click(screen.getByRole('button', { name: 'Cancel pipeline' }))
+    expect(onCancel).toHaveBeenCalledWith('dp-abcd1234')
+  })
 })

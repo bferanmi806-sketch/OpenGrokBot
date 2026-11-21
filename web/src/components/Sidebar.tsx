@@ -1,12 +1,12 @@
 import type {
-  ActivityPayload, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, BotStatus, Conversation, GoalUpdatedPayload, LoginPayload,
-  MemoryPayload, QuestionPayload, ReportPayload, ResolvedTheme, RoutinePayload, ScreenshotPayload, SpaceUpdatedPayload, WebhookPayload,
+  ActivityPayload, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BackgroundTaskPayload, BotRefPayload, BotStatus, Conversation, DispatchPlanPayload, GoalUpdatedPayload, LoginPayload,
+  MemoryPayload, QuestionPayload, QuietDigestPayload, ReportPayload, ResolvedTheme, RoutinePayload, RuleProposalPayload, ScreenshotPayload, SpaceUpdatedPayload, WebhookPayload,
 } from '../types'
 import { useT, type MessageKey, type T } from '../i18n'
 import { isNotice, noticeText } from '../i18n/describe'
 import { BotAvatar, conversationSeed } from './BotAvatar'
 import { useEscape } from './ConfirmDialog'
-import { CpuSparkleIcon, InboxIcon, KeyIcon, MoonIcon, PlugIcon, PlusIcon, SettingsIcon, SunIcon } from './Icons'
+import { BookOpenIcon, CpuSparkleIcon, InboxIcon, KeyIcon, MoonIcon, PlugIcon, PlusIcon, SettingsIcon, SunIcon } from './Icons'
 
 /**
  * 单聊就是那位同事的状态。群只说「有人在干活」：等你、卡住、刚干完说的是某一位同事，
@@ -86,6 +86,23 @@ function preview(c: Conversation, t: T): string {
       const first = payload?.lines[0]
       return payload?.closing ?? (first ? `✓ ${first.system} → ${first.result}` : t('sidebar.preview.reportFiled'))
     }
+    case 'rule_proposal': {
+      const p = m.payload as RuleProposalPayload | null
+      return `💡 ${p?.rule || t('sidebar.preview.ruleProposal')}`
+    }
+    case 'quiet_digest': {
+      const p = m.payload as QuietDigestPayload | null
+      const count = p?.itemCount ?? p?.items?.length ?? 0
+      return `🌅 ${count === 1 ? t('sidebar.preview.quietDigestOne') : t('sidebar.preview.quietDigestMany', { count })}`
+    }
+    case 'background_task': {
+      const p = m.payload as BackgroundTaskPayload | null
+      return `⚡ ${p?.title ? t('sidebar.preview.backgroundTask', { title: p.title }) : t('bgTask.label')}`
+    }
+    case 'dispatch_plan': {
+      const p = m.payload as DispatchPlanPayload | null
+      return `🔀 ${p?.title ? t('sidebar.preview.dispatchPlan', { title: p.title }) : t('dispatch.label')}`
+    }
     default:
       if (m.kind === 'text' && isNotice(m.payload)) {
         const n = m.payload
@@ -109,6 +126,7 @@ export function Sidebar({
   onConnectors,
   connectorsAttention,
   onVault,
+  onWiki,
   onSettings,
   resolvedTheme,
   onToggleTheme,
@@ -133,6 +151,8 @@ export function Sidebar({
   connectorsAttention?: boolean
   /** 打开「凭证库」；老网关没有这块就不传，按钮也不出现 */
   onVault?: () => void
+  /** 打开「团队知识库」 */
+  onWiki?: () => void
   /** 打开设置页；老网关没有设置路由就不传 */
   onSettings?: () => void
   /** 当前生效的主题（深色 / 浅色）与快捷切换回调 */
@@ -246,7 +266,7 @@ export function Sidebar({
           ) : null}
         </div>
 
-        {onModels || onConnectors || onVault || onSettings ? (
+        {onModels || onConnectors || onVault || onWiki || onSettings ? (
           <div className="sidebar-footer">
             {onModels ? (
               <button
@@ -283,6 +303,17 @@ export function Sidebar({
                 title={t('sidebar.vault')}
               >
                 <KeyIcon size={15} />
+              </button>
+            ) : null}
+            {onWiki ? (
+              <button
+                type="button"
+                className="sidebar-foot-icon sidebar-wiki"
+                onClick={() => { onClose?.(); onWiki() }}
+                aria-label={t('sidebar.wiki')}
+                title={t('sidebar.wiki')}
+              >
+                <BookOpenIcon size={15} />
               </button>
             ) : null}
             {onSettings ? (

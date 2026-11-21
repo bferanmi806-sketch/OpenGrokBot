@@ -63,23 +63,43 @@ Every line below is implemented and covered by tests — nothing here is a roadm
   amber badge counts the approvals and questions waiting on you, and the tab title carries the total.
 - **One report grammar.** Work comes back as `✓ system → result · count` lines with a single closing sentence
   that surfaces only what needs you. Same shape from every teammate.
-- **Draft-and-hold approvals.** Anything leaving the workspace stops at the door: the chip shows exactly what
-  would go out and where, with Approve / Discard. A bare 👍 in the thread releases the newest one. Decisions are
-  idempotent — a second click gets a 409, not a second send. When the same action goes to many people, the chip
-  lists every one with a checkbox: untick any, and the teammate does exactly the rest.
+- **Draft-and-hold approvals — editable inline.** Anything leaving the workspace stops at the door: the chip shows
+  exactly what would go out and where, with **Edit** (reword an email, Slack post, Notion page, calendar event, MCP
+  arguments, or prompt hold right inside the card before approving), Approve, and Discard. A bare 👍 in the thread
+  releases the newest one. Decisions are idempotent — a second click gets a 409, not a second send. When the same
+  action goes to many people, the chip lists every one with a checkbox: untick any, and the teammate does exactly the
+  rest.
 - **Standing approvals, on your terms.** For an email, message or post to one destination, *Always allow…*
   approves it and lets that teammate repeat it without asking — for an hour, a day or until you revoke it from
   the computer panel. Money, bookings and anything unclassified always ask.
 - **Questions you answer with a tap.** When the next step is one of a few clear choices, the teammate posts a
   card with buttons instead of a wall of options, and waits.
-- **Visible memory.** "From now on, quiet accounts wait for my read" writes a rule into that bot's `MEMORY.md`
-  and posts the diff as a chip; "forget that rule" removes it the same way, and the computer panel lists every
-  rule with a remove button. The file lives outside the bot's computer, so a chip marks every change.
-- **Routines from the conversation.** "Post a digest every day" registers a cron job, shows the schedule in
-  plain English, survives restarts, and never runs twice at once. "Whenever a new issue comes in" gives the
-  routine a secret webhook address instead, for GitHub, a form or any script to call. "Keep an eye on the status
-  page" makes a watch routine: read-only tools, and silence unless something needs you. Pause, run or delete them
-  from the computer panel — or tell the bot to stop one.
+- **Visible memory & controlled dreaming.** "From now on, quiet accounts wait for my read" writes a rule into that
+  bot's `MEMORY.md` and posts the diff as a chip; "forget that rule" removes it the same way, and the computer panel
+  lists every rule with a remove button. The file lives outside the bot's computer, so a chip marks every change.
+  Repeated discards (≥ 2 in 14 days) or a teammate's `propose_memory_rule` call never edit `MEMORY.md` directly — they
+  post an editable **Rule proposal** card (`Save to MEMORY.md` / `Dismiss`) with an amber warning badge whenever
+  external data was in context.
+- **Shared team entity Wiki.** A zero-vector-DB knowledge base (`contact`, `client`, `project`, `topic`) backed by
+  SQLite FTS5 with CJK/English tokenization, multi-query RRF × recency ranking (`wiki_search`, `wiki_read`,
+  `wiki_upsert`), atomic `<data>/wiki/` Markdown mirrors, revision history, an in-app **Team Wiki** browser/editor,
+  and explicit *Review & verify* taint tracking.
+- **Routines, `prepare` mode & Quiet Hours.** "Post a digest every day" registers a cron job, shows the schedule in
+  plain English, survives restarts, and never runs twice at once. "Whenever a new issue comes in" gives the routine a
+  secret webhook address instead. Choose `watch` (strictly read-only, silent unless needed) or `prepare` (read-only
+  plus `wiki_upsert` and workspace `write_file` to assemble briefs ahead of time). Turn on opt-in **Quiet Hours** in
+  Settings to hold non-urgent scheduled `watch`/`prepare` updates for a single **Morning digest** per teammate while
+  urgent alerts (`urgent: true`), approvals, questions, and manual runs always break through immediately.
+- **Non-blocking background tasks (Meta / AlterEgo).** A teammate can offload long multi-step research, drafting, or
+  browsing onto a secondary background lane (`delegate_background_task`) while its foreground chat stays immediately
+  responsive. Watch live steps, send mid-flight steering notes, or cancel from the thread chip or computer panel; a
+  per-bot browser lease prevents foreground and background turns from colliding on the same page.
+- **Local model priority queue.** When multiple teammates share a local endpoint (Ollama, `localhost`, or LAN), a
+  built-in priority semaphore (`P0 interactive` > `P1 background` > `P2 routines` > `P3 low`) lets interactive chats
+  and approvals jump ahead between steps without cloud-API overhead (configurable in **Settings → Local model
+  concurrency**).
+- **Dark & Light themes + one-click default model.** Switch Dark, Light, or System appearance from the sidebar or
+  Settings, and promote any connection in **AI models** to default in one click.
 - **Recorded workflow traces and replay.** API controls record typed browser steps on a teammate's existing page
   (redacting password, one-time-code and sensitive fields automatically) and replay saved traces deterministically
   with optional placeholder inputs and approval steps. Local-computer recordings survive window relaunches; UI
@@ -130,9 +150,12 @@ Every line below is implemented and covered by tests — nothing here is a roadm
 
 **The crew**
 
-- **Group threads.** Ask the room a question: each teammate answers for its own patch — in parallel — then the
-  chief of staff closes with a dispatch table — `✓ item → @bot · when` — and one line on what needs you today.
-  Type `@` to ask only the teammates you name.
+- **Group threads, `team.md` charter & DAG dispatch pipelines.** Ask the room a question: each teammate answers for
+  its own patch — in parallel — following your operator-edited **Team charter** (`team.md`), then the chief of staff
+  closes with a dispatch table (`✓ item → @bot · when`) or proposes an interactive multi-step **Dispatch pipeline**
+  card (`create_dispatch_plan`) with explicit `dependsOn` edges. Click **Start pipeline** to run independent stages in
+  parallel, pass fenced upstream outputs with taint tracking to downstream teammates, and automatically pause and
+  resume around approvals. Type `@` to ask only the teammates you name.
 - **Allowlisted handoffs.** `message_bot` drops a scoped task into a teammate's thread and wakes it up. By
   default only the chief can reach everyone; peer-to-peer is off until you name the direction. Relays are
   capped at two hops so two bots cannot echo at each other.

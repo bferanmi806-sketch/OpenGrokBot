@@ -1,23 +1,50 @@
 import { fileToBase64 } from './attachments'
 import type {
-  AboutInfo, AppKey, ApprovalEditInput, AttachmentPayload, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
-  Conversation, CreateGoalInput, CreateMcpServerInput, CreateSpaceInput, CreateVaultItemInput, FeedItemStatus, FeedSnapshot, FeedTopic, FieldError, GatewayEvent, GoalMilestone,
-  GoalsSnapshot, GoalUpdateItem, GoalView, IdeaItem, IdeaStatus, ImportMcpServersInput, ImportMcpServersResult, McpServersSnapshot,
-  McpServerView, Message, MilestoneStatus, ProviderPreset, RoutineAction, RuleDuration, ServerEvent, SettingsView, SetupInfo, SpaceGrant, SpaceItem,
-  SpaceItemData, SpaceRole, SpacesSnapshot, SpaceView, TodoItem, TodoStatus, UpdateGoalPatch, UpdateMcpServerPatch, UpdateSpacePatch, UpdateVaultItemPatch, VaultItemView, VaultSnapshot,
+  AboutInfo, AppKey, ApprovalEditInput, AttachmentPayload, BackgroundTaskActionResponse, BackgroundTaskView, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
+  Conversation, CreateGoalInput, CreateMcpServerInput, CreateSpaceInput, CreateVaultItemInput, DispatchPlanActionResponse, DispatchPlanView, FeedItemStatus, FeedSnapshot, FeedTopic, FieldError, GatewayEvent, GoalMilestone,
+  GoalsSnapshot, GoalUpdateItem, GoalView, IdeaItem, IdeaStatus, ImportMcpServersInput, ImportMcpServersResult, LlmPriority, LlmQueueEndpointView, LlmQueueSnapshot, McpServersSnapshot,
+  McpServerView, Message, MilestoneStatus, ProviderPreset, QuietDigestBotSummary, QuietDigestFlushResponse, QuietDigestSummary, ResolveRuleProposalResponse, RoutineAction, RuleDuration, RuleProposalStatus, RuleProposalView,
+  ServerEvent, SettingsView, SetupInfo, SpaceGrant, SpaceItem, SpaceItemData, SpaceRole, SpacesSnapshot, SpaceView, TeamCharterView, TodoItem, TodoStatus, UpdateGoalPatch, UpdateMcpServerPatch, UpdateSpacePatch, UpdateVaultItemPatch,
+  VaultItemView, VaultSnapshot, WikiCreateInput, WikiKind, WikiListResponse, WikiPageResponse, WikiSaveInput,
 } from './types'
 
 export type {
   ApprovalEditInput,
+  BackgroundTaskActionResponse,
+  BackgroundTaskPayload,
+  BackgroundTaskStatus,
+  BackgroundTaskStep,
+  BackgroundTaskView,
   CreateMcpServerInput,
   CreateVaultItemInput,
+  DispatchPlanActionResponse,
+  DispatchPlanPayload,
+  DispatchPlanStatus,
+  DispatchPlanView,
+  DispatchStepStatus,
+  DispatchStepView,
   GatewayEvent,
   ImportMcpServersInput,
   ImportMcpServersResult,
+  LlmPriority,
+  LlmQueueEndpointView,
+  LlmQueueSnapshot,
+  QuietDigestBotSummary,
+  QuietDigestFlushResponse,
+  QuietDigestSummary,
+  ResolveRuleProposalResponse,
+  RuleProposalStatus,
+  RuleProposalView,
   ServerEvent,
+  TeamCharterView,
   UpdateMcpServerPatch,
   UpdateVaultItemPatch,
   VaultSnapshot,
+  WikiCreateInput,
+  WikiKind,
+  WikiListResponse,
+  WikiPageResponse,
+  WikiSaveInput,
 } from './types'
 
 /** 网关说「先登录」：界面换成锁屏说明，而不是一片空白。 */
@@ -56,6 +83,20 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
 async function getJson<T>(path: string): Promise<T> {
   const res = await request(path)
   if (!res.ok) throw new Error(`GET ${path} ${res.status}`)
+  return res.json() as Promise<T>
+}
+
+async function getApiJson<T>(path: string): Promise<T> {
+  const res = await request(path)
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as {
+      error?: string
+      code?: string
+      params?: Record<string, string | number>
+      detail?: string
+    }
+    throw new ApiError(data.error ?? `GET ${path} ${res.status}`, res.status, data.code, data.params, data.detail)
+  }
   return res.json() as Promise<T>
 }
 
@@ -635,6 +676,128 @@ export async function triggerSpaceAction(
     { strict: true },
   )
   return res.json() as Promise<{ botId: string; threadId: string }>
+}
+
+/** 团队知识库：按关键词 / 分类检索与列出、读详情与历史、创建、保存、回滚、删除 */
+export function fetchWiki(opts?: { q?: string; kind?: WikiKind; limit?: number }): Promise<WikiListResponse> {
+  const params = new URLSearchParams()
+  const q = opts?.q?.trim()
+  if (q) params.set('q', q)
+  if (opts?.kind) params.set('kind', opts.kind)
+  if (opts?.limit !== undefined && Number.isFinite(opts.limit)) {
+    params.set('limit', String(opts.limit))
+  }
+  const qs = params.toString()
+  return getApiJson<WikiListResponse>(qs ? `/api/wiki?${qs}` : '/api/wiki')
+}
+
+export function fetchWikiPage(kind: WikiKind, slug: string): Promise<WikiPageResponse> {
+  return getApiJson<WikiPageResponse>(`/api/wiki/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}`)
+}
+
+export async function createWikiPage(input: WikiCreateInput): Promise<WikiPageResponse> {
+  const res = await send('POST', '/api/wiki', input, { strict: true })
+  return res.json() as Promise<WikiPageResponse>
+}
+
+export async function saveWikiPage(kind: WikiKind, slug: string, input: WikiSaveInput): Promise<WikiPageResponse> {
+  const res = await send('PUT', `/api/wiki/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}`, input, { strict: true })
+  return res.json() as Promise<WikiPageResponse>
+}
+
+export async function revertWikiPage(kind: WikiKind, slug: string, version: number, note?: string): Promise<WikiPageResponse> {
+  const body = note !== undefined ? { version, note } : { version }
+  const res = await send('POST', `/api/wiki/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}/revert`, body, { strict: true })
+  return res.json() as Promise<WikiPageResponse>
+}
+
+export async function deleteWikiPage(kind: WikiKind, slug: string): Promise<void> {
+  await send('DELETE', `/api/wiki/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}`, undefined, { strict: true })
+}
+
+/** 免打扰晨报摘要与待投递数量 */
+export function fetchQuietDigest(): Promise<QuietDigestSummary> {
+  return getApiJson<QuietDigestSummary>('/api/quiet-digest')
+}
+
+/** 本地模型优先级队列快照（并发上限、各端点运行中与排队中数量） */
+export function fetchLlmQueue(): Promise<LlmQueueSnapshot> {
+  return getApiJson<LlmQueueSnapshot>('/api/llm-queue')
+}
+
+/** 查询某位同事的后台任务列表（运行中/排队中在前，最新在前） */
+export function fetchBackgroundTasks(botId: string): Promise<{ tasks: BackgroundTaskView[] }> {
+  return getApiJson<{ tasks: BackgroundTaskView[] }>(`/api/bots/${encodeURIComponent(botId)}/background-tasks`)
+}
+
+/** 向排队中或运行中的后台任务发送纠偏指令 */
+export async function steerBackgroundTask(id: string, note: string): Promise<BackgroundTaskActionResponse> {
+  const res = await send('POST', `/api/background-tasks/${encodeURIComponent(id)}/steer`, { note }, { strict: true })
+  return res.json() as Promise<BackgroundTaskActionResponse>
+}
+
+/** 取消排队中或运行中的后台任务 */
+export async function cancelBackgroundTask(id: string): Promise<BackgroundTaskActionResponse> {
+  const res = await send('POST', `/api/background-tasks/${encodeURIComponent(id)}/cancel`, undefined, { strict: true })
+  return res.json() as Promise<BackgroundTaskActionResponse>
+}
+
+/** 读取某个群聊的团队章程（team.md） */
+export function fetchTeamCharter(threadId: string): Promise<TeamCharterView> {
+  return getApiJson<TeamCharterView>(`/api/threads/${encodeURIComponent(threadId)}/team`)
+}
+
+/** 保存某个群聊的团队章程（team.md） */
+export async function saveTeamCharter(threadId: string, content: string): Promise<TeamCharterView> {
+  const res = await send('PUT', `/api/threads/${encodeURIComponent(threadId)}/team`, { content }, { strict: true })
+  return res.json() as Promise<TeamCharterView>
+}
+
+/** 查询某个群聊的协作流水线列表 */
+export function fetchDispatchPlans(threadId: string): Promise<{ plans: DispatchPlanView[] }> {
+  return getApiJson<{ plans: DispatchPlanView[] }>(`/api/threads/${encodeURIComponent(threadId)}/dispatch-plans`)
+}
+
+/** 启动草稿状态的协作流水线 */
+export async function startDispatchPlan(id: string): Promise<DispatchPlanActionResponse> {
+  const res = await send('POST', `/api/dispatch-plans/${encodeURIComponent(id)}/start`, undefined, { strict: true })
+  return res.json() as Promise<DispatchPlanActionResponse>
+}
+
+/** 取消草稿、运行中或暂停中的协作流水线 */
+export async function cancelDispatchPlan(id: string): Promise<DispatchPlanActionResponse> {
+  const res = await send('POST', `/api/dispatch-plans/${encodeURIComponent(id)}/cancel`, undefined, { strict: true })
+  return res.json() as Promise<DispatchPlanActionResponse>
+}
+
+/** 立即投递免打扰期间暂存的晨报更新（可按同事筛选） */
+export async function flushQuietDigest(botId?: string): Promise<QuietDigestFlushResponse> {
+  const res = await send('POST', '/api/quiet-digest/flush', botId ? { botId } : {}, { strict: true })
+  return res.json() as Promise<QuietDigestFlushResponse>
+}
+
+/** 查询规矩提议列表（可按同事或状态筛选） */
+export function fetchRuleProposals(opts?: {
+  botId?: string
+  status?: RuleProposalStatus
+}): Promise<{ proposals: RuleProposalView[] }> {
+  const params = new URLSearchParams()
+  const botId = opts?.botId?.trim()
+  if (botId) params.set('botId', botId)
+  if (opts?.status) params.set('status', opts.status)
+  const qs = params.toString()
+  return getApiJson<{ proposals: RuleProposalView[] }>(qs ? `/api/rule-proposals?${qs}` : '/api/rule-proposals')
+}
+
+/** 接受（可内联编辑规矩文本）或忽略一条规矩提议 */
+export async function resolveRuleProposal(
+  id: number,
+  decision: 'accept' | 'dismiss',
+  rule?: string,
+): Promise<ResolveRuleProposalResponse> {
+  const body = decision === 'accept' && rule !== undefined ? { decision, rule } : { decision }
+  const res = await send('POST', `/api/rule-proposals/${id}`, body, { strict: true })
+  return res.json() as Promise<ResolveRuleProposalResponse>
 }
 
 /** 首次启动要不要出向导；老网关没有这个路由（或出了错）就当不用，绝不因此挡住界面 */

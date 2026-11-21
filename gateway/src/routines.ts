@@ -14,7 +14,7 @@ export type RoutineRow = {
   last_run_at: number | null
   /** 有值 = 外部系统带着这个密钥 POST /hooks/routines/:id 就能叫醒它；从不进模型的上下文 */
   webhook_key: string | null
-  /** act = 平常的回合；watch = 只看不动：只给只读工具，没事就不出声 */
+  /** act = 平常的回合；watch = 只看不动；prepare = 预备简报（只读 + wiki/本地草稿，禁止外部写和 shell） */
   mode: RoutineMode
   /** thread = 仅落入对话；feed / both = 报告同时投影到今日 Feed */
   surface?: RoutineSurface
@@ -22,11 +22,13 @@ export type RoutineRow = {
   goal_id?: string | null
 }
 
-export type RoutineMode = 'act' | 'watch'
+export type RoutineMode = 'act' | 'watch' | 'prepare'
 export type RoutineSurface = 'thread' | 'feed' | 'both'
 
 export function normalizeMode(value: unknown): RoutineMode {
-  return value === 'watch' ? 'watch' : 'act'
+  if (value === 'watch') return 'watch'
+  if (value === 'prepare') return 'prepare'
+  return 'act'
 }
 
 export function normalizeSurface(value: unknown, mode: RoutineMode = 'act'): RoutineSurface {

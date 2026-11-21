@@ -12,6 +12,7 @@ import { adoptLegacyEnv, loadConfig } from './config.js'
 import { botShellEnabled, openDb } from './db.js'
 import { botConfig } from './connections.js'
 import { createLLM, createLiveLLM } from './llm.js'
+import { createLlmQueue } from './llm-queue.js'
 import { migrateLegacyMemories } from './memory.js'
 import { botImageReady } from './containers.js'
 import { createPool, reapIdleComputers } from './pool.js'
@@ -45,6 +46,7 @@ const db = openDb(startup.dbPath, {
 // 模型和看图每次现读（改了下一次调用就生效），浏览器镜像下载前现读；电脑种类只在这里读一次，改了要重启
 const live = () => currentConfig(startup, process.env, db)
 const config = live()
+const llmQueue = createLlmQueue({ concurrency: () => live().localLlmConcurrency })
 // 预置样板来自版本库，用户新雇的同事住在数据目录
 const bots = [
   ...seedTeammates(db, config.teammatesDir),
@@ -53,11 +55,11 @@ const bots = [
 seedGroup(db, { id: config.groupId, title: config.groupTitle, memberIds: bots })
 const movedMemories = await migrateLegacyMemories(config.dataDir, bots)
 if (movedMemories.length) console.log(`[gateway] moved MEMORY.md out of the workspaces of: ${movedMemories.join(', ')}`)
-const llm = createLiveLLM(live)
+const llm = llmQueue.wrap(createLiveLLM(live), () => live().baseURL, { model: () => live().model })
 // 每位同事各用各的模型连接：回合开始时按它此刻的选择现造一个客户端（改了设置下一回合就用上）
 const llmFor = (botId: string) => {
   const own = botConfig(startup, process.env, db, botId)
-  return { llm: createLLM(own), vision: own.vision }
+  return { llm: llmQueue.wrap(createLLM(own), own.baseURL, { model: own.model }), vision: own.vision }
 }
 // 同事的电脑是什么做的：有 Docker 用容器，没有就用本机模式（宿主上的浏览器 + 一个文件夹）
 const docker = new Docker()
@@ -107,7 +109,7 @@ const schedulerProxy: Scheduler = {
 }
 
 const gateway = createApp({
-  db, llm, llmFor, pool, dataDir: config.dataDir, scheduler: schedulerProxy,
+  db, llm, llmFor, llmQueue, pool, dataDir: config.dataDir, scheduler: schedulerProxy,
   computers: {
     kind: backend.kind,
     why: backendWhy,
@@ -147,6 +149,20 @@ schedulerBox.current = createScheduler({
 })
 schedulerBox.current.load(listRoutines(db))
 gateway.startFeedTopics()
+
+// Quiet Hours 结束后把积压的晨报投递到线程：启动时检查一次，之后每分钟检查一次
+const flushQuietDigests = () => {
+  try {
+    const res = gateway.flushQuietDigestsIfDue()
+    if (res.flushed) {
+      console.log(
+        `[gateway] delivered morning digest (${res.flushed} ${res.flushed === 1 ? 'update' : 'updates'} across ${res.threads.length} ${res.threads.length === 1 ? 'thread' : 'threads'})`,
+      )
+    }
+  } catch { /* 数据库关闭时不报错 */ }
+}
+flushQuietDigests()
+setInterval(flushQuietDigests, 60_000).unref()
 
 // 动作日志和截图证据留 90 天：启动时清一次，之后每天清一次
 const ACTION_LOG_DAYS = 90

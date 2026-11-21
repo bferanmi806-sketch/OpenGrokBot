@@ -5,9 +5,12 @@ import {
   MAX_BATCH_ITEMS, RULEABLE_KINDS, blockText, canRemember, destinationReason, type BlockReason, normalizeItems, normalizeKind, normalizeTarget,
   type ApprovalKind,
 } from './approvals.js'
+import type { BackgroundTaskView } from './background-tasks.js'
+import { BROWSER_LEASE_TOOL_NAMES } from './browser-lease.js'
 import { checkBrowserUrl } from './browser-page.js'
 import type { BotComputer, Shot } from './computer.js'
 import { CONNECTOR_READ_TOOL_NAMES, isConnectorTool } from './connectors/tools.js'
+import type { DispatchPlanView } from './dispatch-plans.js'
 import { MAX_FEED_ITEMS_PER_TURN, PUBLISH_FEED_TOOL_NAME } from './feed/tools.js'
 import {
   MANAGE_GOAL_TOOL_NAME,
@@ -18,7 +21,7 @@ import {
 import { isMcpToolName } from './mcp/naming.js'
 import { limitText, noticeText, type BudgetHit, type Notice } from './notices.js'
 import { insertMessage, listMessages, updateMessagePayload, type BotRow, type Db, type MessageRow } from './db.js'
-import type { ChatMsg, LLM, ToolCall, ToolDef, Usage } from './llm.js'
+import type { ChatMsg, LLM, LlmPriority, ToolCall, ToolDef, Usage } from './llm.js'
 import {
   buildSystemPrompt,
   timeNote,
@@ -30,6 +33,7 @@ import {
   type PromptSpace,
   type PromptVaultItem,
 } from './prompts.js'
+import type { CreateRuleProposalResult } from './proactive/rule-proposals.js'
 import {
   MANAGE_SPACE_TOOL_NAME,
   MAX_SPACE_WRITES_PER_TURN,
@@ -40,9 +44,17 @@ import {
 } from './spaces/tools.js'
 import { validateReportPayload, type ReportPayload } from './report.js'
 import { normalizeMode, normalizeSurface, type RoutineMode, type RoutineSurface } from './routines.js'
-import { buildTools, OPERATOR_ONLY_TOOL_NAMES, WATCH_TOOL_NAMES } from './tools.js'
+import {
+  BACKGROUND_CONTROL_TOOL_NAMES,
+  BACKGROUND_TOOL_NAMES,
+  buildTools,
+  OPERATOR_ONLY_TOOL_NAMES,
+  PREPARE_TOOL_NAMES,
+  WATCH_TOOL_NAMES,
+} from './tools.js'
 import { VAULT_FILL_TOOL_NAME } from './vault/tools.js'
 import { WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL_NAME } from './web-research.js'
+import { WIKI_READ_TOOL_NAMES, WIKI_TOOL_NAMES } from './wiki/tools.js'
 
 export type AgentEvents = {
   onMessage: (m: MessageRow) => void
@@ -60,9 +72,9 @@ export type RuleGrant = { id: number; kind: ApprovalKind; target: string; expire
 
 /**
  * 这一回合是谁叫起来的。只有操作者自己开的头（发消息、拍板、答问题、问群）才认常驻授权；
- * routine、webhook、同事转交带来的活，里面可能是陌生人写的字，一律停下来问人。
+ * routine、webhook、同事转交、后台任务带来的活，里面可能是陌生人写的字，一律停下来问人。
  */
-export type TurnOrigin = 'operator' | 'routine' | 'webhook' | 'relay'
+export type TurnOrigin = 'operator' | 'routine' | 'webhook' | 'relay' | 'background'
 
 /** 这一回合为什么不认常驻授权：不是操作者开的头，或者上下文里还摆着外部载荷 */
 export type RuleBlock = Exclude<TurnOrigin, 'operator'> | 'outside-data' | 'unknown'
@@ -105,8 +117,8 @@ export type AgentDeps = {
   }) => Promise<{ id: number; name: string; cron: string; human: string; webhook: boolean; mode: RoutineMode }>
   onStopRoutine?: (id: number) => Promise<{ ok: boolean; name?: string; reason?: string }>
   hop?: number
-  group?: { title: string; members: string[] }
-  onMessageBot?: (input: { to: string; content: string }) =>
+  group?: { title: string; members: string[]; teamCharter?: string }
+  onMessageBot?: (input: { to: string; content: string; tainted?: boolean }) =>
     Promise<{ delivered: boolean; reason?: string; toName?: string }>
   onAskForLogin?: (input: { site: string; why: string }) => Promise<void>
   /** 操作者按「停止」时触发 */
@@ -123,6 +135,17 @@ export type AgentDeps = {
   timeZone?: string
   /** watch routine 的回合：只有只读工具，不出 activity 卡片，没事就不说话 */
   watch?: boolean
+  /** 例行任务模式（优先于 watch 布尔值）：act | watch | prepare */
+  routineMode?: RoutineMode
+  /** Quiet Hours 静音缓冲模式：抑制 activity 卡片，非紧急 report / 最终正文存入晨报队列 */
+  quietBuffer?: boolean
+  onQuietBuffer?: (item: { kind: 'report' | 'text'; summary: string; payload: unknown }) => Promise<void> | void
+  /** 提议一条待操作者确认的常驻规矩（不会直接写入 MEMORY.md） */
+  onProposeMemoryRule?: (input: {
+    rule: string
+    reason: string
+    sourceTainted: boolean
+  }) => Promise<CreateRuleProposalResult>
   /** 每调一次工具记一笔（动作日志） */
   onAction?: (action: { tool: string; summary: string; ok: boolean; ms: number; goalId?: string }) => void
   /** 共享技能的名字和一句话说明；正文经 onReadSkill 取 */
@@ -134,8 +157,12 @@ export type AgentDeps = {
   turnTimeoutMs?: number
   /** 谁叫起了这一回合；不传就当不是操作者，常驻授权不生效 */
   origin?: TurnOrigin
+  /** 本地模型队列优先级；不传则按 origin 推导 */
+  priority?: LlmPriority
   /** 回合起点已带入外部不受信任载荷（如 MCP 写操作返回正文）：本回合直接标记 outside-data */
   tainted?: boolean
+  /** 本回合已带入或读到外部不受信任数据时通知调用方（如群聊轮次将 speaker 的 taint 传给 Chief） */
+  onTainted?: () => void
   /** 操作者发来的文件：传进历史里的附件消息，回一份怎么给模型看的说明。不传 = 只报文件名 */
   attachments?: (rows: MessageRow[]) => Promise<AttachmentBrief>
   /** 这位同事已获授权的连接器列表（进系统提示词）与动态工具清单 */
@@ -182,6 +209,43 @@ export type AgentDeps = {
   /** 安全只读公网搜索与抓取（始终标记本回合含外部数据 outside-data） */
   onWebSearch?: (args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>
   onWebFetch?: (args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>
+  /** 共享团队知识库工具（wiki_search / wiki_read / wiki_upsert） */
+  onWikiTool?: (input: {
+    name: string
+    args: Record<string, unknown>
+    turnTainted: boolean
+  }) =>
+    | Promise<{ text: string; ok: boolean; tainted?: boolean; summary: string }>
+    | { text: string; ok: boolean; tainted?: boolean; summary: string }
+  /** 后台任务车道（AlterEgo）：非阻塞执行、不发 activity 卡片、禁止递归创建后台任务 */
+  isBackgroundTask?: boolean
+  /** 群流水线步骤（DAG dispatch step）：禁止递归创建流水线或后台任务 */
+  isPipelineStep?: boolean
+  historyLimit?: number
+  drainSteeringNotes?: () => Array<string | { note: string; tainted?: boolean }>
+  onStepProgress?: (step: { tool: string; summary: string; ok: boolean; ms: number }) => void
+  onAcquireBrowser?: (toolName: string) => { ok: true } | { ok: false; reason: string }
+  onCreateDispatchPlan?: (input: {
+    title: string
+    steps: unknown
+    sourceTainted: boolean
+  }) => Promise<{ ok: true; plan: DispatchPlanView } | { ok: false; error: string }>
+  onDelegateBackgroundTask?: (input: {
+    title: string
+    instructions: string
+    tainted?: boolean
+  }) => Promise<{ ok: true; task: BackgroundTaskView } | { ok: false; error: string }>
+  onListBackgroundTasks?: () => Promise<BackgroundTaskView[]> | BackgroundTaskView[]
+  onSteerBackgroundTask?: (input: {
+    taskId: string
+    note: string
+    tainted?: boolean
+  }) => Promise<{ ok: true; task: BackgroundTaskView } | { ok: false; error: string }>
+  onCancelBackgroundTask?: (input: {
+    taskId: string
+  }) => Promise<{ ok: true; task: BackgroundTaskView } | { ok: false; error: string }>
+  onFinalText?: (text: string) => void
+  onReportFiled?: (summary: string) => void
 }
 
 /**
@@ -204,6 +268,24 @@ type TurnContext = AgentDeps & {
   feedPublishedCount: number
   goalProgressCount: number
   spaceWriteCount: number
+  turnTainted: boolean
+  effectiveMode: RoutineMode
+  proposedRuleThisTurn: boolean
+}
+
+function effectiveRoutineMode(deps: Pick<AgentDeps, 'routineMode' | 'watch'>): RoutineMode {
+  return deps.routineMode ?? (deps.watch ? 'watch' : 'act')
+}
+
+function defaultPriority(origin: TurnOrigin | undefined): LlmPriority {
+  switch (origin) {
+    case 'routine': return 'routine'
+    case 'relay':
+    case 'webhook':
+    case 'background': return 'background'
+    case 'operator':
+    case undefined: return 'interactive'
+  }
 }
 
 /** 真实的浏览器活（开页、读、点、再读、填）十几步就用完了；40 步够干完一件事，又挡得住死循环 */
@@ -243,18 +325,34 @@ export async function runTurn(
   if (persistUserMessage) {
     events.onMessage(insertMessage(db, { threadId, sender: 'user', kind: 'text', content: userText }))
   }
+  const effectiveMode = effectiveRoutineMode(deps)
   events.onStatus(bot.id, 'thinking')
-  const activity = createActivity(deps, events)
+  const activity = createActivity(deps, effectiveMode, events)
   try {
     const canRelay = Boolean(deps.onMessageBot)
-    const rows = orderHistory(listMessages(db, threadId, HISTORY_LIMIT), opts.pendingIds, opts.hiddenIds)
-    // 模型眼前还摆着 webhook 载荷或本回合读过外部连接器内容时，就算是操作者开的头也不认规则：外部文字可能正是在诱导它
-    const hasWebhookHistory = rows.some((m) => m.kind === 'webhook')
-    let taintedByOutsideData = deps.tainted === true
+    const hasWiki = Boolean(deps.onWikiTool)
+    const canBackgroundTasks = Boolean(deps.onDelegateBackgroundTask || deps.onListBackgroundTasks)
+    const isBackgroundTask = deps.isBackgroundTask === true
+    const isPipelineStep = deps.isPipelineStep === true
+    const silentStop = isBackgroundTask || isPipelineStep
+    const allowDispatchPlan =
+      Boolean(deps.onCreateDispatchPlan)
+      && deps.origin === 'operator'
+      && !isBackgroundTask
+      && !isPipelineStep
+      && effectiveMode === 'act'
+    const historyLimit = deps.historyLimit && deps.historyLimit > 0 ? Math.floor(deps.historyLimit) : HISTORY_LIMIT
+    const rows = orderHistory(listMessages(db, threadId, historyLimit), opts.pendingIds, opts.hiddenIds)
+    // 模型眼前还摆着 webhook / 受污染的转交载荷，或本回合读过外部数据时，就算是操作者开的头也不认规则：外部文字可能正是在诱导它
+    const hasOutsideDataHistory = rows.some(
+      (m) => m.kind === 'webhook' || (m.kind === 'bot_ref' && (m.payload as { tainted?: unknown } | null)?.tainted === true),
+    )
+    let taintedByOutsideData = deps.tainted === true || deps.origin === 'webhook'
     const computeRuleBlock = (): RuleBlock | null =>
       deps.origin !== 'operator'
         ? (deps.origin ?? 'unknown')
-        : (hasWebhookHistory || taintedByOutsideData) ? 'outside-data' : null
+        : (hasOutsideDataHistory || taintedByOutsideData) ? 'outside-data' : null
+    const initiallyTainted = hasOutsideDataHistory || taintedByOutsideData
     const ctx: TurnContext = {
       ...deps,
       ruleBlock: computeRuleBlock(),
@@ -262,7 +360,17 @@ export async function runTurn(
       feedPublishedCount: 0,
       goalProgressCount: 0,
       spaceWriteCount: 0,
+      turnTainted: initiallyTainted,
+      effectiveMode,
+      proposedRuleThisTurn: false,
     }
+    let taintNotified = false
+    const notifyTainted = () => {
+      if (taintNotified) return
+      taintNotified = true
+      deps.onTainted?.()
+    }
+    if (initiallyTainted) notifyTainted()
     const attached = rows.filter((m) => m.kind === 'attachment')
     // 查不出来（盘坏了、没有上传目录）不拦回合：模型仍然知道有这么个文件，只是拿不到
     const brief = attached.length ? await deps.attachments?.(attached).catch(() => undefined) : undefined
@@ -271,8 +379,30 @@ export async function runTurn(
       {
         role: 'system',
         content: buildSystemPrompt(bot, soul, {
-          hasComputer, computer: deps.computer, memory: deps.memory, group: deps.group, canRelay, manual: deps.manual, routines: deps.routines, goals: deps.goals, spaces: deps.spaces,
-          connectors: deps.connectors, mcpServers: deps.mcpServers, vaultItems: deps.vaultItems, skills: deps.onReadSkill ? deps.skills : undefined, language: deps.language,
+          hasComputer,
+          hasWiki,
+          canBackgroundTasks:
+            Boolean(deps.onDelegateBackgroundTask)
+            && deps.origin === 'operator'
+            && !isBackgroundTask
+            && !isPipelineStep
+            && effectiveMode === 'act',
+          isBackgroundTask,
+          canDispatchPlan: allowDispatchPlan,
+          isPipelineStep,
+          computer: deps.computer,
+          memory: deps.memory,
+          group: deps.group,
+          canRelay,
+          manual: deps.manual,
+          routines: deps.routines,
+          goals: deps.goals,
+          spaces: deps.spaces,
+          connectors: deps.connectors,
+          mcpServers: deps.mcpServers,
+          vaultItems: deps.vaultItems,
+          skills: deps.onReadSkill ? deps.skills : undefined,
+          language: deps.language,
         }),
       },
       ...rows.map((m) => toChatMsg(m, bot.id, brief)),
@@ -284,8 +414,23 @@ export async function runTurn(
     const messages = withTimeNote(history, timeNote(now, timeZone))
     const hasSkills = Boolean(deps.skills?.length && deps.onReadSkill)
     const tools = buildTools({
-      hasComputer, canRelay, hasSkills, watch: deps.watch === true, shell: deps.computer?.shell, kind: deps.computer?.kind,
-      operatorTurn: deps.origin === 'operator', connectorTools: deps.connectorTools, mcpTools: deps.mcpTools, mcpReadToolNames: deps.mcpReadToolNames,
+      hasComputer,
+      hasWiki,
+      canRelay,
+      hasSkills,
+      canProposeRule: Boolean(deps.onProposeMemoryRule),
+      canBackgroundTasks,
+      isBackgroundTask,
+      canDispatchPlan: allowDispatchPlan,
+      isPipelineStep,
+      watch: effectiveMode === 'watch',
+      routineMode: effectiveMode,
+      shell: deps.computer?.shell,
+      kind: deps.computer?.kind,
+      operatorTurn: deps.origin === 'operator',
+      connectorTools: deps.connectorTools,
+      mcpTools: deps.mcpTools,
+      mcpReadToolNames: deps.mcpReadToolNames,
       hasVaultItems: Boolean(deps.vaultItems?.length && deps.onVaultFill),
       hasFeed: Boolean(deps.onPublishFeed),
       hasGoals: Boolean(deps.onManageGoal),
@@ -297,31 +442,46 @@ export async function runTurn(
     })
     const maxSteps = deps.maxSteps && deps.maxSteps > 0 ? Math.floor(deps.maxSteps) : DEFAULT_MAX_STEPS
     const turnMs = deps.turnTimeoutMs ?? DEFAULT_TURN_MS
+    const priority = deps.priority ?? defaultPriority(deps.origin)
     const startedAt = Date.now()
     for (let step = 0; ; step++) {
-      if (signal?.aborted) return stopped(notify)
+      if (signal?.aborted) return stopped(notify, silentStop)
       const limit = step >= maxSteps ? stepLimit(maxSteps)
         : turnMs > 0 && Date.now() - startedAt >= turnMs ? timeLimit(turnMs) : null
-      if (limit) return await closeOut(deps, messages, tools, limit, say, notify)
+      if (limit) return await closeOut(deps, messages, tools, limit, priority, say, notify)
       const overBudget = deps.checkBudget?.()
       if (overBudget) {
         sayBudget(overBudget, say, notify)
         return 'budget'
       }
-      const turn = await llm.chat(messages, tools, { signal })
+      const steering = deps.drainSteeringNotes?.() ?? []
+      for (const raw of steering) {
+        const note = typeof raw === 'string' ? raw : raw.note
+        if (typeof raw !== 'string' && raw.tainted === true) {
+          taintedByOutsideData = true
+          ctx.turnTainted = true
+          ctx.ruleBlock = computeRuleBlock()
+          notifyTainted()
+        }
+        messages.push({ role: 'user', content: `[operator steering note for your background task] ${note}` })
+      }
+      const turn = await llm.chat(messages, tools, { signal, priority })
       if (!imagesSeen) {
         imagesSeen = true
         brief?.shown()
       }
       if (turn.usage) deps.onUsage?.(turn.usage)
+      if (signal?.aborted) return stopped(notify, silentStop)
       if (turn.toolCalls.length > 0) {
         messages.push(turn.raw)
         let latestImage: string | undefined
         for (const call of turn.toolCalls) {
-          if (signal?.aborted) return stopped(notify)
+          if (signal?.aborted) return stopped(notify, silentStop)
           const outcome = await execToolCall(ctx, call, events, activity, () => {
             taintedByOutsideData = true
+            ctx.turnTainted = true
             ctx.ruleBlock = computeRuleBlock()
+            notifyTainted()
           })
           messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.text })
           latestImage = outcome.image ?? latestImage
@@ -330,13 +490,23 @@ export async function runTurn(
         continue
       }
       const text = turn.content?.trim()
-      // watch 回合看完没发现什么：一句「Nothing new.」不值得落进线程，每半小时一条只会把真正的消息淹掉
-      if (text && !(deps.watch && QUIET.test(text))) say(text)
+      // watch / prepare 回合看完没发现需要打扰操作者的事：安静收场，不落进线程也不进晨报
+      const silent =
+        (effectiveMode === 'watch' && Boolean(text && WATCH_QUIET.test(text))) ||
+        (effectiveMode === 'prepare' && Boolean(text && PREPARE_QUIET.test(text)))
+      if (text && !silent) {
+        deps.onFinalText?.(text)
+        if (deps.quietBuffer && deps.onQuietBuffer) {
+          await deps.onQuietBuffer({ kind: 'text', summary: text, payload: { text } })
+        } else {
+          say(text)
+        }
+      }
       if (text) deps.onTurnTextReply?.(text)
       return 'replied'
     }
   } catch (err) {
-    if (signal?.aborted) return stopped(notify)
+    if (signal?.aborted) return stopped(notify, deps.isBackgroundTask || deps.isPipelineStep)
     notify({ notice: 'error', params: { name: bot.name, detail: err instanceof Error ? err.message : String(err) } })
     return 'error'
   } finally {
@@ -352,8 +522,8 @@ function orderHistory(rows: MessageRow[], pendingIds: number[] = [], hiddenIds: 
   return [...rest, ...rows.filter((m) => pending.has(m.id))]
 }
 
-function stopped(notify: (n: Notice) => void): 'stopped' {
-  notify({ notice: 'stopped' })
+function stopped(notify: (n: Notice) => void, silent?: boolean): 'stopped' {
+  if (!silent) notify({ notice: 'stopped' })
   return 'stopped'
 }
 
@@ -377,6 +547,7 @@ async function closeOut(
   messages: ChatMsg[],
   tools: ReturnType<typeof buildTools>,
   limit: Limit,
+  priority: LlmPriority,
   say: (content: string) => void,
   notify: (n: Notice) => void,
 ): Promise<TurnOutcome> {
@@ -391,12 +562,13 @@ async function closeOut(
       content: `[gateway] You have reached ${limitText(limit.limit, limit.count)}. Do not call any tools. In a few plain lines: what you finished, `
         + 'what is left, and anything you need from your operator.',
     })
-    const turn = await deps.llm.chat(messages, tools, { signal: deps.signal, toolChoice: 'none' })
+    const turn = await deps.llm.chat(messages, tools, { signal: deps.signal, toolChoice: 'none', priority })
     if (turn.usage) deps.onUsage?.(turn.usage)
+    if (deps.signal?.aborted) return stopped(notify, deps.isBackgroundTask || deps.isPipelineStep)
     const text = turn.content?.trim()
     notify({ notice: 'paused', params: limit, ...(text ? { lead: text } : {}) })
   } catch {
-    if (deps.signal?.aborted) return stopped(notify)
+    if (deps.signal?.aborted) return stopped(notify, deps.isBackgroundTask || deps.isPipelineStep)
     notify({ notice: 'paused', params: limit })
   }
   return 'limit'
@@ -423,11 +595,15 @@ type Activity = {
 
 /** 一个回合一张「在干什么」的卡片：第一次动电脑时落库，之后同一个 id 就地更新并广播。 */
 /** watch 回合用来说「没什么事」的那一句 */
-const QUIET = /^nothing new\.?$/i
+const WATCH_QUIET = /^nothing new\.?$/i
+/** prepare 回合用来说「无需准备」的那一句 */
+const PREPARE_QUIET = /^nothing (?:new|to prepare)\.?$/i
 
-function createActivity(deps: AgentDeps, events: AgentEvents): Activity {
-  // watch 回合在后台定时跑：每一步都进动作日志，但不在线程里铺 activity 卡片
-  if (deps.watch) return { start: (tool, summary) => ({ tool, summary }), finish: () => {}, close: () => {} }
+function createActivity(deps: AgentDeps, effectiveMode: RoutineMode, events: AgentEvents): Activity {
+  // watch 回合在后台定时跑，Quiet Hours 静音缓冲期间，或后台任务车道：每一步都进动作日志，但不在线程里铺 activity 卡片
+  if (effectiveMode === 'watch' || deps.quietBuffer === true || deps.isBackgroundTask === true) {
+    return { start: (tool, summary) => ({ tool, summary }), finish: () => {}, close: () => {} }
+  }
   let row: MessageRow | null = null
   const steps: ActivityStep[] = []
   let done = false
@@ -469,8 +645,14 @@ const COMPUTER_TOOL_NAMES = new Set([
 /** 请人接管不是「电脑上的一步」，它有自己的卡片 */
 const ACTIVITY_TOOL_NAMES = new Set([...COMPUTER_TOOL_NAMES].filter((name) => name !== 'ask_for_login'))
 
+/** 会把外部网页标题、正文或画面带回模型视野的浏览器工具：用过即记为 outside-data */
+const BROWSER_OUTSIDE_DATA_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'browser_goto', 'browser_extract', 'browser_click', 'browser_back', 'browser_screenshot',
+])
+
 const WORKFLOW_TOOL_NAMES = new Set([
-  'hold_for_approval', 'ask_operator', 'save_memory', 'forget_memory', 'create_routine', 'stop_routine', 'message_bot',
+  'hold_for_approval', 'ask_operator', 'save_memory', 'forget_memory', 'propose_memory_rule',
+  'create_routine', 'stop_routine', 'message_bot',
 ])
 
 const MAX_OPTIONS = 6
@@ -485,19 +667,33 @@ async function execToolCall(
 ): Promise<ToolOutcome> {
   const args = (call.args ?? {}) as Record<string, unknown>
   const started = Date.now()
-  const log = (ok: boolean, goalId?: string) =>
-    deps.onAction?.({ tool: call.name, summary: summarize(call.name, args), ok, ms: Date.now() - started, ...(goalId ? { goalId } : {}) })
+  const log = (ok: boolean, extra?: string | { summary?: string; goalId?: string }) => {
+    const summaryOverride = typeof extra === 'string' ? extra : extra?.summary
+    const goalId = typeof extra === 'string' ? undefined : extra?.goalId
+    const finalSummary = summaryOverride || summarize(call.name, args)
+    const ms = Date.now() - started
+    deps.onAction?.({ tool: call.name, summary: finalSummary, ok, ms, ...(goalId ? { goalId } : {}) })
+    deps.onStepProgress?.({ tool: call.name, summary: finalSummary, ok, ms })
+  }
   const failed = (err: unknown): ToolOutcome => {
     log(false)
     // 工具失败必须回喂模型（让它换招/如实汇报），而不是炸掉整个回合
     return { text: `Tool ${call.name} failed: ${err instanceof Error ? err.message : String(err)}` }
   }
   // 没在清单里给它的工具，模型硬要调也不行：清单是给模型看的，这里才是门
-  if (deps.watch && !WATCH_TOOL_NAMES.has(call.name) && !deps.mcpReadToolNames?.has(call.name)) {
+  if (deps.effectiveMode === 'watch' && !WATCH_TOOL_NAMES.has(call.name) && !deps.mcpReadToolNames?.has(call.name)) {
     log(false)
     return {
       text: `${call.name} is not available in a watch routine: this run only looks. `
         + 'If something should be done, hold it for approval and your operator decides.',
+    }
+  }
+  if (deps.effectiveMode === 'prepare' && !PREPARE_TOOL_NAMES.has(call.name) && !deps.mcpReadToolNames?.has(call.name)) {
+    log(false)
+    return {
+      text: `${call.name} is not available in a prepare routine: this run allows reading, wiki_upsert, write_file, `
+        + 'propose_memory_rule, and hold_for_approval, but not shell commands, browser interaction, teammate relays, '
+        + 'or external writes.',
     }
   }
   // 改常设安排的工具：只有你自己开头的回合能用。来源不明一律当作不是你（和常驻授权同一个口径）
@@ -505,10 +701,62 @@ async function execToolCall(
     log(false)
     return { text: operatorOnlyRefusal(call.name, deps.origin) }
   }
+  // 后台任务控制工具：只在操作者发起的前台 act 回合允许，杜绝后台/流水线递归派生或外部输入操控
+  if (
+    BACKGROUND_CONTROL_TOOL_NAMES.has(call.name) &&
+    (deps.origin !== 'operator' || deps.isBackgroundTask || deps.isPipelineStep || deps.effectiveMode !== 'act')
+  ) {
+    log(false)
+    return { text: `${call.name} only works in a foreground turn your operator started.` }
+  }
+  if (call.name === 'create_dispatch_plan') {
+    const allowDispatchPlan =
+      Boolean(deps.onCreateDispatchPlan)
+      && deps.origin === 'operator'
+      && !deps.isBackgroundTask
+      && !deps.isPipelineStep
+      && deps.effectiveMode === 'act'
+    if (!allowDispatchPlan || !deps.onCreateDispatchPlan) {
+      log(false)
+      return { text: 'create_dispatch_plan is only available to Chief during an operator-started group turn.' }
+    }
+    if (typeof args.title !== 'string' || !args.title.trim()) {
+      log(false)
+      return { text: 'create_dispatch_plan needs a non-empty string "title".' }
+    }
+    if (!Array.isArray(args.steps)) {
+      log(false)
+      return { text: 'create_dispatch_plan needs a "steps" array.' }
+    }
+    const sourceTainted = deps.turnTainted || deps.origin === 'webhook'
+    try {
+      const res = await deps.onCreateDispatchPlan({
+        title: args.title,
+        steps: args.steps,
+        sourceTainted,
+      })
+      if (!res.ok) {
+        log(false)
+        return { text: res.error }
+      }
+      log(true)
+      return {
+        text:
+          `Draft dispatch plan "${res.plan.title}" (${res.plan.id}, ${res.plan.steps.length} steps) posted to the group thread. `
+          + 'Tell your operator it is ready for review — it will run once they click Start pipeline.',
+      }
+    } catch (err) {
+      return failed(err)
+    }
+  }
   if (call.name === 'message_user') {
-    const text = execMessageUser(deps, args, events)
-    log(text === 'Report delivered.')
-    return { text }
+    try {
+      const res = await execMessageUser(deps, args, events)
+      log(res.ok)
+      return { text: res.text }
+    } catch (err) {
+      return failed(err)
+    }
   }
   if (call.name === PUBLISH_FEED_TOOL_NAME) {
     if (!deps.onPublishFeed) {
@@ -538,7 +786,7 @@ async function execToolCall(
         payload: res.chip,
       }))
     }
-    log(res.ok, res.goalId)
+    log(res.ok, res.goalId ? { goalId: res.goalId } : undefined)
     return { text: res.text }
   }
   if (call.name === UPDATE_GOAL_PROGRESS_TOOL_NAME) {
@@ -560,7 +808,7 @@ async function execToolCall(
         payload: res.chip,
       }))
     }
-    log(res.ok, res.goalId)
+    log(res.ok, res.goalId ? { goalId: res.goalId } : undefined)
     return { text: res.text }
   }
   if (call.name === MANAGE_SPACE_TOOL_NAME) {
@@ -577,7 +825,7 @@ async function execToolCall(
         payload: res.chip,
       }))
     }
-    log(res.ok, res.goalId ?? undefined)
+    log(res.ok, res.goalId ? { goalId: res.goalId } : undefined)
     return { text: res.text }
   }
   if (call.name === SPACE_READ_TOOL_NAME) {
@@ -587,7 +835,7 @@ async function execToolCall(
     }
     const res = deps.onSpaceRead({ args })
     if (res.tainted) onOutsideDataRead?.()
-    log(res.ok, res.goalId ?? undefined)
+    log(res.ok, res.goalId ? { goalId: res.goalId } : undefined)
     return { text: res.text }
   }
   if (call.name === SPACE_UPSERT_ITEM_TOOL_NAME || call.name === SPACE_DELETE_ITEM_TOOL_NAME) {
@@ -610,7 +858,7 @@ async function execToolCall(
         payload: res.chip,
       }))
     }
-    log(res.ok, res.goalId ?? undefined)
+    log(res.ok, res.goalId ? { goalId: res.goalId } : undefined)
     return { text: res.text }
   }
   if (call.name === WEB_SEARCH_TOOL_NAME || call.name === WEB_FETCH_TOOL_NAME) {
@@ -637,6 +885,15 @@ async function execToolCall(
       const text = await execReadSkill(deps, args)
       log(true)
       return { text }
+    } catch (err) {
+      return failed(err)
+    }
+  }
+  if (BACKGROUND_TOOL_NAMES.has(call.name)) {
+    try {
+      const res = await execBackgroundTool(deps, call.name, args)
+      log(res.ok)
+      return { text: truncate(res.text) }
     } catch (err) {
       return failed(err)
     }
@@ -697,8 +954,41 @@ async function execToolCall(
       return failed(err)
     }
   }
+  if (WIKI_TOOL_NAMES.has(call.name)) {
+    if (deps.effectiveMode === 'watch' && !WIKI_READ_TOOL_NAMES.has(call.name)) {
+      log(false)
+      return {
+        text: `${call.name} is not available in a watch routine: this run only looks. `
+          + 'If something should be done, hold it for approval and your operator decides.',
+      }
+    }
+    if (!deps.onWikiTool) {
+      log(false)
+      return { text: 'Team wiki is not available on this gateway.' }
+    }
+    const step = activity.start(call.name, summarize(call.name, args))
+    try {
+      const res = await deps.onWikiTool({ name: call.name, args, turnTainted: deps.turnTainted })
+      if (res.tainted) onOutsideDataRead?.()
+      if (res.summary) step.summary = res.summary
+      activity.finish(step, res.ok, Date.now() - started)
+      log(res.ok, res.summary)
+      return { text: res.text }
+    } catch (err) {
+      activity.finish(step, false, Date.now() - started)
+      return failed(err)
+    }
+  }
   if (!COMPUTER_TOOL_NAMES.has(call.name)) return { text: `Unknown tool: ${call.name}` }
   if (!deps.getComputer) return { text: 'You have no computer attached right now — this tool is unavailable.' }
+  if (BROWSER_LEASE_TOOL_NAMES.has(call.name)) {
+    const lease = deps.onAcquireBrowser?.(call.name)
+    if (lease && !lease.ok) {
+      log(false)
+      return { text: lease.reason }
+    }
+  }
+  if (BROWSER_OUTSIDE_DATA_TOOL_NAMES.has(call.name)) onOutsideDataRead?.()
   const step = ACTIVITY_TOOL_NAMES.has(call.name) ? activity.start(call.name, summarize(call.name, args)) : null
   try {
     const outcome = await execComputerTool(deps, call.name, args, events)
@@ -719,6 +1009,7 @@ const STARTED_BY: Record<TurnOrigin, string> = {
   routine: 'one of your routines',
   webhook: 'a webhook',
   relay: 'a teammate handing you work',
+  background: 'a background task',
 }
 
 /** 告诉模型为什么这回合改不了，以及该怎么办：说给操作者听，由操作者来改 */
@@ -807,11 +1098,21 @@ function summarize(tool: string, args: Record<string, unknown>): string {
     }
     case 'ask_operator': return pick('question')
     case 'save_memory':
-    case 'forget_memory': return pick('rule')
-    case 'create_routine': return `${pick('name')}${args.mode === 'watch' ? ' (watch)' : ''}`
+    case 'forget_memory':
+    case 'propose_memory_rule': return pick('rule')
+    case 'create_routine': return `${pick('name')}${args.mode === 'prepare' ? ' (prepare)' : args.mode === 'watch' ? ' (watch)' : ''}`
     case 'stop_routine': return `#${pick('id')}`
     case 'message_bot': return `to ${pick('to')}`
     case 'read_skill': return pick('name')
+    case 'delegate_background_task': return pick('title')
+    case 'list_background_tasks': return 'list'
+    case 'steer_background_task': {
+      const taskId = pick('taskId')
+      const note = pick('note')
+      return `${taskId}${note ? `: ${note}` : ''}`.slice(0, 120)
+    }
+    case 'cancel_background_task': return pick('taskId')
+    case 'create_dispatch_plan': return pick('title')
     case 'message_user': {
       const payload = args.payload as { lines?: unknown[]; closing?: unknown } | undefined
       const closing = typeof payload?.closing === 'string' ? payload.closing : ''
@@ -891,19 +1192,153 @@ function summarize(tool: string, args: Record<string, unknown>): string {
       return `channel ${pick('channelId')}${pick('threadTs') ? ` (${pick('threadTs')})` : ''}`
     case 'slack_send_message':
       return `to ${pick('channelId')}`
+    case 'wiki_search': {
+      const qs = Array.isArray(args.queries)
+        ? args.queries
+            .filter((q): q is string => typeof q === 'string')
+            .map((q) => q.replace(/\s+/g, ' ').trim())
+            .filter(Boolean)
+        : typeof args.queries === 'string' && args.queries.trim()
+          ? [args.queries.replace(/\s+/g, ' ').trim()]
+          : []
+      const kind = pick('kind')
+      const qText = qs.slice(0, 3).join(' | ').slice(0, 100)
+      return [kind, qText].filter(Boolean).join(': ').slice(0, 120) || 'wiki'
+    }
+    case 'wiki_read':
+      return pick('id') || 'page'
+    case 'wiki_upsert': {
+      const kind = pick('kind')
+      const slug = pick('slug')
+      const title = pick('title')
+      return (kind && slug ? `${kind}/${slug}` : [kind, title].filter(Boolean).join(': ')).slice(0, 120) || 'page'
+    }
     default:
       return isMcpToolName(tool) ? summarizeMcpArgs(args) : ''
   }
 }
 
-function execMessageUser(deps: TurnContext, args: Record<string, unknown>, events: AgentEvents): string {
-  if (args.kind !== 'report') return 'Unsupported kind; only "report" exists today.'
+function reportSummary(payload: ReportPayload): string {
+  if (payload.closing) return payload.closing
+  return payload.lines
+    .map((l) => `${l.system} → ${l.result}${l.count ? ` (${l.count})` : ''}`)
+    .join('; ')
+}
+
+async function execMessageUser(
+  deps: TurnContext,
+  args: Record<string, unknown>,
+  events: AgentEvents,
+): Promise<{ text: string; ok: boolean }> {
+  if (args.kind !== 'report') return { ok: false, text: 'Unsupported kind; only "report" exists today.' }
   const payload = validateReportPayload(args.payload)
-  if (!payload) return 'Invalid report payload: need lines[] of {system, result, count?} plus optional closing.'
+  if (!payload) return { ok: false, text: 'Invalid report payload: need lines[] of {system, result, count?} plus optional closing.' }
+  if (deps.quietBuffer && deps.onQuietBuffer && args.urgent !== true) {
+    await deps.onQuietBuffer({ kind: 'report', summary: reportSummary(payload), payload })
+    return {
+      ok: true,
+      text: 'Report buffered for the morning digest (Quiet Hours are active). If this is time-critical and cannot wait, call message_user again with urgent: true.',
+    }
+  }
   const message = insertMessage(deps.db, { threadId: deps.threadId, sender: deps.bot.id, kind: 'report', payload })
   events.onMessage(message)
   deps.onReportDelivered?.({ message, payload, ruleBlock: deps.ruleBlock })
-  return 'Report delivered.'
+  deps.onReportFiled?.(reportSummary(payload))
+  return { ok: true, text: 'Report delivered.' }
+}
+
+async function execBackgroundTool(
+  deps: TurnContext,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ ok: boolean; text: string }> {
+  switch (name) {
+    case 'delegate_background_task': {
+      if (!deps.onDelegateBackgroundTask) {
+        return { ok: false, text: 'Background tasks are not available on this gateway.' }
+      }
+      const title = typeof args.title === 'string' ? args.title.trim() : ''
+      const instructions = typeof args.instructions === 'string' ? args.instructions.trim() : ''
+      if (!title || !instructions) {
+        return { ok: false, text: 'delegate_background_task needs non-empty "title" and "instructions".' }
+      }
+      const res = await deps.onDelegateBackgroundTask({
+        title,
+        instructions,
+        ...(deps.turnTainted ? { tainted: true } : {}),
+      })
+      if (!res.ok) return { ok: false, text: res.error }
+      return {
+        ok: true,
+        text: JSON.stringify({
+          ok: true,
+          taskId: res.task.id,
+          title: res.task.title,
+          status: res.task.status,
+          note: `Background task ${res.task.id} is ${res.task.status} on your background lane. Reply concisely to your operator now — foreground chat is free immediately.`,
+        }),
+      }
+    }
+    case 'list_background_tasks': {
+      if (!deps.onListBackgroundTasks) {
+        return { ok: false, text: 'Background tasks are not available on this gateway.' }
+      }
+      const tasks = await deps.onListBackgroundTasks()
+      if (tasks.length === 0) return { ok: true, text: 'You have no background tasks.' }
+      return {
+        ok: true,
+        text: JSON.stringify(
+          tasks.map((t) => ({
+            id: t.id,
+            title: t.title,
+            status: t.status,
+            stepCount: t.stepCount,
+            lastStep: t.lastStep,
+            usesBrowser: t.usesBrowser,
+            ...(t.summary ? { summary: t.summary } : {}),
+            ...(t.error ? { error: t.error } : {}),
+          })),
+        ),
+      }
+    }
+    case 'steer_background_task': {
+      if (!deps.onSteerBackgroundTask) {
+        return { ok: false, text: 'Background tasks are not available on this gateway.' }
+      }
+      const taskId = typeof args.taskId === 'string' ? args.taskId.trim() : ''
+      const note = typeof args.note === 'string' ? args.note.trim() : ''
+      if (!taskId || !note) {
+        return { ok: false, text: 'steer_background_task needs non-empty "taskId" and "note".' }
+      }
+      const res = await deps.onSteerBackgroundTask({
+        taskId,
+        note,
+        ...(deps.turnTainted ? { tainted: true } : {}),
+      })
+      if (!res.ok) return { ok: false, text: res.error }
+      return {
+        ok: true,
+        text: `Steering note delivered to background task ${res.task.id} ("${res.task.title}", ${res.task.status}).`,
+      }
+    }
+    case 'cancel_background_task': {
+      if (!deps.onCancelBackgroundTask) {
+        return { ok: false, text: 'Background tasks are not available on this gateway.' }
+      }
+      const taskId = typeof args.taskId === 'string' ? args.taskId.trim() : ''
+      if (!taskId) {
+        return { ok: false, text: 'cancel_background_task needs a non-empty "taskId".' }
+      }
+      const res = await deps.onCancelBackgroundTask({ taskId })
+      if (!res.ok) return { ok: false, text: res.error }
+      return {
+        ok: true,
+        text: `Cancelled background task ${res.task.id} ("${res.task.title}").`,
+      }
+    }
+    default:
+      return { ok: false, text: `Unknown tool: ${name}` }
+  }
 }
 
 async function execWorkflowTool(
@@ -959,9 +1394,37 @@ async function execWorkflowTool(
       }
       events.onMessage(insertMessage(deps.db, {
         threadId: deps.threadId, sender: deps.bot.id, kind: 'question',
-        payload: { question, options, multi: args.multi === true, status: 'open', ...(deps.watch ? { watch: true } : {}) },
+        payload: {
+          question, options, multi: args.multi === true, status: 'open',
+          ...(deps.effectiveMode === 'watch' ? { watch: true } : deps.effectiveMode === 'prepare' ? { routineMode: 'prepare' } : {}),
+        },
       }))
       return 'Question posted as a card. Stop here and wait for the answer — do not guess it.'
+    }
+    case 'propose_memory_rule': {
+      if (!deps.onProposeMemoryRule) return 'Rule proposals are not available on this gateway.'
+      if (deps.proposedRuleThisTurn) {
+        return 'You already proposed a rule in this turn. Wait for your operator to review it before suggesting another.'
+      }
+      const rule = typeof args.rule === 'string' ? args.rule.trim() : ''
+      const reason = typeof args.reason === 'string' ? args.reason.trim() : ''
+      if (!rule || !reason) return 'propose_memory_rule needs non-empty "rule" and "reason".'
+      const sourceTainted = deps.turnTainted || deps.origin === 'webhook'
+      const result = await deps.onProposeMemoryRule({ rule, reason, sourceTainted })
+      if (result.created) {
+        deps.proposedRuleThisTurn = true
+        return 'Proposed the rule to your operator for review. It will only be saved to MEMORY.md if they accept it.'
+      }
+      switch (result.reason) {
+        case 'invalid_rule':
+          return 'Invalid rule: provide a single clear sentence (1–300 characters).'
+        case 'already_in_memory':
+          return 'That rule is already in your MEMORY.md.'
+        case 'already_pending':
+          return 'A matching rule proposal is already waiting for your operator.'
+        case 'previously_dismissed':
+          return 'Your operator already dismissed a matching rule proposal — do not suggest it again.'
+      }
     }
     case 'save_memory': {
       if (!deps.onSaveMemory) return 'Memory is not available on this gateway.'
@@ -1033,7 +1496,7 @@ async function execWorkflowTool(
       const to = String(args.to ?? '').trim()
       const content = String(args.content ?? '').trim()
       if (!to || !content) return 'message_bot needs "to" and "content".'
-      const result = await deps.onMessageBot({ to, content })
+      const result = await deps.onMessageBot({ to, content, ...(deps.turnTainted ? { tainted: true } : {}) })
       if (!result.delivered) return result.reason ?? `Could not reach ${to}.`
       return `Handed to ${result.toName ?? to}.`
     }
@@ -1231,6 +1694,80 @@ function webhookForModel(payload: unknown): string {
     + `${open}\n${quoted}\n${close}`
 }
 
+function ruleProposalForModel(payload: unknown): string {
+  const p = (payload && typeof payload === 'object' ? payload : {}) as {
+    proposalId?: unknown
+    rule?: unknown
+    status?: unknown
+  }
+  return JSON.stringify({ proposalId: p.proposalId, rule: p.rule, status: p.status })
+}
+
+function quietDigestForModel(payload: unknown): string {
+  const p = (payload && typeof payload === 'object' ? payload : {}) as {
+    itemCount?: unknown
+    items?: unknown
+  }
+  const rawItems = Array.isArray(p.items) ? p.items : []
+  const items = rawItems.map((raw) => {
+    const item = (raw && typeof raw === 'object' ? raw : {}) as { routineName?: unknown; summary?: unknown }
+    return { routineName: item.routineName ?? '', summary: item.summary ?? '' }
+  })
+  return JSON.stringify({
+    itemCount: typeof p.itemCount === 'number' && Number.isFinite(p.itemCount) ? p.itemCount : items.length,
+    items,
+  })
+}
+
+function backgroundTaskForModel(payload: unknown): string {
+  const p = (payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}) as {
+    taskId?: unknown
+    title?: unknown
+    status?: unknown
+    usesBrowser?: unknown
+    summary?: unknown
+    error?: unknown
+  }
+  return JSON.stringify({
+    ...(typeof p.taskId === 'string' ? { taskId: p.taskId } : {}),
+    ...(typeof p.title === 'string' ? { title: p.title } : {}),
+    ...(typeof p.status === 'string' ? { status: p.status } : {}),
+    ...(typeof p.usesBrowser === 'boolean' ? { usesBrowser: p.usesBrowser } : {}),
+    ...(typeof p.summary === 'string' && p.summary ? { summary: p.summary } : {}),
+    ...(typeof p.error === 'string' && p.error ? { error: p.error } : {}),
+  })
+}
+
+function dispatchPlanForModel(payload: unknown): string {
+  const p = (payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}) as {
+    planId?: unknown
+    title?: unknown
+    status?: unknown
+    steps?: unknown
+  }
+  const rawSteps = Array.isArray(p.steps) ? p.steps : []
+  const steps = rawSteps.map((raw) => {
+    const s = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as {
+      id?: unknown
+      botId?: unknown
+      title?: unknown
+      status?: unknown
+    }
+    return {
+      ...(typeof s.id === 'string' ? { id: s.id } : {}),
+      ...(typeof s.botId === 'string' ? { botId: s.botId } : {}),
+      ...(typeof s.title === 'string' ? { title: s.title } : {}),
+      ...(typeof s.status === 'string' ? { status: s.status } : {}),
+    }
+  })
+  return JSON.stringify({
+    ...(typeof p.planId === 'string' ? { planId: p.planId } : {}),
+    ...(typeof p.title === 'string' ? { title: p.title } : {}),
+    ...(typeof p.status === 'string' ? { status: p.status } : {}),
+    steps,
+  })
+}
+
 function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): ChatMsg {
   if (m.kind === 'webhook') return { role: 'user', content: webhookForModel(m.payload) }
   // 操作者发来的文件：一行说明；图只在这位同事第一次见到它的回合带上，并在这一回合里钉住
@@ -1251,7 +1788,11 @@ function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): Chat
     const body = m.kind === 'text' ? m.content
       : m.kind === 'activity' ? `[steps taken] ${describeSteps(m.payload)}`
         : m.kind === 'approval_request' ? `[held for approval] ${approvalForModel(m.payload)}`
-          : `[${m.kind}] ${JSON.stringify(m.payload)}`
+          : m.kind === 'rule_proposal' ? `[proposed rule] ${ruleProposalForModel(m.payload)}`
+            : m.kind === 'quiet_digest' ? `[morning digest delivered] ${quietDigestForModel(m.payload)}`
+              : m.kind === 'background_task' ? `[background task] ${backgroundTaskForModel(m.payload)}`
+                : m.kind === 'dispatch_plan' ? `[dispatch plan] ${dispatchPlanForModel(m.payload)}`
+                  : `[${m.kind}] ${JSON.stringify(m.payload)}`
     return { role: 'user', content: `@${m.sender}: ${body}` }
   }
   if (m.kind === 'activity') return { role: 'assistant', content: `[steps taken] ${describeSteps(m.payload)}` }
@@ -1262,6 +1803,10 @@ function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): Chat
   if (m.kind === 'goal_updated') return { role: 'assistant', content: `[goal updated] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'space_updated') return { role: 'assistant', content: `[space updated] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'routine_created') return { role: 'assistant', content: `[routine created] ${JSON.stringify(m.payload)}` }
+  if (m.kind === 'rule_proposal') return { role: 'assistant', content: `[proposed rule] ${ruleProposalForModel(m.payload)}` }
+  if (m.kind === 'quiet_digest') return { role: 'assistant', content: `[morning digest delivered] ${quietDigestForModel(m.payload)}` }
+  if (m.kind === 'background_task') return { role: 'assistant', content: `[background task] ${backgroundTaskForModel(m.payload)}` }
+  if (m.kind === 'dispatch_plan') return { role: 'assistant', content: `[dispatch plan] ${dispatchPlanForModel(m.payload)}` }
   if (m.kind === 'bot_ref') return { role: 'user', content: `[message from teammate] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'login_request') return { role: 'assistant', content: `[asked for a sign-in] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'question') return { role: 'assistant', content: `[asked your operator] ${JSON.stringify(m.payload)}` }

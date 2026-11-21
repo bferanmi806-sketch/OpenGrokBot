@@ -1,5 +1,7 @@
+import type { BackgroundTaskView } from './background-tasks.js'
 import type { BrowserStatus } from './browsers.js'
 import type { MessageRow } from './db.js'
+import type { DispatchPlanView } from './dispatch-plans.js'
 
 /**
  * 侧栏上每位同事的状态：在干活 / 在等你（审批、问题、登录） / 卡住了（出错、超额、步数用完） / 闲着。
@@ -19,6 +21,11 @@ export type GatewayEvent =
   | { type: 'feed_changed' }
   | { type: 'goals_changed' }
   | { type: 'spaces_changed' }
+  | { type: 'wiki_changed' }
+  | { type: 'quiet_digest_changed' }
+  | { type: 'background_task_changed'; botId: string; task: BackgroundTaskView }
+  | { type: 'dispatch_plan_changed'; threadId: string; plan: DispatchPlanView }
+  | { type: 'team_charter_changed'; threadId: string }
 
 type WsLike = { send(data: string): void }
 

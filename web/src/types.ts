@@ -222,7 +222,7 @@ export type ApprovalPayload = {
   /** 同一个原因的代码和插值，界面按语言说；老 chip 只有上面那句英文 */
   rememberReason?: BlockReason
   /** 有规则本来能放行它，但这一回合不是你开的头（或眼前有外部数据），所以还是问了你 */
-  ruleHeld?: 'routine' | 'webhook' | 'relay' | 'outside-data' | 'unknown'
+  ruleHeld?: 'routine' | 'webhook' | 'relay' | 'background' | 'outside-data' | 'unknown'
   /** 一批对象，一项一行 */
   items?: string[]
   /** 你勾留下、放行了的那几项的下标 */
@@ -265,7 +265,7 @@ export type SpaceUpdatedPayload = {
   tainted?: boolean
   by?: 'operator' | 'bot'
 }
-export type RoutineMode = 'act' | 'watch'
+export type RoutineMode = 'act' | 'watch' | 'prepare'
 export type RoutinePayload = {
   routineId: number
   name: string
@@ -282,7 +282,7 @@ export type QuestionPayload = {
   status: 'open' | 'answered' | 'skipped'
   answer?: string[]
 }
-export type BotRefPayload = { from: string; fromName: string; content: string }
+export type BotRefPayload = { from: string; fromName: string; content: string; tainted?: boolean }
 export type LoginPayload = { site: string; why?: string }
 /** webhook 带来的东西，网关已排好版、截过长 */
 export type WebhookPayload = { routineId: number; name: string; body: string }
@@ -374,6 +374,8 @@ export type ComputerInfo = {
   vaultItems?: BotVaultItem[]
   /** 声明式空间列表，以及这位同事当前的角色（null / viewer / editor） */
   spaces?: BotSpaceItem[]
+  /** 后台任务列表（运行中/排队中在前，最新在前） */
+  backgroundTasks?: BackgroundTaskView[]
 }
 
 export type ComputerView = ComputerInfo
@@ -396,6 +398,10 @@ export type MessageKind =
   | 'question'
   | 'webhook'
   | 'attachment'
+  | 'quiet_digest'
+  | 'rule_proposal'
+  | 'background_task'
+  | 'dispatch_plan'
 
 export type Message = {
   id: number
@@ -419,6 +425,10 @@ export type Message = {
     | WebhookPayload
     | AttachmentPayload
     | NoticePayload
+    | QuietDigestPayload
+    | RuleProposalPayload
+    | BackgroundTaskPayload
+    | DispatchPlanPayload
     | null
   created_at: number
 }
@@ -462,6 +472,11 @@ export type GatewayEvent =
   | { type: 'feed_changed' }
   | { type: 'goals_changed' }
   | { type: 'spaces_changed' }
+  | { type: 'wiki_changed' }
+  | { type: 'quiet_digest_changed' }
+  | { type: 'background_task_changed'; botId: string; task: BackgroundTaskView }
+  | { type: 'dispatch_plan_changed'; threadId: string; plan: DispatchPlanView }
+  | { type: 'team_charter_changed'; threadId: string }
 
 export type ServerEvent = GatewayEvent
 
@@ -509,6 +524,10 @@ export type SettingsView = {
     computers: 'auto' | 'docker' | 'local'
     browserMirror: string
     checkUpdates: boolean
+    quietHoursEnabled?: boolean
+    quietHoursStart?: string
+    quietHoursEnd?: string
+    localLlmConcurrency?: number
   }
   sources: Record<string, 'env' | 'saved' | 'default'>
   apiKey: { set: boolean; masked: string; source: 'env' | 'file' | 'none' }
@@ -1117,4 +1136,271 @@ export type UpdateSpacePatch = {
   goalId?: string | null
   schema?: SpaceSchema
   grants?: SpaceGrant[]
+}
+
+export type WikiKind = 'contact' | 'client' | 'project' | 'topic'
+
+export type WikiPageSummary = {
+  id: string
+  kind: WikiKind
+  slug: string
+  title: string
+  summary: string
+  tags: string[]
+  sourceTainted: boolean
+  updatedBy: string
+  version: number
+  createdAt: number
+  updatedAt: number
+  snippet?: string
+  score?: number
+}
+
+export type WikiPageDetail = WikiPageSummary & {
+  body: string
+}
+
+export type WikiRevision = {
+  id: number
+  pageId: string
+  version: number
+  title: string
+  summary: string
+  tags: string[]
+  body: string
+  editedBy: string
+  note: string
+  sourceTainted: boolean
+  createdAt: number
+}
+
+export type WikiListResponse = {
+  pages: WikiPageSummary[]
+  total: number
+}
+
+export type WikiPageResponse = {
+  page: WikiPageDetail
+  revisions: WikiRevision[]
+}
+
+export type WikiSaveInput = {
+  title: string
+  summary?: string
+  tags?: string[]
+  body: string
+  note?: string
+}
+
+export type WikiCreateInput = WikiSaveInput & {
+  kind: WikiKind
+  slug?: string
+}
+
+export type QuietDigestEntry = {
+  id: number
+  routineId: number | null
+  routineName: string
+  routineMode: RoutineMode
+  kind: 'report' | 'text'
+  summary: string
+  report?: ReportPayload
+  text?: string
+  createdAt: number
+}
+
+export type QuietDigestPayload = {
+  windowStart: string
+  windowEnd: string
+  itemCount: number
+  items: QuietDigestEntry[]
+  flushedManually?: boolean
+}
+
+export type QuietDigestBotSummary = {
+  botId: string
+  count: number
+  latestAt: number
+}
+
+export type QuietDigestSummary = {
+  enabled: boolean
+  active: boolean
+  start: string
+  end: string
+  timeZone: string
+  pendingCount: number
+  byBot: QuietDigestBotSummary[]
+}
+
+export type QuietDigestFlushResponse = {
+  flushed: number
+  threads: string[]
+}
+
+export type RuleProposalSource = 'agent' | 'discard_pattern'
+export type RuleProposalStatus = 'pending' | 'accepted' | 'dismissed'
+
+export type RuleProposalPayload = {
+  proposalId: number
+  rule: string
+  reason: string
+  source: RuleProposalSource
+  sourceTainted: boolean
+  status: RuleProposalStatus
+  edited?: boolean
+  resolvedAt?: number
+}
+
+export type RuleProposalView = {
+  id: number
+  botId: string
+  threadId: string
+  rule: string
+  reason: string
+  source: RuleProposalSource
+  sourceTainted: boolean
+  status: RuleProposalStatus
+  messageId: number | null
+  createdAt: number
+  resolvedAt: number | null
+}
+
+export type ResolveRuleProposalResponse = {
+  ok: true
+  proposal: RuleProposalView
+  memoryUpdated: boolean
+}
+
+export type LlmPriority = 'interactive' | 'background' | 'routine' | 'low'
+
+export type LlmQueueEndpointView = {
+  key: string
+  active: number
+  queued: number
+  byPriority: Record<LlmPriority, number>
+}
+
+export type LlmQueueSnapshot = {
+  concurrency: number
+  endpoints: LlmQueueEndpointView[]
+}
+
+export type BackgroundTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+export type BackgroundTaskStep = {
+  tool: string
+  summary: string
+  ok?: boolean
+  ms?: number
+  at: number
+}
+
+export type BackgroundTaskView = {
+  id: string
+  botId: string
+  threadId: string
+  title: string
+  instructions: string
+  status: BackgroundTaskStatus
+  stepCount: number
+  lastStep: string
+  steps: BackgroundTaskStep[]
+  summary: string
+  error: string
+  usesBrowser: boolean
+  sourceTainted?: boolean
+  messageId: number | null
+  createdAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export type BackgroundTaskPayload = {
+  taskId: string
+  title: string
+  status: BackgroundTaskStatus
+  stepCount: number
+  lastStep: string
+  steps: BackgroundTaskStep[]
+  summary?: string
+  error?: string
+  usesBrowser: boolean
+  createdAt: number
+  startedAt?: number | null
+  finishedAt?: number | null
+}
+
+export type BackgroundTaskActionResponse = {
+  ok: true
+  task: BackgroundTaskView
+}
+
+export type DispatchPlanStatus = 'draft' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
+
+export type DispatchStepStatus =
+  | 'pending'
+  | 'running'
+  | 'waiting_approval'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+  | 'cancelled'
+
+export type DispatchStepView = {
+  id: string
+  seq: number
+  wave: number
+  botId: string
+  title: string
+  instructions: string
+  dependsOn: string[]
+  status: DispatchStepStatus
+  output: string
+  error: string
+  outputTainted: boolean
+  waitingApprovalId: number | null
+  waitingQuestionId: number | null
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export type DispatchPlanView = {
+  id: string
+  threadId: string
+  createdBy: string
+  title: string
+  status: DispatchPlanStatus
+  sourceTainted: boolean
+  messageId: number | null
+  error: string
+  steps: DispatchStepView[]
+  createdAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export type DispatchPlanPayload = {
+  planId: string
+  threadId: string
+  createdBy: string
+  title: string
+  status: DispatchPlanStatus
+  sourceTainted: boolean
+  error: string
+  steps: DispatchStepView[]
+  createdAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export type DispatchPlanActionResponse = {
+  ok: true
+  plan: DispatchPlanView
+}
+
+export type TeamCharterView = {
+  threadId: string
+  content: string
+  updatedAt: number | null
 }

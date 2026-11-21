@@ -2,6 +2,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api'
+import { I18nProvider } from '../i18n'
 import type { ApprovalPayload } from '../types'
 import { ApprovalChip } from './ApprovalChip'
 
@@ -85,6 +86,21 @@ describe('ApprovalChip', () => {
     expect(screen.getByText(/Your standing rule covers email → bob@acme.com, but rules only apply to work you start yourself: this came in through a webhook\./))
       .toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+  })
+
+  it('explains when a standing rule was held because the turn is a background task', () => {
+    const { unmount } = render(
+      <ApprovalChip payload={{ ...pending, kind: 'email', target: 'bob@acme.com', canRemember: true, ruleHeld: 'background' }} onDecide={() => {}} />,
+    )
+    expect(screen.getByText(/Your standing rule covers email → bob@acme.com, but rules only apply to work you start yourself: this is running as a background task\./))
+      .toBeInTheDocument()
+    unmount()
+    render(
+      <I18nProvider lang="zh-CN">
+        <ApprovalChip payload={{ ...pending, kind: 'email', target: 'bob@acme.com', canRemember: true, ruleHeld: 'background' }} onDecide={() => {}} />
+      </I18nProvider>,
+    )
+    expect(screen.getByText(/你的放行规矩管得到「email → bob@acme.com」.*这件事正在后台任务里跑。/)).toBeInTheDocument()
   })
 
   it('says why "Always allow" is not offered for a vague destination', () => {
@@ -699,5 +715,209 @@ describe('ApprovalChip', () => {
     rerender(<ApprovalChip payload={{ ...payload, status: 'approved', edited: true }} onDecide={onDecide} />)
     expect(screen.queryByLabelText('Body')).toBeNull()
     expect(screen.getByText('Approved · Edited by you')).toBeInTheDocument()
+  })
+
+  it('reverts initially-undefined calendar_update_event optional fields to omitted when cleared back to empty', async () => {
+    const onDecide = vi.fn()
+    render(
+      <ApprovalChip
+        payload={{
+          approvalId: 23,
+          action: 'Update calendar event evt-11',
+          status: 'pending',
+          editable: {
+            kind: 'connector',
+            tool: 'calendar_update_event',
+            accountLabel: 'Work Calendar',
+            eventId: 'evt-11',
+            title: 'Standup',
+          },
+        }}
+        onDecide={onDecide}
+      />,
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+
+    const locationInput = screen.getByLabelText('Location')
+    const attendeesInput = screen.getByLabelText('Attendees')
+    const descriptionInput = screen.getByLabelText('Description')
+    const titleInput = screen.getByLabelText('Title')
+
+    await userEvent.type(locationInput, 'Room 1')
+    expect(screen.getByRole('button', { name: 'Approve edited' })).toBeEnabled()
+    await userEvent.clear(locationInput)
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+
+    await userEvent.type(attendeesInput, 'alice@corp.com')
+    expect(screen.getByRole('button', { name: 'Approve edited' })).toBeEnabled()
+    await userEvent.clear(attendeesInput)
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+
+    await userEvent.type(descriptionInput, 'Agenda notes')
+    expect(screen.getByRole('button', { name: 'Approve edited' })).toBeEnabled()
+    await userEvent.clear(descriptionInput)
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+
+    // Clearing Title must still trigger atLeastOneField because none of the reverted fields count
+    await userEvent.clear(titleInput)
+    expect(screen.getByRole('alert')).toHaveTextContent('Provide at least one field to update.')
+    expect(screen.getByRole('button', { name: 'Approve edited' })).toBeDisabled()
+
+    await userEvent.type(titleInput, 'Weekly Standup')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+
+    const submitted = onDecide.mock.calls[0]?.[4]
+    expect(submitted).toEqual({
+      kind: 'connector',
+      tool: 'calendar_update_event',
+      title: 'Weekly Standup',
+    })
+    expect('location' in submitted).toBe(false)
+    expect('attendees' in submitted).toBe(false)
+    expect('description' in submitted).toBe(false)
+  })
+
+  it('preserves quoted display names with commas in mail_send and splits delimiters outside quotes', async () => {
+    const onDecide = vi.fn()
+    render(
+      <ApprovalChip
+        payload={{
+          approvalId: 24,
+          action: 'Send email',
+          status: 'pending',
+          editable: {
+            kind: 'connector',
+            tool: 'mail_send',
+            accountLabel: 'work@corp.com',
+            to: ['"Smith, Alice" <alice@corp.com>'],
+            cc: [],
+            bcc: [],
+            subject: 'Q2 Plan',
+            body: 'Initial body',
+          },
+        }}
+        onDecide={onDecide}
+      />,
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByLabelText('To')).toHaveValue('"Smith, Alice" <alice@corp.com>')
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+
+    const bodyInput = screen.getByLabelText('Body')
+    await userEvent.clear(bodyInput)
+    await userEvent.type(bodyInput, 'Updated body only')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+
+    expect(onDecide).toHaveBeenLastCalledWith(24, 'approve', undefined, undefined, {
+      kind: 'connector',
+      tool: 'mail_send',
+      to: ['"Smith, Alice" <alice@corp.com>'],
+      cc: [],
+      bcc: [],
+      subject: 'Q2 Plan',
+      body: 'Updated body only',
+    })
+
+    // Comma and semicolon outside quotes split properly while keeping quoted display names intact
+    await userEvent.type(screen.getByLabelText('To'), ', bob@corp.com')
+    await userEvent.type(screen.getByLabelText('Cc'), '"Doe; Jane" <jane@corp.com>; carol@corp.com')
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+
+    expect(onDecide).toHaveBeenLastCalledWith(24, 'approve', undefined, undefined, {
+      kind: 'connector',
+      tool: 'mail_send',
+      to: ['"Smith, Alice" <alice@corp.com>', 'bob@corp.com'],
+      cc: ['"Doe; Jane" <jane@corp.com>', 'carol@corp.com'],
+      bcc: [],
+      subject: 'Q2 Plan',
+      body: 'Updated body only',
+    })
+  })
+
+  it('reverts initially-omitted optional MCP string fields when cleared while preserving cleared present keys', async () => {
+    const onDecide = vi.fn()
+    render(
+      <ApprovalChip
+        payload={{
+          approvalId: 25,
+          action: 'Linear · create_issue',
+          status: 'pending',
+          editable: {
+            kind: 'mcp',
+            serverName: 'Linear',
+            toolName: 'create_issue',
+            args: { title: 'Fix login', subtitle: 'Auth flow' },
+            inputSchema: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                subtitle: { type: 'string' },
+                note: { type: 'string' },
+              },
+              required: ['title'],
+            },
+          },
+        }}
+        onDecide={onDecide}
+      />,
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+
+    const noteInput = screen.getByLabelText('note')
+    await userEvent.type(noteInput, 'temporary')
+    expect(screen.getByRole('button', { name: 'Approve edited' })).toBeEnabled()
+    await userEvent.clear(noteInput)
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+
+    // Clearing a string key originally present in editable.args sends "" while omitted note stays absent
+    await userEvent.clear(screen.getByLabelText('subtitle'))
+    await userEvent.click(screen.getByRole('button', { name: 'Approve edited' }))
+
+    const submitted = onDecide.mock.calls[0]?.[4]
+    expect(submitted).toEqual({
+      kind: 'mcp',
+      args: { title: 'Fix login', subtitle: '' },
+    })
+    expect('note' in submitted.args).toBe(false)
+  })
+
+  it('calls onDecide without an edit argument when clicking Approve inside an open unmodified editor', async () => {
+    const onDecide = vi.fn()
+    render(
+      <ApprovalChip
+        payload={{
+          approvalId: 26,
+          action: 'Post release note',
+          detail: 'v0.8.0 is live',
+          status: 'pending',
+          editable: {
+            kind: 'prompt',
+            action: 'Post release note',
+            detail: 'v0.8.0 is live',
+          },
+        }}
+        onDecide={onDecide}
+      />,
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: 'Approve' }))
+
+    expect(onDecide).toHaveBeenCalledTimes(1)
+    expect(onDecide.mock.calls[0]).toEqual([26, 'approve'])
+    expect(onDecide.mock.calls[0]).toHaveLength(2)
   })
 })

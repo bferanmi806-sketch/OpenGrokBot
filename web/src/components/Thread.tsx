@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
 import type {
-  ActivityPayload, ApprovalEditInput, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, Conversation, GoalUpdatedPayload, LoginPayload, MemoryPayload,
-  Message, QuestionPayload, ReportPayload, RoutinePayload, RuleDuration, ScreenshotPayload, SpaceUpdatedPayload, WebhookPayload,
+  ActivityPayload, ApprovalEditInput, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BackgroundTaskPayload, BotRefPayload, Conversation, DispatchPlanPayload, GoalUpdatedPayload, LoginPayload, MemoryPayload,
+  Message, QuestionPayload, QuietDigestPayload, ReportPayload, RoutinePayload, RuleDuration, RuleProposalPayload, ScreenshotPayload, SpaceUpdatedPayload, WebhookPayload,
 } from '../types'
 import { ApiError } from '../api'
 import { ACCEPT, isImageType } from '../attachments'
@@ -10,10 +10,12 @@ import { errorText, isNotice, noticeText } from '../i18n/describe'
 import { ActivityChip } from './ActivityChip'
 import { ApprovalChip } from './ApprovalChip'
 import { AttachmentChip } from './AttachmentChip'
+import { BackgroundTaskChip } from './BackgroundTaskChip'
 import { BotAvatar, conversationSeed } from './BotAvatar'
 import { BotRefChip } from './BotRefChip'
 import { PendingFiles, usePendingFiles, type FilesIO } from './ComposerFiles'
 import { ConfirmDialog } from './ConfirmDialog'
+import { DispatchPlanChip } from './DispatchPlanChip'
 import { GoalChip } from './GoalChip'
 import { ArrowDownIcon, ArrowUpIcon, AtSignIcon, MonitorIcon, PaperclipIcon, SidebarIcon, StopSquareIcon } from './Icons'
 import { Lightbox, type LightboxImage } from './Lightbox'
@@ -21,8 +23,10 @@ import { LoginChip } from './LoginChip'
 import { Markdown } from './Markdown'
 import { MemoryChip } from './MemoryChip'
 import { QuestionChip } from './QuestionChip'
+import { QuietDigestChip } from './QuietDigestChip'
 import { ReportChip } from './ReportChip'
 import { RoutineChip } from './RoutineChip'
+import { RuleProposalChip } from './RuleProposalChip'
 import { ScreenshotChip } from './ScreenshotChip'
 import { SpaceChip } from './SpaceChip'
 import { WebhookChip } from './WebhookChip'
@@ -59,17 +63,23 @@ type Mention = { id: string; name: string; emoji: string }
 
 /** 单条消息独立 memo：底部输入框每次敲键盘、挪光标都不再把上面 ~200 条 Markdown 重新编译一遍 */
 const ThreadMessageRow = memo(function ThreadMessageRow({
-  message, dayHeader, showTime, sameSpeakerNext, speaker, t,
-  onDecide, onAnswer, onOpenScreen, onPreview, onRemoveFile, onRequestRemoveFile,
+  message, dayHeader, showTime, sameSpeakerNext, speaker, roster, t,
+  onDecide, onAnswer, onResolveRuleProposal, onSteerBackgroundTask, onCancelBackgroundTask, onStartDispatchPlan, onCancelDispatchPlan, onOpenScreen, onPreview, onRemoveFile, onRequestRemoveFile,
 }: {
   message: Message
   dayHeader: string | null
   showTime: boolean
   sameSpeakerNext: boolean
   speaker: { name: string; emoji: string } | undefined
+  roster: Record<string, { name: string; emoji: string }>
   t: T
   onDecide: (approvalId: number, decision: 'approve' | 'discard', remember?: RuleDuration, items?: number[], edit?: ApprovalEditInput) => void | Promise<void>
   onAnswer?: ((messageId: number, choices: string[]) => void | Promise<void>) | undefined
+  onResolveRuleProposal?: ((proposalId: number, decision: 'accept' | 'dismiss', rule?: string) => void | Promise<void>) | undefined
+  onSteerBackgroundTask?: ((taskId: string, note: string) => void | Promise<void>) | undefined
+  onCancelBackgroundTask?: ((taskId: string) => void | Promise<void>) | undefined
+  onStartDispatchPlan?: ((planId: string) => void | Promise<void>) | undefined
+  onCancelDispatchPlan?: ((planId: string) => void | Promise<void>) | undefined
   onOpenScreen?: (() => void) | undefined
   onPreview: (img: LightboxImage) => void
   onRemoveFile?: ((id: string) => void) | undefined
@@ -113,6 +123,32 @@ const ThreadMessageRow = memo(function ThreadMessageRow({
         )
       case 'question':
         return <QuestionChip payload={m.payload as QuestionPayload} onAnswer={(choices) => onAnswer?.(m.id, choices)} />
+      case 'rule_proposal':
+        return (
+          <RuleProposalChip
+            payload={m.payload as RuleProposalPayload}
+            {...(onResolveRuleProposal ? { onResolve: onResolveRuleProposal } : {})}
+          />
+        )
+      case 'quiet_digest':
+        return <QuietDigestChip payload={m.payload as QuietDigestPayload} />
+      case 'background_task':
+        return (
+          <BackgroundTaskChip
+            payload={m.payload as BackgroundTaskPayload}
+            {...(onSteerBackgroundTask ? { onSteer: onSteerBackgroundTask } : {})}
+            {...(onCancelBackgroundTask ? { onCancel: onCancelBackgroundTask } : {})}
+          />
+        )
+      case 'dispatch_plan':
+        return (
+          <DispatchPlanChip
+            payload={m.payload as DispatchPlanPayload}
+            roster={roster}
+            {...(onStartDispatchPlan ? { onStart: onStartDispatchPlan } : {})}
+            {...(onCancelDispatchPlan ? { onCancel: onCancelDispatchPlan } : {})}
+          />
+        )
       case 'approval_resolved': {
         const p = m.payload as ApprovalResolvedPayload
         return (
@@ -176,7 +212,8 @@ const stillMentioned = (text: string, name: string) =>
 const carriesFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files')
 
 export function Thread({
-  conversation, messages, thinking, onSend, onDecide, onAnswer, roster,
+  conversation, messages, thinking, onSend, onDecide, onAnswer, onResolveRuleProposal,
+  onSteerBackgroundTask, onCancelBackgroundTask, onStartDispatchPlan, onCancelDispatchPlan, roster,
   onOpenScreen, onToggleScreen, panelOpen, onStop, headerExtra, banner, files, onToggleSidebar,
 }: {
   conversation: Conversation
@@ -190,6 +227,16 @@ export function Thread({
   onDecide: (approvalId: number, decision: 'approve' | 'discard', remember?: RuleDuration, items?: number[], edit?: ApprovalEditInput) => void | Promise<void>
   /** 问题卡片上点了选项 */
   onAnswer?: (messageId: number, choices: string[]) => void | Promise<void>
+  /** 接受或忽略一条规矩提议 */
+  onResolveRuleProposal?: (proposalId: number, decision: 'accept' | 'dismiss', rule?: string) => void | Promise<void>
+  /** 向排队中或运行中的后台任务发送纠偏指令 */
+  onSteerBackgroundTask?: (taskId: string, note: string) => void | Promise<void>
+  /** 取消排队中或运行中的后台任务 */
+  onCancelBackgroundTask?: (taskId: string) => void | Promise<void>
+  /** 启动一条草稿协作流水线 */
+  onStartDispatchPlan?: (planId: string) => void | Promise<void>
+  /** 取消一条草稿、运行中或暂停中的协作流水线 */
+  onCancelDispatchPlan?: (planId: string) => void | Promise<void>
   roster: Record<string, { name: string; emoji: string }>
   onOpenScreen?: () => void
   onToggleScreen?: () => void
@@ -450,13 +497,38 @@ export function Thread({
     submit()
   }
 
-  const callbacksRef = useRef({ onDecide, onAnswer, onOpenScreen, removeFile: files?.remove })
-  callbacksRef.current = { onDecide, onAnswer, onOpenScreen, removeFile: files?.remove }
+  const callbacksRef = useRef({
+    onDecide, onAnswer, onResolveRuleProposal, onSteerBackgroundTask, onCancelBackgroundTask, onStartDispatchPlan, onCancelDispatchPlan, onOpenScreen, removeFile: files?.remove,
+  })
+  callbacksRef.current = {
+    onDecide, onAnswer, onResolveRuleProposal, onSteerBackgroundTask, onCancelBackgroundTask, onStartDispatchPlan, onCancelDispatchPlan, onOpenScreen, removeFile: files?.remove,
+  }
   const stableDecide = useCallback(
     (...args: Parameters<typeof onDecide>) => callbacksRef.current.onDecide(...args),
     [],
   )
   const stableAnswer = useCallback((messageId: number, choices: string[]) => callbacksRef.current.onAnswer?.(messageId, choices), [])
+  const stableResolveRuleProposal = useCallback(
+    (proposalId: number, decision: 'accept' | 'dismiss', rule?: string) =>
+      callbacksRef.current.onResolveRuleProposal?.(proposalId, decision, rule),
+    [],
+  )
+  const stableSteerBackgroundTask = useCallback(
+    (taskId: string, note: string) => callbacksRef.current.onSteerBackgroundTask?.(taskId, note),
+    [],
+  )
+  const stableCancelBackgroundTask = useCallback(
+    (taskId: string) => callbacksRef.current.onCancelBackgroundTask?.(taskId),
+    [],
+  )
+  const stableStartDispatchPlan = useCallback(
+    (planId: string) => callbacksRef.current.onStartDispatchPlan?.(planId),
+    [],
+  )
+  const stableCancelDispatchPlan = useCallback(
+    (planId: string) => callbacksRef.current.onCancelDispatchPlan?.(planId),
+    [],
+  )
   const stableOpenScreen = useCallback(() => callbacksRef.current.onOpenScreen?.(), [])
   const stableRemoveFile = useCallback((id: string) => callbacksRef.current.removeFile?.(id), [])
   const hasRemoveFile = Boolean(files?.remove)
@@ -580,9 +652,15 @@ export function Thread({
               showTime={showTime}
               sameSpeakerNext={sameSpeakerNext}
               speaker={speaker}
+              roster={roster}
               t={t}
               onDecide={stableDecide}
               onAnswer={onAnswer ? stableAnswer : undefined}
+              onResolveRuleProposal={onResolveRuleProposal ? stableResolveRuleProposal : undefined}
+              onSteerBackgroundTask={onSteerBackgroundTask ? stableSteerBackgroundTask : undefined}
+              onCancelBackgroundTask={onCancelBackgroundTask ? stableCancelBackgroundTask : undefined}
+              onStartDispatchPlan={onStartDispatchPlan ? stableStartDispatchPlan : undefined}
+              onCancelDispatchPlan={onCancelDispatchPlan ? stableCancelDispatchPlan : undefined}
               onOpenScreen={onOpenScreen ? stableOpenScreen : undefined}
               onPreview={setLightbox}
               onRemoveFile={hasRemoveFile ? stableRemoveFile : undefined}

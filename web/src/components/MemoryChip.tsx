@@ -9,7 +9,7 @@ export function MemoryChip({ payload }: { payload: MemoryPayload }) {
       <div className={`memory-rule${payload.removed ? ' removed' : ''}`}>{payload.rule}</div>
       <pre className={`memory-diff${payload.removed ? ' removed' : ''}`}>{payload.diff}</pre>
       <div className="memory-total">
-        {payload.by === 'operator' ? t('memory.byOperator') : ''}
+        {payload.removed && payload.by === 'operator' ? t('memory.byOperator') : ''}
         {payload.total === 1 ? t('memory.totalOne') : t('memory.totalMany', { count: payload.total })}
       </div>
     </div>

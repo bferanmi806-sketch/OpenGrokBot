@@ -25,6 +25,7 @@
 | thread | 对话 | 不说「线程」「会话」 |
 | thread (Slack) | 话题串 | Slack 频道里的 thread；OpenSuperBot 自己的 thread 仍叫「对话」 |
 | AI models | AI 模型 | 设置里管服务商和 key 的那一块 |
+| local model concurrency | 本地模型并发上限 | 仅对本机与局域网模型端点生效的并发限制，交互对话与审批会在步骤间优先插队；对应实时状态叫「本地队列」 |
 | (model) connection | 连接 | 一家服务商 + 一个 key + 默认模型；没选过的同事用「默认连接」 |
 | connector | 连接器 | Gmail、Outlook、Notion、Slack 这些外部应用的连接；总弹窗分「应用」和「MCP 服务」两栏 |
 | MCP server | MCP 服务 | 通过 MCP 协议接入的工具服务（本机命令 stdio 或远程 HTTP）；不说「MCP 服务器」 |
@@ -53,6 +54,10 @@
 | desktop app | 桌面版 | 装在电脑上的 App；对面是「在浏览器里打开」。源码跑的叫「源码版」 |
 | start at login | 开机自启 | 开关写成「登录电脑时自动打开 OpenSuperBot」；说明里可以简称开机自启 |
 | check for updates | 检查新版本 | 开关写成「启动时检查有没有新版本」；不做自动安装，只带人去 GitHub 下载 |
+| team wiki | 团队知识库 | 全体同事共用的事实笔记库（存放在本机 `<data>/wiki/`），按联系人、客户、项目、主题分类 |
+| external source (wiki) | 外部来源 | 由网页、邮件或外部工具等非受控来源写入的知识库页面；在你核验保存前，同事读取它后外发动作仍需审批 |
+| team charter (`team.md`) | 团队章程 | 群聊维度的共享协作规范（仅由你编辑，存放在同事工作区外 `<data>/groups/<safe-key>/team.md`），群内发言与流水线执行时自动注入提示词 |
+| dispatch pipeline | 协作流水线 | 由 Chief 编排、经你手动点击「启动执行」后按依赖顺序与并行阶段推进的多同事工作流；动作日志触发来源简称「流水线」 |
 
 ## 事情和动作
 
@@ -71,6 +76,13 @@
 | memory | 记忆 | |
 | routine | 例行任务 | 定时的、webhook 触发的都叫这个 |
 | watch | 值守 | 只看不动、有事才出声的例行任务 |
+| prepare | 备料 | 介于值守与执行之间的例行任务，可写入团队知识库与工作区，不能发外信或跑命令 |
+| Quiet Hours | 免打扰时段 | 暂存非紧急定时巡检汇报、结束后合并发送的时段设置 |
+| Morning digest | 晨报汇总 | 免打扰时段结束或手动投递后汇总发出的一张更新卡片 |
+| rule proposal | 规矩提议 | 同事或多次驳回触发的、待你核对并存入 `MEMORY.md` 的常驻规矩建议 |
+| background task | 后台任务 | 同事在后台通道独立执行的耗时任务，不阻塞前台继续对话 |
+| steer / steering note | 发送纠偏 / 纠偏指令 | 向排队中或运行中的后台任务发出的中途方向调整说明 |
+| using browser | 占用浏览器 | 后台任务持有该同事浏览器租约时的状态标识 |
 | handoff | 转交 | 同事之间 |
 | take over / sign in for it | 接管 / 登录 | 你在它的浏览器里亲手操作 |
 | needs you | 等你 | 侧栏状态 |
@@ -84,6 +96,8 @@
 | budget (tokens) | token 预算 | |
 | limit (per turn) | 上限 | 「一个回合 30 步的上限」 |
 | image (Docker) | 镜像 | |
+| review & verify (wiki) | 核验并编辑 / 保存并设为已核验 | 你检查外部来源的知识库页面并保存，解除「外部来源」标记 |
+| revert (wiki) | 回滚到此版 | 将知识库页面恢复为某个历史版本的内容，并生成新版本号 |
 
 ## 写法
 

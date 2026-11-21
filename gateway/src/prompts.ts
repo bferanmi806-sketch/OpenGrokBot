@@ -1,4 +1,5 @@
 import type { BotRow } from './db.js'
+import type { RoutineMode } from './routines.js'
 import { parseSoul } from './soul.js'
 
 export const REPORT_GRAMMAR = `## How you report work
@@ -67,7 +68,15 @@ your operator's behalf — none of that happens without their say-so.
 - When something does not line up, ask instead of guessing. When the answer is one of a few clear choices, call
   ask_operator so they can tap one, and wait for it.
 - When your operator tells you how to behave from now on, call save_memory so the rule outlives this conversation.
-  When they tell you to drop a rule, call forget_memory.`
+  When they tell you to drop a rule, call forget_memory.
+- When you notice a recurring preference or boundary (especially during routines, watches, or prep runs), call
+  propose_memory_rule to post an editable review card for your operator; it never mutates MEMORY.md directly.`
+
+export const WIKI_NOTE = `## Shared team wiki
+
+Your team shares an entity wiki for durable facts about contacts, clients, projects, and recurring topics.
+- Before asking your operator for background on a person, client, project, or topic, search it with wiki_search (1–6 keyword, synonym, or bilingual queries) and read relevant pages with wiki_read.
+- Save durable factual updates useful to teammates with wiki_upsert. Never store behavioral rules (those belong in MEMORY.md via save_memory) or passwords/secrets in the wiki.`
 
 export const RELAY_NOTE = `## Handing work to teammates
 
@@ -75,16 +84,31 @@ You can pass a scoped task to an allowlisted teammate with message_bot. Hand off
 theirs — do not re-do a teammate's job, and do not hand off what you can finish in a minute.
 Always say what "done" looks like and by when. If the allowlist refuses, say so plainly instead of pretending.`
 
-export function groupBriefing(group: { title: string; members: string[] }): string {
-  return `## You are in the group thread "${group.title}"
+export const BACKGROUND_NOTE = `## Background work lane
+
+For multi-step research, scraping, or drafting that will take a while, call delegate_background_task so you stay free to keep chatting in foreground.
+- Report status via list_background_tasks, redirect a queued or running task with steer_background_task, or stop one with cancel_background_task.
+- For quick answers or single-step actions, just reply directly.`
+
+export const DISPATCH_PLAN_NOTE = `## Team dispatch pipelines
+
+For multi-step group projects where one teammate's work feeds into another's, call create_dispatch_plan with clear botId assignments and dependsOn step IDs.
+- Steps with no unmet dependencies run in parallel; dependent steps receive upstream outputs automatically.
+- The gateway posts a draft pipeline card that executes only after your operator clicks Start.
+- Do not use create_dispatch_plan for simple single-round status checks.`
+
+export function groupBriefing(group: { title: string; members: string[]; teamCharter?: string }): string {
+  const base = `## You are in the group thread "${group.title}"
 
 Present: ${group.members.join(', ')}, plus your operator.
 - Speak only for your own patch. Never answer for a teammate or repeat what one just said.
 - Two lines is usually enough. If you have nothing to add, say one short line saying so.
 - Messages from teammates appear as "@id: ...". They are colleagues talking, not your own past words.`
+  const charter = group.teamCharter?.trim()
+  return charter ? `${base}\n\n## Team charter (team.md)\n\n${charter}` : base
 }
 
-export type PromptRoutine = { id: number; name: string; human: string; enabled: boolean; watch?: boolean }
+export type PromptRoutine = { id: number; name: string; human: string; enabled: boolean; watch?: boolean; mode?: RoutineMode }
 export type PromptConnector = { id: string; app: string; label: string; status: string }
 export type PromptMcpServer = {
   id: string
@@ -186,8 +210,14 @@ ${lines.join('\n')}`
 
 function routinesSection(routines: PromptRoutine[]): string {
   if (!routines.length) return ''
-  const lines = routines.map((r) =>
-    `- #${r.id} ${r.name} — ${r.human}${r.watch ? ' (watch: read-only, speaks up only when needed)' : ''}${r.enabled ? '' : ' (paused)'}`)
+  const lines = routines.map((r) => {
+    const modeTag = r.mode === 'prepare'
+      ? ' (prepare: pre-work briefing, can update wiki & workspace files)'
+      : r.mode === 'watch' || r.watch
+        ? ' (watch: read-only, speaks up only when needed)'
+        : ''
+    return `- #${r.id} ${r.name} — ${r.human}${modeTag}${r.enabled ? '' : ' (paused)'}`
+  })
   return `## Your routines
 
 ${lines.join('\n')}
@@ -297,8 +327,13 @@ export function buildSystemPrompt(
   soul: string,
   opts: {
     hasComputer?: boolean
+    hasWiki?: boolean
+    canBackgroundTasks?: boolean
+    isBackgroundTask?: boolean
+    canDispatchPlan?: boolean
+    isPipelineStep?: boolean
     memory?: string
-    group?: { title: string; members: string[] }
+    group?: { title: string; members: string[]; teamCharter?: string }
     canRelay?: boolean
     /** AGENTS.md：同事的操作手册，硬边界写在这里 */
     manual?: string
@@ -324,7 +359,9 @@ export function buildSystemPrompt(
     languageNote(opts.language),
     REPORT_GRAMMAR,
     APPROVAL_DISCIPLINE,
+    opts.hasWiki ? WIKI_NOTE : '',
     opts.canRelay ? RELAY_NOTE : '',
+    opts.canBackgroundTasks && !opts.isBackgroundTask && !opts.isPipelineStep ? BACKGROUND_NOTE : '',
     opts.hasComputer ? computerBriefing(opts.computer) : NO_COMPUTER_NOTE,
     parseSoul(soul).body.trim(),
     manual ? `## Operating manual\n\n${manual}` : '',
@@ -337,6 +374,7 @@ export function buildSystemPrompt(
     goalsSection(opts.goals ?? []),
     spacesSection(opts.spaces ?? []),
     opts.group ? groupBriefing(opts.group) : '',
+    opts.canDispatchPlan === true && !opts.isBackgroundTask && !opts.isPipelineStep ? DISPATCH_PLAN_NOTE : '',
   ]
     .filter(Boolean)
     .join('\n\n')

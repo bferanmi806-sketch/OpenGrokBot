@@ -5,7 +5,7 @@ import type { Db } from './db.js'
  * activity 卡片只活在一个回合里、最多 40 步；这张表跨回合留底，回答「它上周二到底发了什么」。
  * 敲进网页的文字不进日志（只记敲进了哪个框），免得把密码、草稿原文抄一份。
  */
-export type ActionTrigger = 'you' | 'group' | 'handoff' | 'approval' | 'question' | 'routine' | 'watch' | 'webhook'
+export type ActionTrigger = 'you' | 'group' | 'handoff' | 'approval' | 'question' | 'routine' | 'watch' | 'prepare' | 'webhook' | 'background' | 'pipeline'
 
 export type ActionEntry = {
   id: number

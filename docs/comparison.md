@@ -25,6 +25,7 @@ ships almost daily, so this table ages fast. Corrections welcome via PR — it o
 | Look-only routines | Not a separate mode in the changelog | ✅ watch routines: read-only tools, silent unless something needs you | The shape of dots' "proactive research" |
 | Batch approvals | Shown in xAI's IncidentSweep write-up: review the batch, then it sends | ✅ one chip per batch; untick items, the bot does exactly the rest | A batch never becomes a standing rule |
 | Shared skills | ✅ account-level skills from plugins | ✅ Markdown playbooks in `<data>/skills/` | Only you write them |
+| Shared team wiki | Per-person / per-bot memory (no separate shared entity wiki) | ✅ shared Markdown entity wiki (`contact`, `client`, `project`, `topic`) powered by SQLite FTS5 + multi-query RRF, mirrored to `<data>/wiki/` | Zero vector DB or embedding downloads; bilingual CJK + English search, 20-version history/revert, cross-agent `outside-data` taint; sits alongside per-teammate `MEMORY.md` rules and shared skills |
 | Action log | Audit logs and action recording for Enterprise teams | ✅ every tool call, decision and webhook call, per teammate, 90 days | Typed text is never logged |
 | See and stop the work | ✅ | ✅ | Each computer step shows live; a stop button ends the turn |
 | Spend control | Included usage, then an on-demand limit you set | ✅ per-bot daily token budget | Plus whatever cap you set on the API key |

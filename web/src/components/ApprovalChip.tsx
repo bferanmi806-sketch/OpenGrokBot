@@ -18,6 +18,7 @@ const HELD_BECAUSE: Record<string, MessageKey> = {
   webhook: 'approval.held.webhook',
   routine: 'approval.held.routine',
   relay: 'approval.held.relay',
+  background: 'approval.held.background',
   'outside-data': 'approval.held.outsideData',
   unknown: 'approval.held.unknown',
 }
@@ -39,15 +40,6 @@ type McpSchemaField = {
   label: string
   description?: string
   multiline: boolean
-}
-
-type CalendarUpdateTouched = {
-  title: boolean
-  start: boolean
-  end: boolean
-  location: boolean
-  attendees: boolean
-  description: boolean
 }
 
 type EditorDraft =
@@ -73,7 +65,6 @@ type EditorDraft =
       location: string
       attendees: string
       description: string
-      touched: CalendarUpdateTouched
     }
   | {
       kind: 'mcp'
@@ -92,10 +83,38 @@ function isPlainObject(val: unknown): val is Record<string, unknown> {
 }
 
 function parseAddressList(raw: string): string[] {
-  return raw
-    .split(/[,;\r\n]+/)
-    .map((entry) => entry.trim())
-    .filter(Boolean)
+  const parts: string[] = []
+  for (const line of raw.split(/\r?\n|\r/)) {
+    let current = ''
+    let inQuotes = false
+    let escaped = false
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]!
+      if (escaped) {
+        current += ch
+        escaped = false
+        continue
+      }
+      if (ch === '\\' && inQuotes) {
+        current += ch
+        escaped = true
+        continue
+      }
+      if (ch === '"') {
+        inQuotes = !inQuotes
+        current += ch
+      } else if ((ch === ',' || ch === ';') && !inQuotes) {
+        const trimmed = current.trim()
+        if (trimmed) parts.push(trimmed)
+        current = ''
+      } else {
+        current += ch
+      }
+    }
+    const trimmed = current.trim()
+    if (trimmed) parts.push(trimmed)
+  }
+  return parts
 }
 
 function formatAddressList(list: readonly string[]): string {
@@ -333,14 +352,6 @@ function createInitialDraft(editable: ApprovalEditable): EditorDraft {
         location: editable.location ?? '',
         attendees: editable.attendees ? formatAddressList(editable.attendees) : '',
         description: editable.description ?? '',
-        touched: {
-          title: false,
-          start: false,
-          end: false,
-          location: false,
-          attendees: false,
-          description: false,
-        },
       }
   }
 }
@@ -530,15 +541,16 @@ function evaluateDraft(editable: ApprovalEditable, draft: EditorDraft, t: T): Ev
         edit.end = nextEnd
         fieldCount += 1
       }
-      if (editable.location !== undefined || draft.touched.location) {
+      if (editable.location !== undefined || draft.location.trim() !== '') {
         edit.location = draft.location.trim()
         fieldCount += 1
       }
-      if (editable.attendees !== undefined || draft.touched.attendees) {
-        edit.attendees = parseAddressList(draft.attendees)
+      const parsedAttendees = parseAddressList(draft.attendees)
+      if (editable.attendees !== undefined || parsedAttendees.length > 0) {
+        edit.attendees = parsedAttendees
         fieldCount += 1
       }
-      if (editable.description !== undefined || draft.touched.description) {
+      if (editable.description !== undefined || draft.description !== '') {
         edit.description = draft.description
         fieldCount += 1
       }
@@ -781,7 +793,6 @@ function ApprovalEditorFields({
                     onChange={(e) => onChange({
                       ...draft,
                       formValues: { ...draft.formValues, [field.key]: e.target.value },
-                      formPresent: { ...draft.formPresent, [field.key]: true },
                       modeError: null,
                     })}
                   />
@@ -795,7 +806,6 @@ function ApprovalEditorFields({
                     onChange={(e) => onChange({
                       ...draft,
                       formValues: { ...draft.formValues, [field.key]: e.target.value },
-                      formPresent: { ...draft.formPresent, [field.key]: true },
                       modeError: null,
                     })}
                   />
@@ -1064,13 +1074,6 @@ function ApprovalEditorFields({
     }
 
     if (editable.tool === 'calendar_update_event' && draft.kind === 'calendar_update_event') {
-      const updateField = <K extends keyof CalendarUpdateTouched>(key: K, value: string) => {
-        onChange({
-          ...draft,
-          [key]: value,
-          touched: { ...draft.touched, [key]: true },
-        })
-      }
       return (
         <>
           <div className="approval-edit-field">
@@ -1080,7 +1083,7 @@ function ApprovalEditorFields({
               type="text"
               value={draft.title}
               disabled={busy}
-              onChange={(e) => updateField('title', e.target.value)}
+              onChange={(e) => onChange({ ...draft, title: e.target.value })}
             />
           </div>
           <div className="approval-edit-row">
@@ -1091,7 +1094,7 @@ function ApprovalEditorFields({
                 type="text"
                 value={draft.start}
                 disabled={busy}
-                onChange={(e) => updateField('start', e.target.value)}
+                onChange={(e) => onChange({ ...draft, start: e.target.value })}
               />
             </div>
             <div className="approval-edit-field">
@@ -1101,7 +1104,7 @@ function ApprovalEditorFields({
                 type="text"
                 value={draft.end}
                 disabled={busy}
-                onChange={(e) => updateField('end', e.target.value)}
+                onChange={(e) => onChange({ ...draft, end: e.target.value })}
               />
             </div>
           </div>
@@ -1112,7 +1115,7 @@ function ApprovalEditorFields({
               type="text"
               value={draft.location}
               disabled={busy}
-              onChange={(e) => updateField('location', e.target.value)}
+              onChange={(e) => onChange({ ...draft, location: e.target.value })}
             />
           </div>
           <div className="approval-edit-field">
@@ -1123,7 +1126,7 @@ function ApprovalEditorFields({
               rows={2}
               value={draft.attendees}
               disabled={busy}
-              onChange={(e) => updateField('attendees', e.target.value)}
+              onChange={(e) => onChange({ ...draft, attendees: e.target.value })}
             />
             <span className="approval-edit-hint">{t('approval.edit.recipientsHint')}</span>
           </div>
@@ -1134,7 +1137,7 @@ function ApprovalEditorFields({
               rows={4}
               value={draft.description}
               disabled={busy}
-              onChange={(e) => updateField('description', e.target.value)}
+              onChange={(e) => onChange({ ...draft, description: e.target.value })}
             />
           </div>
         </>

@@ -3,6 +3,7 @@ import { CONNECTOR_READ_TOOL_NAMES } from './connectors/tools.js'
 import { PUBLISH_FEED_TOOL, PUBLISH_FEED_TOOL_NAME } from './feed/tools.js'
 import { MANAGE_GOAL_TOOL, MANAGE_GOAL_TOOL_NAME, UPDATE_GOAL_PROGRESS_TOOL } from './goals/tools.js'
 import type { ToolDef } from './llm.js'
+import type { RoutineMode } from './routines.js'
 import {
   MANAGE_SPACE_TOOL,
   MANAGE_SPACE_TOOL_NAME,
@@ -13,6 +14,7 @@ import {
 } from './spaces/tools.js'
 import { VAULT_FILL_TOOL } from './vault/tools.js'
 import { WEB_FETCH_TOOL, WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL, WEB_SEARCH_TOOL_NAME } from './web-research.js'
+import { WIKI_READ_TOOL_NAMES, WIKI_TOOLS } from './wiki/tools.js'
 
 export const MESSAGE_USER_TOOL: ToolDef = {
   type: 'function',
@@ -43,6 +45,10 @@ export const MESSAGE_USER_TOOL: ToolDef = {
             closing: { type: 'string', description: 'ONE plain sentence surfacing only what needs the human.' },
           },
           required: ['lines'],
+        },
+        urgent: {
+          type: 'boolean',
+          description: 'Set true ONLY for time-critical alerts that must break through Quiet Hours immediately instead of waiting for the morning digest.',
         },
       },
       required: ['kind', 'payload'],
@@ -303,8 +309,11 @@ const WORKFLOW_TOOLS: ToolDef[] = [
           webhook: { type: 'boolean', description: 'Also start this routine whenever its webhook is called (default false).' },
           mode: {
             type: 'string',
-            enum: ['act', 'watch'],
-            description: '"watch" for keeping an eye on something: each run gets read-only tools and stays silent unless something needs your operator. Default "act".',
+            enum: ['act', 'watch', 'prepare'],
+            description:
+              '"watch" gets read-only tools and stays silent unless something needs your operator ("Nothing new."). '
+              + '"prepare" gets read-only tools plus wiki_upsert and workspace write_file to prepare briefs/dossiers locally, and stays silent on "Nothing to prepare.". '
+              + 'Default "act".',
           },
           surface: {
             type: 'string',
@@ -353,15 +362,99 @@ const SKILL_TOOL: ToolDef = {
   },
 }
 
+export const PROPOSE_MEMORY_RULE_TOOL: ToolDef = {
+  type: 'function',
+  function: {
+    name: 'propose_memory_rule',
+    description:
+      'Propose a standing behavioral rule for your operator to review via an editable confirmation card. '
+      + 'NEVER mutates MEMORY.md directly — the rule is only saved if your operator accepts the card. '
+      + 'Limited to at most 1 proposal per turn.',
+    parameters: {
+      type: 'object',
+      properties: {
+        rule: { type: 'string', description: 'One clear single-line standing rule (max 300 characters).' },
+        reason: { type: 'string', description: 'Brief reason for suggesting this rule (max 300 characters).' },
+      },
+      required: ['rule', 'reason'],
+    },
+  },
+}
+
+export const CREATE_DISPATCH_PLAN_TOOL: ToolDef = {
+  type: 'function',
+  function: {
+    name: 'create_dispatch_plan',
+    description:
+      'Propose a structured multi-step dependency pipeline (DAG) for this group room. '
+      + 'Steps with no unmet dependencies run in parallel once your operator clicks Start; '
+      + 'dependent steps receive upstream outputs automatically. Do NOT use for simple 1-round status checks.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: {
+          type: 'string',
+          description: 'Short single-line pipeline title (1–120 characters).',
+        },
+        steps: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 12,
+          description: 'Multi-step DAG definition (1–12 items) assigned to teammates in this group.',
+          items: {
+            type: 'object',
+            properties: {
+              id: {
+                type: 'string',
+                description: 'Unique step ID within this plan (1–32 lowercase alphanumeric, "_" or "-" chars).',
+              },
+              botId: {
+                type: 'string',
+                description: 'Teammate id in this group who will execute this step.',
+              },
+              title: {
+                type: 'string',
+                description: 'Short single-line step title (1–120 characters).',
+              },
+              instructions: {
+                type: 'string',
+                description: 'Clear task instructions and what "done" looks like (1–4000 characters).',
+              },
+              dependsOn: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Optional list of upstream step IDs that must finish before this step starts.',
+              },
+            },
+            required: ['id', 'botId', 'title', 'instructions'],
+          },
+        },
+      },
+      required: ['title', 'steps'],
+    },
+  },
+}
+
 /**
- * watch routine 的回合只拿这些：看网页、读文件、读技能、汇报、提问、把动作扣下来等人批。
- * 能改东西的（shell、写文件、点击、输入、按键）、能把话传出去的（转交）、能改规矩的都不给。
+ * watch routine 的回合只拿这些：看网页、读文件、读技能、汇报、提问、提议规矩、把动作扣下来等人批。
+ * 能改东西的（shell、写文件、点击、输入、按键）、能把话传出去的（转交）、能直接改规矩的都不给。
  */
 export const WATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'message_user', PUBLISH_FEED_TOOL_NAME, SPACE_READ_TOOL_NAME, 'hold_for_approval', 'ask_operator', 'read_skill', 'read_file',
+  'message_user', PUBLISH_FEED_TOOL_NAME, SPACE_READ_TOOL_NAME, 'hold_for_approval', 'ask_operator', 'propose_memory_rule', 'read_skill', 'read_file',
   WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME,
   'browser_goto', 'browser_extract', 'browser_scroll', 'browser_back', 'browser_screenshot', 'ask_for_login',
   ...CONNECTOR_READ_TOOL_NAMES,
+  ...WIKI_READ_TOOL_NAMES,
+])
+
+/**
+ * prepare routine 的回合在 watch 只读工具之上额外给 wiki_upsert 和工作区 write_file，
+ * 用于提前整理资料/简报草稿；仍禁止 shell、页面交互点击输入、同事转交和任何外部写入。
+ */
+export const PREPARE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ...WATCH_TOOL_NAMES,
+  'wiki_upsert',
+  'write_file',
 ])
 
 const RELAY_TOOL: ToolDef = {
@@ -390,11 +483,106 @@ export const OPERATOR_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'save_memory', 'forget_memory', 'create_routine', 'stop_routine', MANAGE_GOAL_TOOL_NAME, MANAGE_SPACE_TOOL_NAME,
 ])
 
+export const BACKGROUND_CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'delegate_background_task',
+  'steer_background_task',
+  'cancel_background_task',
+])
+
+export const BACKGROUND_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ...BACKGROUND_CONTROL_TOOL_NAMES,
+  'list_background_tasks',
+])
+
+export const BACKGROUND_TOOLS: ToolDef[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'delegate_background_task',
+      description:
+        'Delegate a longer multi-step job (research, scraping, drafting, or multi-file analysis) to your background worker lane so foreground chat stays immediately responsive. Never use this for quick 1-step replies.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: {
+            type: 'string',
+            description: 'Short single-line task title (1–120 characters), e.g. "Compare Q3 competitor pricing".',
+          },
+          instructions: {
+            type: 'string',
+            description: 'Complete instructions and what "done" looks like for your background worker (1–4000 characters).',
+          },
+        },
+        required: ['title', 'instructions'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_background_tasks',
+      description:
+        'Return your active and recent background tasks (id, title, status, step count, last step, browser usage, summary).',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'steer_background_task',
+      description:
+        'Send a mid-flight steering instruction to one of your queued or running background tasks.',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskId: {
+            type: 'string',
+            description: 'The background task id, e.g. "bg-a1b2c3d4".',
+          },
+          note: {
+            type: 'string',
+            description: 'Steering instruction or course-correction for the background task (1–1000 characters).',
+          },
+        },
+        required: ['taskId', 'note'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'cancel_background_task',
+      description:
+        'Cancel one of your queued or running background tasks without affecting foreground chat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskId: {
+            type: 'string',
+            description: 'The background task id to cancel, e.g. "bg-a1b2c3d4".',
+          },
+        },
+        required: ['taskId'],
+      },
+    },
+  },
+]
+
 export function buildTools(opts: {
   hasComputer: boolean
   canRelay?: boolean
   hasSkills?: boolean
+  hasWiki?: boolean
+  canProposeRule?: boolean
+  canBackgroundTasks?: boolean
+  isBackgroundTask?: boolean
+  canDispatchPlan?: boolean
+  isPipelineStep?: boolean
   watch?: boolean
+  routineMode?: RoutineMode
   /** false = 这一回合不是操作者开的头：改常设安排的工具不列出来（执行时另有一道门） */
   operatorTurn?: boolean
   /** false = 这台电脑没有命令行（本机模式默认）：连工具都不列，模型就不会去试 */
@@ -423,6 +611,18 @@ export function buildTools(opts: {
   /** 网关挂载了安全只读公网搜索与抓取（web_search / web_fetch，watch 也可用） */
   hasWebResearch?: boolean
 }): ToolDef[] {
+  const effectiveMode: RoutineMode = opts.routineMode ?? (opts.watch ? 'watch' : 'act')
+  const allowBackgroundControls =
+    opts.operatorTurn !== false
+    && opts.isBackgroundTask !== true
+    && opts.isPipelineStep !== true
+    && effectiveMode === 'act'
+  const allowDispatchPlan =
+    opts.canDispatchPlan === true
+    && opts.operatorTurn !== false
+    && opts.isBackgroundTask !== true
+    && opts.isPipelineStep !== true
+    && effectiveMode === 'act'
   const computerTools = COMPUTER_TOOLS
     .filter((t) => opts.shell !== false || t.function.name !== 'shell')
     .map((t) => (t.function.name === 'shell' && opts.kind === 'local'
@@ -452,14 +652,27 @@ export function buildTools(opts: {
     ...(opts.hasSpaces ? [MANAGE_SPACE_TOOL] : []),
     ...(opts.hasReadableSpaces ? [SPACE_READ_TOOL] : []),
     ...(opts.hasEditableSpaces ? [SPACE_UPSERT_ITEM_TOOL, SPACE_DELETE_ITEM_TOOL] : []),
+    ...(opts.canProposeRule === true ? [PROPOSE_MEMORY_RULE_TOOL] : []),
+    ...(opts.canBackgroundTasks === true ? BACKGROUND_TOOLS : []),
+    ...(allowDispatchPlan ? [CREATE_DISPATCH_PLAN_TOOL] : []),
+    ...(opts.hasWiki ? WIKI_TOOLS : []),
     ...(opts.hasSkills ? [SKILL_TOOL] : []),
     ...(opts.canRelay ? [RELAY_TOOL] : []),
     ...(opts.hasComputer ? computerTools : []),
     ...(opts.hasComputer && opts.hasVaultItems ? [VAULT_FILL_TOOL] : []),
     ...(opts.connectorTools ?? []),
     ...(opts.mcpTools ?? []),
-  ].filter((t) => opts.operatorTurn !== false || !OPERATOR_ONLY_TOOL_NAMES.has(t.function.name))
-  return opts.watch
-    ? tools.filter((t) => WATCH_TOOL_NAMES.has(t.function.name) || Boolean(opts.mcpReadToolNames?.has(t.function.name)))
-    : tools
+  ].filter((t) => {
+    const name = t.function.name
+    if (opts.operatorTurn === false && OPERATOR_ONLY_TOOL_NAMES.has(name)) return false
+    if (!allowBackgroundControls && BACKGROUND_CONTROL_TOOL_NAMES.has(name)) return false
+    return true
+  })
+  if (effectiveMode === 'watch') {
+    return tools.filter((t) => WATCH_TOOL_NAMES.has(t.function.name) || Boolean(opts.mcpReadToolNames?.has(t.function.name)))
+  }
+  if (effectiveMode === 'prepare') {
+    return tools.filter((t) => PREPARE_TOOL_NAMES.has(t.function.name) || Boolean(opts.mcpReadToolNames?.has(t.function.name)))
+  }
+  return tools
 }

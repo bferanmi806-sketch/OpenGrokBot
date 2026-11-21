@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useT, type MessageKey, type T } from '../i18n'
 import { blockReasonText, describeSchedule, errorText, sandboxMissingText } from '../i18n/describe'
 import { ApiError } from '../api'
-import type { ActionEntry, ComputerInfo, ComputerRoutine, RoutineAction, SpaceRole } from '../types'
+import type { ActionEntry, BackgroundTaskView, ComputerInfo, ComputerRoutine, RoutineAction, SpaceRole } from '../types'
 import { untilLabel } from './ApprovalChip'
+import { BG_STATUS_KEY, MAX_BG_STEER_CHARS, formatBgTaskError, normalizeSteerNote } from './BackgroundTaskChip'
 import { CdpScreen } from './CdpScreen'
 import { PauseIcon, PlayIcon, RotateCwIcon, XIcon } from './Icons'
 
@@ -45,6 +46,10 @@ type PanelActions = {
   onToggleVaultItem?: (itemId: string, granted: boolean) => void | Promise<void>
   /** 设置这位同事对某个声明式空间的访问角色（null = 无权限） */
   onSetSpaceRole?: (spaceId: string, role: SpaceRole | null) => void | Promise<void>
+  /** 向排队中或运行中的后台任务发送纠偏指令 */
+  onSteerBackgroundTask?: (taskId: string, note: string) => void | Promise<void>
+  /** 取消排队中或运行中的后台任务 */
+  onCancelBackgroundTask?: (taskId: string) => void | Promise<void>
 }
 
 /** webhook 地址带着密钥：给一个「复制」，不把它整串摊在面板上 */
@@ -98,7 +103,191 @@ function CopyWebhook({ routine }: { routine: ComputerRoutine }) {
 const TRIGGER: Record<string, MessageKey> = {
   you: 'panel.trigger.you', group: 'panel.trigger.group', handoff: 'panel.trigger.handoff',
   approval: 'panel.trigger.approval', question: 'panel.trigger.question', routine: 'panel.trigger.routine',
-  watch: 'panel.trigger.watch', webhook: 'panel.trigger.webhook',
+  watch: 'panel.trigger.watch', prepare: 'panel.trigger.prepare', webhook: 'panel.trigger.webhook',
+  background: 'panel.trigger.background', pipeline: 'panel.trigger.pipeline',
+}
+
+function PanelBackgroundTaskRow({
+  task,
+  onSteer,
+  onCancel,
+}: {
+  task: BackgroundTaskView
+  onSteer?: (taskId: string, note: string) => void | Promise<void>
+  onCancel?: (taskId: string) => void | Promise<void>
+}) {
+  const t = useT()
+  const inFlightRef = useRef(false)
+  const activeTaskIdRef = useRef(task.id)
+  activeTaskIdRef.current = task.id
+
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState<'steer' | 'cancel' | null>(null)
+  const [cancelPending, setCancelPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const active = task.status === 'queued' || task.status === 'running'
+  const locked = busy !== null || cancelPending
+  const statusKey = BG_STATUS_KEY[task.status] ?? 'bgTask.status.failed'
+
+  useEffect(() => {
+    if (!active) {
+      inFlightRef.current = false
+      setBusy(null)
+      setCancelPending(false)
+      setError(null)
+    }
+  }, [active])
+
+  const handleSteer = async (e: FormEvent) => {
+    e.preventDefault()
+    if (inFlightRef.current || locked || !active) return
+    const cleaned = normalizeSteerNote(note)
+    if (!cleaned) {
+      setError(t('bgTask.emptyNote'))
+      return
+    }
+    if (cleaned.length > MAX_BG_STEER_CHARS) {
+      setError(t('bgTask.noteTooLong', { max: MAX_BG_STEER_CHARS }))
+      return
+    }
+    if (!onSteer) return
+    const taskId = task.id
+    inFlightRef.current = true
+    setError(null)
+    setBusy('steer')
+    try {
+      await onSteer(taskId, cleaned)
+      if (activeTaskIdRef.current === taskId) {
+        setNote('')
+      }
+    } catch (err: unknown) {
+      if (activeTaskIdRef.current === taskId) {
+        setError(formatBgTaskError(err, t, 'bgTask.steerFailed'))
+      }
+    } finally {
+      if (activeTaskIdRef.current === taskId) {
+        inFlightRef.current = false
+        setBusy(null)
+      }
+    }
+  }
+
+  const handleCancel = async () => {
+    if (inFlightRef.current || locked || !active || !onCancel) return
+    const taskId = task.id
+    inFlightRef.current = true
+    setError(null)
+    setBusy('cancel')
+    try {
+      await onCancel(taskId)
+      if (activeTaskIdRef.current === taskId) {
+        setCancelPending(true)
+      }
+    } catch (err: unknown) {
+      if (activeTaskIdRef.current === taskId) {
+        inFlightRef.current = false
+        setBusy(null)
+        setCancelPending(false)
+        setError(formatBgTaskError(err, t, 'bgTask.cancelFailed'))
+      }
+    }
+  }
+
+  return (
+    <div className={`panel-bg-task status-${task.status}`}>
+      <div className="panel-bg-task-head">
+        <span className={`bg-task-status ${task.status}`}>
+          {task.status === 'running' ? <span className="bg-task-dot" aria-hidden="true" /> : null}
+          {t(statusKey)}
+        </span>
+        {task.usesBrowser && active ? (
+          <span className="bg-task-browser-tag">{t('bgTask.usingBrowser')}</span>
+        ) : null}
+        {task.stepCount > 0 ? (
+          <span className="panel-bg-task-count">
+            {task.stepCount === 1 ? t('bgTask.stepsOne') : t('bgTask.stepsMany', { count: task.stepCount })}
+          </span>
+        ) : null}
+      </div>
+      <div className="panel-bg-task-title">{task.title}</div>
+      {task.lastStep ? <div className="panel-bg-task-step">{task.lastStep}</div> : null}
+      {active ? (
+        <>
+          {error ? <div className="bg-task-error-alert" role="alert">{error}</div> : null}
+          <div className="panel-bg-task-actions">
+            <form className="panel-bg-task-steer" onSubmit={(e) => void handleSteer(e)}>
+              <input
+                type="text"
+                className="bg-task-steer-input"
+                value={note}
+                placeholder={t('bgTask.steerPlaceholder')}
+                aria-label={t('bgTask.steerPlaceholder')}
+                disabled={locked || !onSteer}
+                onChange={(e) => {
+                  setNote(e.target.value)
+                  if (error) setError(null)
+                }}
+              />
+              <button
+                type="submit"
+                className="bg-task-steer-btn"
+                disabled={locked || !onSteer}
+              >
+                {busy === 'steer' ? t('bgTask.steering') : t('bgTask.steerSend')}
+              </button>
+            </form>
+            <button
+              type="button"
+              className="bg-task-cancel-btn"
+              disabled={locked || !onCancel}
+              onClick={() => void handleCancel()}
+            >
+              {busy === 'cancel' || cancelPending ? t('bgTask.cancelling') : t('bgTask.cancel')}
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          {task.summary ? <div className="panel-bg-task-summary">{task.summary}</div> : null}
+          {(task.status === 'failed' || task.status === 'cancelled') && task.error ? (
+            <div className="panel-bg-task-error">{task.error}</div>
+          ) : null}
+        </>
+      )}
+    </div>
+  )
+}
+
+function BackgroundTasksSection({
+  tasks,
+  onSteer,
+  onCancel,
+}: {
+  tasks: BackgroundTaskView[]
+  onSteer?: (taskId: string, note: string) => void | Promise<void>
+  onCancel?: (taskId: string) => void | Promise<void>
+}) {
+  const t = useT()
+  return (
+    <div className={`panel-section${tasks.length === 0 ? ' panel-section-compact' : ''}`}>
+      <div className="panel-section-title">{t('panel.backgroundTasks')}</div>
+      {tasks.length === 0 ? (
+        <div className="panel-empty">{t('panel.noBackgroundTasks')}</div>
+      ) : (
+        <div className="panel-bg-tasks">
+          {tasks.map((task) => (
+            <PanelBackgroundTaskRow
+              key={task.id}
+              task={task}
+              {...(onSteer ? { onSteer } : {})}
+              {...(onCancel ? { onCancel } : {})}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function actionTime(ts: number, t: T, now = new Date()): string {
@@ -157,7 +346,7 @@ export function ComputerPanel({ info, botName, onClose, ...actions }: {
   )
 }
 
-function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWindowDone, onShell, onToggleConnector, onToggleMcpServer, onToggleVaultItem, onSetSpaceRole }: {
+function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWindowDone, onShell, onToggleConnector, onToggleMcpServer, onToggleVaultItem, onSetSpaceRole, onSteerBackgroundTask, onCancelBackgroundTask }: {
   info: ComputerInfo
   botName: string
 } & PanelActions) {
@@ -234,6 +423,14 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
         </div>
       ) : null}
       {problem ? <div className="panel-problem" role="alert">{problem}</div> : null}
+
+      {info.backgroundTasks !== undefined ? (
+        <BackgroundTasksSection
+          tasks={info.backgroundTasks}
+          {...(onSteerBackgroundTask ? { onSteer: onSteerBackgroundTask } : {})}
+          {...(onCancelBackgroundTask ? { onCancel: onCancelBackgroundTask } : {})}
+        />
+      ) : null}
 
       {connectors.length > 0 ? (
         <div className="panel-section">
@@ -392,6 +589,7 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
                   <span className="panel-routine-when">
                     {t.lang === 'en' ? r.human : describeSchedule(t, r.cron, Boolean(r.webhook_path))}
                     {r.mode === 'watch' ? <span className="panel-routine-tag">{t('panel.watchTag')}</span> : null}
+                    {r.mode === 'prepare' ? <span className="panel-routine-tag prepare">{t('panel.prepareTag')}</span> : null}
                     {paused ? <span className="panel-routine-paused">{t('panel.paused')}</span> : null}
                   </span>
                   <CopyWebhook routine={r} />

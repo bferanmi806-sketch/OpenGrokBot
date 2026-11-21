@@ -19,6 +19,10 @@ export type MessageKind =
   | 'question'
   | 'webhook'
   | 'attachment'
+  | 'quiet_digest'
+  | 'rule_proposal'
+  | 'background_task'
+  | 'dispatch_plan'
 
 export type BotRow = {
   id: string
@@ -321,7 +325,171 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_bot_mcp_servers_server ON bot_mcp_servers(server_id);
     `)
   },
-  // v14：独立凭证库元数据表与按同事零默认授权表（明文单独存 <data>/vault-secrets.json，绝不入库）
+  // v14：共享团队实体知识库（contact / client / project / topic），含修订历史与 FTS5 全文索引
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS wiki_pages (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        body TEXT NOT NULL DEFAULT '',
+        search_text TEXT NOT NULL DEFAULT '',
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        updated_by TEXT NOT NULL DEFAULT 'operator',
+        version INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        archived_at INTEGER,
+        UNIQUE(kind, slug)
+      );
+      CREATE INDEX IF NOT EXISTS idx_wiki_pages_active ON wiki_pages(archived_at, kind, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS wiki_revisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        page_id TEXT NOT NULL REFERENCES wiki_pages(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        body TEXT NOT NULL DEFAULT '',
+        edited_by TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        UNIQUE(page_id, version)
+      );
+      CREATE INDEX IF NOT EXISTS idx_wiki_revisions_page ON wiki_revisions(page_id, version DESC);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
+        page_id UNINDEXED,
+        title,
+        tags,
+        summary,
+        body,
+        search_text,
+        tokenize='unicode61 remove_diacritics 2'
+      );
+    `)
+  },
+  // v15：免打扰晨报缓冲表、受控学习规矩提议表，以及按驳回模式统计审批的索引
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS quiet_digest_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        routine_id INTEGER,
+        routine_name TEXT NOT NULL DEFAULT '',
+        routine_mode TEXT NOT NULL DEFAULT 'watch',
+        kind TEXT NOT NULL DEFAULT 'text',
+        summary TEXT NOT NULL DEFAULT '',
+        payload_json TEXT,
+        created_at INTEGER NOT NULL,
+        delivered_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_quiet_digest_pending
+        ON quiet_digest_items(delivered_at, bot_id, id);
+
+      CREATE TABLE IF NOT EXISTS rule_proposals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        rule TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'agent',
+        dedupe_key TEXT NOT NULL DEFAULT '',
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        message_id INTEGER,
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_rule_proposals_bot_status
+        ON rule_proposals(bot_id, status, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_rule_proposals_dedupe
+        ON rule_proposals(bot_id, dedupe_key, status);
+
+      CREATE INDEX IF NOT EXISTS idx_approvals_discard_lookup
+        ON approvals(bot_id, status, kind, target, resolved_at DESC);
+    `)
+  },
+  // v16：非阻塞后台任务表（Meta / AlterEgo 副车道执行记录与实时进度）
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS background_tasks (
+        id TEXT PRIMARY KEY,
+        bot_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        instructions TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        step_count INTEGER NOT NULL DEFAULT 0,
+        last_step TEXT NOT NULL DEFAULT '',
+        steps_json TEXT NOT NULL DEFAULT '[]',
+        summary TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        uses_browser INTEGER NOT NULL DEFAULT 0,
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        message_id INTEGER,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_background_tasks_bot
+        ON background_tasks(bot_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_background_tasks_status
+        ON background_tasks(status, bot_id);
+    `)
+  },
+  // v17：群组协同调度管线表（DAG 计划与步骤状态）
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS dispatch_plans (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        message_id INTEGER,
+        error TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_plans_thread
+        ON dispatch_plans(thread_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_dispatch_plans_status
+        ON dispatch_plans(status);
+
+      CREATE TABLE IF NOT EXISTS dispatch_plan_steps (
+        plan_id TEXT NOT NULL REFERENCES dispatch_plans(id) ON DELETE CASCADE,
+        step_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        bot_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        instructions TEXT NOT NULL,
+        depends_on_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'pending',
+        output TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        output_tainted INTEGER NOT NULL DEFAULT 0,
+        waiting_approval_id INTEGER,
+        waiting_question_id INTEGER,
+        started_at INTEGER,
+        finished_at INTEGER,
+        PRIMARY KEY (plan_id, step_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_plan_steps_plan
+        ON dispatch_plan_steps(plan_id, seq ASC);
+      CREATE INDEX IF NOT EXISTS idx_dispatch_plan_steps_wait
+        ON dispatch_plan_steps(status, waiting_approval_id, waiting_question_id);
+    `)
+  },
+  // v18：独立凭证库元数据表与按同事零默认授权表（明文单独存 <data>/vault-secrets.json，绝不入库）
   (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS vault_items (
@@ -346,7 +514,7 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_bot_vault_items_item ON bot_vault_items(item_id);
     `)
   },
-  // v15：Feed 指挥台动态流与轻量灵感孵化器，以及 routine 输出目标面（thread / feed / both）
+  // v19：Feed 指挥台动态流与轻量灵感孵化器，以及 routine 输出目标面（thread / feed / both）
   (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS feed_items (
@@ -387,7 +555,7 @@ const MIGRATIONS: Migration[] = [
     const have = new Set((db.pragma('table_info(routines)') as { name: string }[]).map((c) => c.name))
     if (!have.has('surface')) db.exec(`ALTER TABLE routines ADD COLUMN surface TEXT NOT NULL DEFAULT 'thread';`)
   },
-  // v16：长期目标与里程碑状态机（goals / goal_milestones / goal_updates），并与 routines / actions / ideas 轻量关联
+  // v20：长期目标与里程碑状态机（goals / goal_milestones / goal_updates），并与 routines / actions / ideas 轻量关联
   (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS goals (
@@ -444,7 +612,7 @@ const MIGRATIONS: Migration[] = [
     const ideaCols = new Set((db.pragma('table_info(ideas)') as { name: string }[]).map((c) => c.name))
     if (!ideaCols.has('promoted_goal_id')) db.exec('ALTER TABLE ideas ADD COLUMN promoted_goal_id TEXT;')
   },
-  // v17：声明式活看板 Spaces（spaces / space_items / space_bots，零任意 JS，按同事零默认授权）
+  // v21：声明式活看板 Spaces（spaces / space_items / space_bots，零任意 JS，按同事零默认授权）
   (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS spaces (
@@ -487,7 +655,7 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_space_bots_bot ON space_bots(bot_id);
     `)
   },
-  // v18：自定义联网 Feed 主题（feed_topics）与 feed_items.topic_id 关联列
+  // v22：自定义联网 Feed 主题（feed_topics）与 feed_items.topic_id 关联列
   (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS feed_topics (
@@ -495,7 +663,7 @@ const MIGRATIONS: Migration[] = [
         title TEXT NOT NULL,
         prompt TEXT NOT NULL,
         bot_id TEXT NOT NULL,
-        cron TEXT NOT NULL DEFAULT '0 9 * * *',
+        cron TEXT NOT NULL DEFAULT '',
         enabled INTEGER NOT NULL DEFAULT 1,
         last_run_at INTEGER,
         last_error TEXT NOT NULL DEFAULT '',
@@ -508,7 +676,7 @@ const MIGRATIONS: Migration[] = [
     if (!feedCols.has('topic_id')) db.exec('ALTER TABLE feed_items ADD COLUMN topic_id TEXT;')
     db.exec('CREATE INDEX IF NOT EXISTS idx_feed_items_topic ON feed_items(topic_id, created_at DESC);')
   },
-  // v19：对话上下文自动整理的待办表（todos），以及 ideas / goals 的原对话来源与自动整理标记
+  // v23：对话上下文自动整理的待办表（todos），以及 ideas / goals 的原对话来源与自动整理标记
   (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS todos (

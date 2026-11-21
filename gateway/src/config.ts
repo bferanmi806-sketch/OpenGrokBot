@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseComputerChoice, type ComputerChoice } from './backend.js'
+import { DEFAULT_LOCAL_LLM_CONCURRENCY, parseLocalLlmConcurrencyEnv } from './llm-queue.js'
 
 /** 模型接口的说法：chat = OpenAI 兼容的 Chat Completions；anthropic = Claude 的 Messages；responses = OpenAI 的 Responses */
 export type LlmApi = 'chat' | 'anthropic' | 'responses'
@@ -55,6 +56,8 @@ export type Config = {
   turnMinutes: number
   /** 操作者发来的文件总共最多占多少 MB；0 = 不限 */
   uploadsMaxMb: number
+  /** 本地模型同一地址同时跑几个请求；0 = 不限，默认 1 */
+  localLlmConcurrency: number
 }
 
 function num(value: string | undefined, fallback: number): number {
@@ -135,5 +138,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     maxSteps: num(env.OPENSUPERBOT_MAX_STEPS, 40) || 40,
     turnMinutes: num(env.OPENSUPERBOT_TURN_MINUTES, 20),
     uploadsMaxMb: num(env.OPENSUPERBOT_UPLOADS_MAX_MB, 2048),
+    localLlmConcurrency: parseLocalLlmConcurrencyEnv(env.OPENSUPERBOT_LOCAL_LLM_CONCURRENCY, DEFAULT_LOCAL_LLM_CONCURRENCY),
   }
 }
