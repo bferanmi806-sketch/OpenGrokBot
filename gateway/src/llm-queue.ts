@@ -177,7 +177,7 @@ export function localEndpointKey(baseURL: string): string | null {
   // Loopback & container-host aliases
   if (
     rawHost === 'localhost'
-    || (!rawHost.startsWith('.') && rawHost.endsWith('.localhost'))
+    || (!rawHost.startsWith('.') && !rawHost.includes('..') && rawHost.endsWith('.localhost'))
     || rawHost === 'host.docker.internal'
     || rawHost === 'host.containers.internal'
   ) {
@@ -185,7 +185,7 @@ export function localEndpointKey(baseURL: string): string | null {
   }
 
   // mDNS local hostname (e.g. mac-studio.local)
-  if (!rawHost.startsWith('.') && rawHost.endsWith('.local')) {
+  if (!rawHost.startsWith('.') && !rawHost.includes('..') && rawHost.endsWith('.local')) {
     return `local:mdns:${rawHost}:${port}`
   }
 
@@ -241,7 +241,12 @@ export function createLlmQueue(opts?: { concurrency?: number | (() => number) })
   let nextSeq = 0
 
   function resolveConcurrency(): number {
-    const raw = typeof rawConcurrency === 'function' ? rawConcurrency() : rawConcurrency
+    let raw: unknown
+    try {
+      raw = typeof rawConcurrency === 'function' ? rawConcurrency() : rawConcurrency
+    } catch {
+      return DEFAULT_LOCAL_LLM_CONCURRENCY
+    }
     if (raw === undefined) return DEFAULT_LOCAL_LLM_CONCURRENCY
     if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_LOCAL_LLM_CONCURRENCY
     if (raw <= 0) return 0
