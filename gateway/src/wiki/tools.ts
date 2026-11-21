@@ -265,7 +265,11 @@ export function runWikiToolCall(opts: WikiToolCallOpts): WikiToolCallResult {
         snippet: h.snippet,
       }))
       const text = formatSearchResultJson(pages)
-      const qLabel = queries.slice(0, 3).join(' | ').slice(0, 80)
+      const qLabel = queries
+        .slice(0, 3)
+        .map((q) => q.replace(/\s+/g, ' ').trim())
+        .join(' | ')
+        .slice(0, 80)
       const prefix = kind ? `${kind}: ` : ''
       const summary = `${prefix}${qLabel} (${hits.length} ${hits.length === 1 ? 'hit' : 'hits'})`
       return {
@@ -296,9 +300,11 @@ export function runWikiToolCall(opts: WikiToolCallOpts): WikiToolCallResult {
         }
       }
 
-      const updatedAtIso = Number.isFinite(page.updatedAt)
-        ? new Date(page.updatedAt).toISOString()
-        : String(page.updatedAt)
+      const updatedDate = Number.isFinite(page.updatedAt) ? new Date(page.updatedAt) : null
+      const updatedAtIso =
+        updatedDate && !Number.isNaN(updatedDate.getTime())
+          ? updatedDate.toISOString()
+          : String(page.updatedAt)
       const headerLines = [
         `id: ${page.id}`,
         `kind: ${page.kind}`,

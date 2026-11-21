@@ -231,6 +231,8 @@ type TurnOpts = {
   watch?: boolean
   /** 唤醒文本里已经带了外部服务返回内容时，起点即算 outside-data */
   tainted?: boolean
+  /** 本回合已带入或读到外部不受信任数据时通知（如群聊轮次将 speaker 的 taint 传给 Chief） */
+  onTainted?: () => void
 }
 
 export function startOfLocalDay(now: Date, timeZone?: string): number {
@@ -620,6 +622,7 @@ export function createApp(deps: AppDeps): GatewayApp {
         now,
         origin: opts.origin,
         ...(opts.tainted ? { tainted: true } : {}),
+        ...(opts.onTainted ? { onTainted: opts.onTainted } : {}),
         hop: opts.hop ?? 0,
         vision,
         onConnectorTool: ({ name, args, ruleBlock, events: turnEvents }) =>
@@ -676,7 +679,7 @@ export function createApp(deps: AppDeps): GatewayApp {
         ...(skills.length ? { skills, onReadSkill: (name: string) => readSkill(skillsDir(dataDir), name) } : {}),
         checkBudget: () => budgetNote(bot),
         language: uiLanguage(),
-        onMessageBot: ({ to, content }) => relay(bot, to, content, opts.hop ?? 0),
+        onMessageBot: ({ to, content, tainted }) => relay(bot, to, content, opts.hop ?? 0, tainted),
         // 提前把容器拉起来，用户点开面板时屏幕已经在了
         // 容器：提前拉起来，用户点开面板时屏幕已经在了；本机：把浏览器以窗口开到桌面上让人登录
         ...(pool ? { onAskForLogin: async () => { await (await pool.get(bot.id)).showWindow?.() } } : {}),
@@ -730,6 +733,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     to: string,
     content: string,
     hop: number,
+    tainted?: boolean,
   ): Promise<{ delivered: boolean; reason?: string; toName?: string }> {
     if (!canMessage(a2aRules, from.id, to)) {
       return { delivered: false, reason: denyReason(a2aRules, from.id, to) }
@@ -740,7 +744,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     const targetThread = ensureDmThread(db, target.id)
     const chip = insertMessage(db, {
       threadId: targetThread, sender: from.id, kind: 'bot_ref',
-      payload: { from: from.id, fromName: from.name, content },
+      payload: { from: from.id, fromName: from.name, content, ...(tainted ? { tainted: true } : {}) },
     })
     hub.broadcast({ type: 'message', threadId: targetThread, message: chip })
 
@@ -749,7 +753,10 @@ export function createApp(deps: AppDeps): GatewayApp {
       target,
       targetThread,
       `@${from.name} (${from.id}) handed you this: ${content}\nPick it up now and report back in this thread.`,
-      { origin: 'relay', persistUserMessage: false, hop: hop + 1, prewarm: true, trigger: 'handoff' },
+      {
+        origin: 'relay', persistUserMessage: false, hop: hop + 1, prewarm: true, trigger: 'handoff',
+        ...(tainted ? { tainted: true } : {}),
+      },
     )
     return { delivered: true, toName: target.name }
   }
@@ -765,6 +772,8 @@ export function createApp(deps: AppDeps): GatewayApp {
         .filter((b): b is BotRow => Boolean(b))
       const group = { title, members: members.map((b) => b.name) }
       const opts = { origin: 'operator', persistUserMessage: false, group, trigger: 'group' } as const
+      let roundTainted = false
+      const speakerOpts: TurnOpts = { ...opts, onTainted: () => { roundTainted = true } }
       if (mentions.length) {
         // 点了名：只叫被点到的人；Chief 只有自己也被点到才收尾，而且得有别人先答过才发分派表
         const named = members.filter((b) => mentions.includes(b.id))
@@ -775,20 +784,22 @@ export function createApp(deps: AppDeps): GatewayApp {
           const others = also(bot)
           return `Your operator asked you directly in the group: "${text}".${others.length ? ` They also asked ${others.join(', ')}; answer for your own part.` : ''} Reply in this thread.`
         }
-        await Promise.all(speakers.map((bot) => startTurn(bot, threadId, direct(bot), opts)))
+        await Promise.all(speakers.map((bot) => startTurn(bot, threadId, direct(bot), speakerOpts)))
         if (signal.aborted || !chief) return
+        const chiefOpts: TurnOpts = roundTainted ? { ...opts, tainted: true } : opts
         await startTurn(chief, threadId, speakers.length
           ? `Your operator asked ${speakers.map((b) => `@${b.id}`).join(', ')} and you in the group: "${text}". They have answered above. Post the dispatch table now — one "✓ item → @bot · when" line each — then one sentence on what needs your operator today.`
-          : direct(chief), opts)
+          : direct(chief), chiefOpts)
         return
       }
       const chief = members.find((b) => b.id === chiefId)
       await Promise.all(members.filter((b) => b.id !== chiefId).map((bot) => startTurn(bot, threadId,
-        `Your operator asked the group: "${text}". Answer for your own patch only, in two lines or less.`, opts)))
+        `Your operator asked the group: "${text}". Answer for your own patch only, in two lines or less.`, speakerOpts)))
       if (signal.aborted || !chief) return
+      const chiefOpts: TurnOpts = roundTainted ? { ...opts, tainted: true } : opts
       await startTurn(chief, threadId,
         `Your operator asked the group: "${text}". Everyone else has reported above. Post the dispatch table now — one "✓ item → @bot · when" line each — then one sentence on what needs your operator today.`,
-        opts)
+        chiefOpts)
     })
   }
 

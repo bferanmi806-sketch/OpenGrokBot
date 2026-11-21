@@ -80,7 +80,7 @@ export type AgentDeps = {
   onStopRoutine?: (id: number) => Promise<{ ok: boolean; name?: string; reason?: string }>
   hop?: number
   group?: { title: string; members: string[] }
-  onMessageBot?: (input: { to: string; content: string }) =>
+  onMessageBot?: (input: { to: string; content: string; tainted?: boolean }) =>
     Promise<{ delivered: boolean; reason?: string; toName?: string }>
   onAskForLogin?: (input: { site: string; why: string }) => Promise<void>
   /** 操作者按「停止」时触发 */
@@ -110,6 +110,8 @@ export type AgentDeps = {
   origin?: TurnOrigin
   /** 回合起点已带入外部不受信任载荷（如 MCP 写操作返回正文）：本回合直接标记 outside-data */
   tainted?: boolean
+  /** 本回合已带入或读到外部不受信任数据时通知调用方（如群聊轮次将 speaker 的 taint 传给 Chief） */
+  onTainted?: () => void
   /** 操作者发来的文件：传进历史里的附件消息，回一份怎么给模型看的说明。不传 = 只报文件名 */
   attachments?: (rows: MessageRow[]) => Promise<AttachmentBrief>
   /** 这位同事已获授权的连接器列表（进系统提示词）与动态工具清单 */
@@ -200,18 +202,28 @@ export async function runTurn(
     const canRelay = Boolean(deps.onMessageBot)
     const hasWiki = Boolean(deps.onWikiTool)
     const rows = orderHistory(listMessages(db, threadId, HISTORY_LIMIT), opts.pendingIds, opts.hiddenIds)
-    // 模型眼前还摆着 webhook 载荷或本回合读过外部连接器内容时，就算是操作者开的头也不认规则：外部文字可能正是在诱导它
-    const hasWebhookHistory = rows.some((m) => m.kind === 'webhook')
-    let taintedByOutsideData = deps.tainted === true
+    // 模型眼前还摆着 webhook / 受污染的转交载荷，或本回合读过外部数据时，就算是操作者开的头也不认规则：外部文字可能正是在诱导它
+    const hasOutsideDataHistory = rows.some(
+      (m) => m.kind === 'webhook' || (m.kind === 'bot_ref' && (m.payload as { tainted?: unknown } | null)?.tainted === true),
+    )
+    let taintedByOutsideData = deps.tainted === true || deps.origin === 'webhook'
     const computeRuleBlock = (): RuleBlock | null =>
       deps.origin !== 'operator'
         ? (deps.origin ?? 'unknown')
-        : (hasWebhookHistory || taintedByOutsideData) ? 'outside-data' : null
+        : (hasOutsideDataHistory || taintedByOutsideData) ? 'outside-data' : null
+    const initiallyTainted = hasOutsideDataHistory || taintedByOutsideData
     const ctx: TurnContext = {
       ...deps,
       ruleBlock: computeRuleBlock(),
-      turnTainted: hasWebhookHistory || taintedByOutsideData,
+      turnTainted: initiallyTainted,
     }
+    let taintNotified = false
+    const notifyTainted = () => {
+      if (taintNotified) return
+      taintNotified = true
+      deps.onTainted?.()
+    }
+    if (initiallyTainted) notifyTainted()
     const attached = rows.filter((m) => m.kind === 'attachment')
     // 查不出来（盘坏了、没有上传目录）不拦回合：模型仍然知道有这么个文件，只是拿不到
     const brief = attached.length ? await deps.attachments?.(attached).catch(() => undefined) : undefined
@@ -264,6 +276,7 @@ export async function runTurn(
             taintedByOutsideData = true
             ctx.turnTainted = true
             ctx.ruleBlock = computeRuleBlock()
+            notifyTainted()
           })
           messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.text })
           latestImage = outcome.image ?? latestImage
@@ -672,13 +685,16 @@ function summarize(tool: string, args: Record<string, unknown>): string {
       return `to ${pick('channelId')}`
     case 'wiki_search': {
       const qs = Array.isArray(args.queries)
-        ? args.queries.filter((q): q is string => typeof q === 'string' && q.trim().length > 0).map((q) => q.trim())
+        ? args.queries
+            .filter((q): q is string => typeof q === 'string')
+            .map((q) => q.replace(/\s+/g, ' ').trim())
+            .filter(Boolean)
         : typeof args.queries === 'string' && args.queries.trim()
-          ? [args.queries.trim()]
+          ? [args.queries.replace(/\s+/g, ' ').trim()]
           : []
       const kind = pick('kind')
       const qText = qs.slice(0, 3).join(' | ').slice(0, 100)
-      return [kind, qText].filter(Boolean).join(': ') || 'wiki'
+      return [kind, qText].filter(Boolean).join(': ').slice(0, 120) || 'wiki'
     }
     case 'wiki_read':
       return pick('id') || 'page'
@@ -686,7 +702,7 @@ function summarize(tool: string, args: Record<string, unknown>): string {
       const kind = pick('kind')
       const slug = pick('slug')
       const title = pick('title')
-      return kind && slug ? `${kind}/${slug}` : [kind, title].filter(Boolean).join(': ').slice(0, 120) || 'page'
+      return (kind && slug ? `${kind}/${slug}` : [kind, title].filter(Boolean).join(': ')).slice(0, 120) || 'page'
     }
     default:
       return isMcpToolName(tool) ? summarizeMcpArgs(args) : ''
@@ -824,7 +840,7 @@ async function execWorkflowTool(
       const to = String(args.to ?? '').trim()
       const content = String(args.content ?? '').trim()
       if (!to || !content) return 'message_bot needs "to" and "content".'
-      const result = await deps.onMessageBot({ to, content })
+      const result = await deps.onMessageBot({ to, content, ...(deps.turnTainted ? { tainted: true } : {}) })
       if (!result.delivered) return result.reason ?? `Could not reach ${to}.`
       return `Handed to ${result.toName ?? to}.`
     }
