@@ -12,7 +12,7 @@
 [![Release](https://img.shields.io/github/v/release/wolfqing/OpenSuperBot?style=flat-square&label=release)](https://github.com/wolfqing/OpenSuperBot/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-informational?style=flat-square)](docs/desktop.md)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20Streamable%20HTTP-8A2BE2?style=flat-square)](docs/security.md)
-[![Connectors](https://img.shields.io/badge/connectors-Gmail%20%7C%20Outlook%20%7C%20Calendar%20%7C%20Notion%20%7C%20Slack-0A7EA4?style=flat-square)](docs/security.md)
+[![Connectors](https://img.shields.io/badge/connectors-Polery%20%7C%20Gmail%20%7C%20Outlook%20%7C%20Calendar%20%7C%20Notion%20%7C%20Slack-0A7EA4?style=flat-square)](docs/security.md)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-blue?style=flat-square)](../../pulls)
 
 xAI's Grok Bot sells always-on teammates that each get a cloud computer — browser, filesystem, terminal — with
@@ -80,6 +80,21 @@ Every line below is implemented and covered by tests — nothing here is a roadm
   Repeated discards (≥ 2 in 14 days) or a teammate's `propose_memory_rule` call never edit `MEMORY.md` directly — they
   post an editable **Rule proposal** card (`Save to MEMORY.md` / `Dismiss`) with an amber warning badge whenever
   external data was in context.
+- **Unified Today workspace (`Feed`, `Ideas`, `Tracking & Goals`, `Spaces`).** A single daily overview next to your
+  teammates:
+  - *Continuous Custom Web Feed:* Define prompt-driven web topics that continuously scan the web in the background via
+    safe read-only `web_search` / `web_fetch` (not cron jobs), with 7-day deduplication, a ~15 items/day cap, and
+    clickable source links.
+  - *Auto-organized Ideas, To-dos & Goals:* Conversation context is automatically distilled into Ideas, checkable
+    To-dos, and multi-step Goals/milestones with fuzzy deduplication, taint preservation, and one-click links back to
+    the source thread — unified alongside Needs You approvals/questions/logins and tracking routines in **Tracking &
+    Goals**.
+  - *Declarative Live Spaces:* Zero-JS structured boards (`metric`, `table`, `kanban`, `timeline`, `chart`, `markdown`,
+    `actions`) with per-teammate `viewer` / `editor` grants and live thread updates.
+- **Local Credential Vault.** Store API tokens, site logins, and TOTP (2FA) seeds locally in `<data>/vault-secrets.json`
+  (`0600`, never in SQLite, containers, or model prompts) with strict HTTPS domain allowlists, zero-default per-teammate
+  grants, `${vault:<slug>.<field>}` references in MCP configs, approval/taint-gated `vault_fill`, and automatic output
+  redaction.
 - **Shared team entity Wiki.** A zero-vector-DB knowledge base (`contact`, `client`, `project`, `topic`) backed by
   SQLite FTS5 with CJK/English tokenization, multi-query RRF × recency ranking (`wiki_search`, `wiki_read`,
   `wiki_upsert`), atomic `<data>/wiki/` Markdown mirrors, revision history, an in-app **Team Wiki** browser/editor,
@@ -98,6 +113,11 @@ Every line below is implemented and covered by tests — nothing here is a roadm
   built-in priority semaphore (`P0 interactive` > `P1 background` > `P2 routines` > `P3 low`) lets interactive chats
   and approvals jump ahead between steps without cloud-API overhead (configurable in **Settings → Local model
   concurrency**).
+- **Long-session context guardrails & runtime reliability.** Automatic model context-window budgeting and in-turn
+  tool-result pruning, per-`(thread, bot)` checkpoint compaction, workspace spill for oversized tool outputs, repeat-call
+  loop guards, SQLite FTS5 `search_history` with strict per-bot isolation, bounded parallel read-tool execution,
+  optimistic `write_file` stale guards, jittered LLM retry with tool JSON validation, sleep/wake latest-only scheduler
+  catch-up, and an instant recent-thread LRU cache in the client.
 - **Dark & Light themes + one-click default model.** Switch Dark, Light, or System appearance from the sidebar or
   Settings, and promote any connection in **AI models** to default in one click.
 - **Recorded workflow traces and replay.** API controls record typed browser steps on a teammate's existing page
@@ -135,6 +155,11 @@ Every line below is implemented and covered by tests — nothing here is a roadm
 
 **Connectors & MCP**
 
+- **Native Polery Docs connector (`polery`).** Connect Polery Docs directly from **Connectors → Apps** via first-party
+  OAuth 2.1 (PKCE S256 + RFC 8707 `resource` binding) and Streamable HTTP MCP — **no Composio API key required**.
+  Exposes 4 read-only tools (`polery_list_documents`, `polery_search_documents`, `polery_read_document`,
+  `polery_get_proposal`) and 2 approval-gated write tools (`polery_create_document`, `polery_propose_edits`), with
+  tokens kept locally in `<data>/polery-tokens.json` (`0600`).
 - **App connectors (Gmail, Outlook, Google & Outlook Calendar, Notion, Slack).** Connect one or more accounts
   from **Connectors → Apps** via Composio OAuth and grant them per teammate. Ships 16 structured tools, a 3-stage
   mail sanitizer (filtering `no-reply` / `mailer-daemon` noise, stripping HTML and tracking pixels, and removing
@@ -143,10 +168,11 @@ Every line below is implemented and covered by tests — nothing here is a roadm
 - **Native MCP client (`stdio` & `Streamable HTTP`).** Attach any Model Context Protocol server from
   **Connectors → MCP** — local `stdio` commands (`shell: false`, clean-room environment) or remote `Streamable HTTP`
   endpoints (with automatic `2024-11-05` HTTP+SSE fallback and same-origin redirect guards) — or paste a Claude
-  Desktop / Cursor `mcpServers` JSON block to import a batch at once. Secrets stay in `<data>/mcp-secrets.json`
-  (`0600`) outside SQLite and containers; access is opt-in per teammate; tools default to `'write'` unless marked
-  `'read'`, so `'read'` tools work safely in `watch` routines while `'write'` tools pause at a non-rememberable
-  approval chip with frozen arguments.
+  Desktop / Cursor `mcpServers` JSON block to import a batch at once. Supports on-demand tool loading for large servers
+  and `${vault:<slug>.<field>}` references into the local Vault; secrets stay in `<data>/mcp-secrets.json` (`0600`)
+  outside SQLite and containers; access is opt-in per teammate; tools default to `'write'` unless marked `'read'`, so
+  `'read'` tools work safely in `watch` routines while `'write'` tools pause at a non-rememberable approval chip with
+  frozen arguments.
 
 **The crew**
 
@@ -249,6 +275,8 @@ pnpm start` and the launchd / systemd / Windows Task Scheduler templates in [doc
 | `OPENSUPERBOT_VISION` | *(off)* | Show the model its own screenshots |
 | `OPENSUPERBOT_UPLOADS_MAX_MB` | `2048` | Disk the files you send to teammates may use in all; `0` no limit |
 | `OPENSUPERBOT_COMPOSIO_API_KEY` | — | Optional Composio API key for **Connectors → Apps**; saved keys live in `<data>/composio-key` (`0600`) |
+| `OPENSUPERBOT_POLERY_ORIGIN` | `https://docs.polery.com` | Optional custom origin for the native Polery Docs OAuth/MCP connector |
+| `OPENSUPERBOT_CONTEXT_WINDOW` | `0` (auto) | Optional override for context-window budgeting & checkpoint compaction (auto-inferred by model family when `0`) |
 
 Every other setting — listen address, idle stop, per-computer limits, timeouts — is in
 [docs/always-on.md](docs/always-on.md#configuration).
@@ -260,13 +288,16 @@ In a slow-network region: for Docker, build with a mirror — `docker build --bu
 The loudest objection to hosted always-on agents: an agent that never sleeps, holding all your credentials, on
 someone else's infrastructure, exposed to prompt injection. The self-hosted answers:
 
-- **Credentials stay out of the bot's reach.** Browser logins live in each bot's own browser profile, and MCP
-  secrets live in `<data>/mcp-secrets.json` (`0600`) on your machine; if you opt into **Connectors → Apps**, OAuth
-  tokens live on Composio while the API key stays in `<data>/composio-key` (`0600`) outside every bot container
-  and workspace.
+- **Credentials stay out of the bot's reach.** Browser logins live in each bot's own browser profile; Vault secrets,
+  MCP secrets, and native Polery OAuth tokens stay on your machine in `<data>/vault-secrets.json`,
+  `<data>/mcp-secrets.json`, and `<data>/polery-tokens.json` (`0600`, never in SQLite, containers, or model prompts,
+  with automatic output redaction and HTTPS domain allowlists on `vault_fill`); if you opt into Composio-backed apps in
+  **Connectors → Apps**, OAuth tokens live on Composio while the API key stays in `<data>/composio-key` (`0600`)
+  outside every bot container and workspace.
 - **The bot never asks for a password in chat.** It asks you to take over its screen instead.
-- **Nothing reaches the gateway without its token.** It listens on `127.0.0.1`, each browser signs in once, and
-  only its own pages may change state. A website you visit cannot approve a hold — and neither can the bot.
+- **Nothing reaches the gateway without its token.** It listens on `127.0.0.1`, validates the `Host` header against
+  DNS rebinding, blocks cross-site `Sec-Fetch-Site` requests, signs each browser in once, and only lets its own pages
+  change state. A website you visit cannot approve a hold — and neither can the bot.
 - **Every bot is in its own cage** — a separate container with its own workspace and resource limits, and no
   route to any other bot's computer. A local computer's cage is thinner: its files stay in its folder and its
   commands are off unless you turn them on, but nothing caps its memory or CPU, and commands it runs can reach your

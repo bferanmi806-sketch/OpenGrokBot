@@ -12,7 +12,7 @@
 [![Release](https://img.shields.io/github/v/release/wolfqing/OpenSuperBot?style=flat-square&label=release)](https://github.com/wolfqing/OpenSuperBot/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-informational?style=flat-square)](docs/desktop.md)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20Streamable%20HTTP-8A2BE2?style=flat-square)](docs/security.md)
-[![Connectors](https://img.shields.io/badge/connectors-Gmail%20%7C%20Outlook%20%7C%20Calendar%20%7C%20Notion%20%7C%20Slack-0A7EA4?style=flat-square)](docs/security.md)
+[![Connectors](https://img.shields.io/badge/connectors-Polery%20%7C%20Gmail%20%7C%20Outlook%20%7C%20Calendar%20%7C%20Notion%20%7C%20Slack-0A7EA4?style=flat-square)](docs/security.md)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-blue?style=flat-square)](../../pulls)
 
 xAI 的 Grok Bot 卖的是「随时在线的同事」：每个 bot 配一台云电脑（浏览器、文件系统、终端），有持久记忆，彼此
@@ -75,6 +75,16 @@ OpenAI 兼容的模型。
   diff 作为 chip 贴出来；「忘掉那条规矩」用同样的方式删掉它，电脑面板也列出全部规矩、每条都能删。这个文件放在 bot
   的电脑之外，所以每次改动都有一张 chip。同一类动作 14 天内被驳回 ≥ 2 次，或同事调用 `propose_memory_rule` 时，绝不
   越权自动改写 `MEMORY.md`，而是弹出一张可编辑的**规矩提议卡片**（存入 / 忽略），含外部内容时额外标出琥珀色警示。
+- **统一「今日」工作台（动态、灵感、待办与目标、空间）。** 在所有同事之上提供每日总览：
+  - *持续自定义网络动态（Feed）：* 用 prompt 定义关心的主题，后台通过安全只读的 `web_search` / `web_fetch` 持续从网络
+    抓取动态（非 cron 定时任务），带 7 天标题/链接去重、每日约 15 条上限，每条卡片可直达原文来源。
+  - *自动整理的灵感、待办与目标：* 从你的对话上下文自动提炼灵感、可勾选待办（To-dos）与多阶段目标/里程碑（带模糊去重、
+    污点保留与一键回跳来源线程），并与「等你处理」的审批/提问/登录接管及追踪例行任务统一汇集在**待办与目标**中。
+  - *声明式实时空间（Live Spaces）：* 零 JS 的结构化看板（`metric`、`table`、`kanban`、`timeline`、`chart`、
+    `markdown`、`actions`），支持按同事授予 `viewer` / `editor` 权限与对话内实时卡片更新。
+- **本地凭证保险箱（Vault）。** 将 API 密钥、站点登录凭据与 TOTP（2FA）种子单独保存在本机 `<数据目录>/vault-secrets.json`
+  （权限 `0600`，绝不进 SQLite、容器或模型提示词），支持严格 HTTPS 域名白名单、按同事零默认授权、MCP 配置中的
+  `${vault:<slug>.<field>}` 引用、带污点/审批门控的 `vault_fill` 自动填表与输出自动脱敏。
 - **团队共享实体知识库（Team Wiki）。** 零向量库依赖，基于 SQLite FTS5 + 中英双语分词 + 多查询 RRF × 时间衰减
   （`wiki_search` / `wiki_read` / `wiki_upsert`），沉淀联系人、客户、项目与主题条目，原子同步 `<数据目录>/wiki/`
   Markdown 镜像，保留修订历史，内置可视化知识库弹窗与跨同事 `outside-data` 污点核验。
@@ -87,6 +97,10 @@ OpenAI 兼容的模型。
   或取消任务，单同事浏览器租约锁确保前后台绝不互相覆盖页面。
 - **本地模型优先级信号量队列。** 多位同事共享本地端点（Ollama、`localhost` 或局域网）时，按 `P0 交互 > P1 后台 > P2 定时 > P3 低优`
   在步骤间插队，避免本地显存/内存争抢，云端 API 零开销旁路（可在「设置 → 本地模型并发上限」调整）。
+- **长会话上下文护栏与性能可靠性。** 自动推断模型上下文窗口并在回合内裁剪旧工具结果、按 `(线程, 同事)` 生成检查点压缩、
+  超大工具输出落盘工作区避免撑爆上下文、重复调用循环保护、基于 SQLite FTS5 的隔离式历史检索（`search_history`）、
+  有界并行只读工具池、`write_file` 乐观陈旧检查、带抖动退避的 LLM 重试与工具 JSON 校验、系统休眠唤醒后的防洪补跑，
+  以及前端近期会话 LRU 缓存实现秒切对话。
 - **深浅主题切换与一键设为默认模型。** 支持深色、浅色与跟随系统外观，并可在「AI 模型」中一键切换全局默认连接。
 - **录下来的操作轨迹与确定性回放。** API 支持在同事已有的浏览器页面上录制带类型的操作步骤（密码、一次性验证码等敏感输
   入框自动打码），并可带占位参数与审批步骤确定性回放已存轨迹。本机电脑上的录制在窗口重开后会接着录；可视化入口与例行任
@@ -115,15 +129,20 @@ OpenAI 兼容的模型。
 
 **应用连接器与标准 MCP 客户端**
 
+- **原生 Polery 文档连接器（`polery`）。** 直接在「连接器 → 应用」内通过第一方 OAuth 2.1（PKCE S256 + RFC 8707
+  `resource` 绑定）与 Streamable HTTP MCP 接入 Polery 文档——**无需 Composio API key**。提供 4 个只读工具
+  （`polery_list_documents`、`polery_search_documents`、`polery_read_document`、`polery_get_proposal`）与 2 个
+  需审批的写入工具（`polery_create_document`、`polery_propose_edits`），令牌加密隔离存在本机
+  `<数据目录>/polery-tokens.json`（权限 `0600`）。
 - **应用连接器（Gmail、Outlook、Google 与 Outlook 日历、Notion、Slack）。** 在「连接器 → 应用」里通过 Composio OAuth
   绑定一个或多个账号，并按同事勾选授权。内置 16 个结构化工具、三阶邮件去噪防追踪清洗（过滤 `no-reply` / `mailer-daemon`
   机器通知、剥离 HTML 与隐藏追踪像素、剔除链接追踪参数）、读取 `outside-data` 染色，以及**网关代码强制执行的冻结审批**
   （你点 Approve 后由网关单次执行真实冻结参数，中途断连绝不自动重发）。
 - **零依赖原生 MCP 客户端（`stdio` 与 `Streamable HTTP`）。** 在「连接器 → MCP」里接入任意 Model Context Protocol
   服务——本机 `stdio` 命令（`shell: false` 净室环境变量）或远程 `Streamable HTTP` 端点（自动回退 `2024-11-05` HTTP+SSE，
-  带同源重定向防护）——也可直接粘贴 Claude Desktop / Cursor 的 `mcpServers` JSON 一键批量导入。密钥只存在本机
-  `<数据目录>/mcp-secrets.json`（权限 `0600`），不进数据库和容器；按同事显式授权；工具默认按 `'write'` 拦截，`'read'`
-  工具可在 `watch` 巡检中安全运行，`'write'` 工具统一挂起审批且禁止自动记住放行。
+  带同源重定向防护）——也可直接粘贴 Claude Desktop / Cursor 的 `mcpServers` JSON 一键批量导入。支持大工具集按需加载
+  与 `${vault:<slug>.<field>}` 保险箱引用；密钥只存在本机 `<数据目录>/mcp-secrets.json`（权限 `0600`），不进数据库和容器；
+  按同事显式授权；工具默认按 `'write'` 拦截，`'read'` 工具可在 `watch` 巡检中安全运行，`'write'` 工具统一挂起审批且禁止自动记住放行。
 
 **这支班子**
 
@@ -215,6 +234,8 @@ Linux 用 bubblewrap），只能写这位同事自己的文件夹。Windows 没�
 | `OPENSUPERBOT_VISION` | *(关)* | 把截图喂回给模型看 |
 | `OPENSUPERBOT_UPLOADS_MAX_MB` | `2048` | 你发给同事的文件总共最多占多少磁盘；`0` 不限 |
 | `OPENSUPERBOT_COMPOSIO_API_KEY` | — | 「连接器 → 应用」可选的 Composio API key；界面保存的 key 存进 `<数据目录>/composio-key`（权限 `0600`） |
+| `OPENSUPERBOT_POLERY_ORIGIN` | `https://docs.polery.com` | 可选，自定义原生 Polery 文档 OAuth/MCP 连接器的服务地址 |
+| `OPENSUPERBOT_CONTEXT_WINDOW` | `0`（自动） | 可选，覆盖上下文窗口预算与检查点压缩阈值（为 `0` 时按模型家族自动推断） |
 
 其余设置——监听地址、闲置停机、单台电脑的资源上限、超时——见
 [docs/always-on.md](docs/always-on.md#configuration)。
@@ -228,12 +249,14 @@ Linux 用 bubblewrap），只能写这位同事自己的文件夹。Windows 没�
 对「托管式常驻 agent」最响的反对声：一个永不休眠、手握你全部凭证的 agent，跑在别人的基础设施上，还暴露在提示词
 注入面前。自托管的回答是：
 
-- **凭证隔离在 bot 触及不到的地方。** 浏览器登录态只留在每个 bot 自己的浏览器 profile 里，MCP 密钥只存在你机器上的
-  `<数据目录>/mcp-secrets.json`（`0600`）；如果启用「连接器 → 应用」，OAuth 令牌由 Composio 托管，API key 则留在
-  `<数据目录>/composio-key`（`0600`），绝不挂进任何 bot 容器或工作区。
+- **凭证隔离在 bot 触及不到的地方。** 浏览器登录态只留在每个 bot 自己的浏览器 profile 里；Vault 保险箱明文、MCP 密钥与
+  原生 Polery OAuth 令牌只存在你机器上的 `<数据目录>/vault-secrets.json`、`<数据目录>/mcp-secrets.json` 和
+  `<数据目录>/polery-tokens.json`（权限 `0600`，绝不进 SQLite、容器或模型提示词，且 `vault_fill` 强制执行 HTTPS 域名白名单
+  与输出脱敏）；如果启用 Composio 应用连接器，OAuth 令牌由 Composio 托管，API key 则留在 `<数据目录>/composio-key`
+  （`0600`），绝不挂进任何 bot 容器或工作区。
 - **bot 不会在聊天里问密码。** 它只会请你接管它的屏幕。
-- **没有令牌，什么都连不上 gateway。** 它只听 `127.0.0.1`，每个浏览器登录一次，且只有它自己的页面能改状态。你随手
-  打开的网页放行不了审批——bot 自己也放行不了。
+- **没有令牌，什么都连不上 gateway。** 它只听 `127.0.0.1`，校验 `Host` 请求头防 DNS 重绑定并拦截跨站 `Sec-Fetch-Site`
+  请求，每个浏览器登录一次，且只有它自己的页面能改状态。你随手打开的网页放行不了审批——bot 自己也放行不了。
 - **每个 bot 各在各的笼子里**——独立容器、独立工作区、资源上限，而且没有通往别的同事电脑的路。本机电脑的笼子
   薄一些：文件出不了它的文件夹，命令行要你打开才有，但内存和 CPU 没有上限，它跑的命令也能访问你的网络。差别在
   [docs/security.md](docs/security.md#local-computers) 里写清楚了。

@@ -7,6 +7,15 @@ names.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-21
+
+Unified **Today** workspace (continuous custom Web Feed, auto-distilled Ideas, To-dos & Goals, and Declarative Live
+Spaces); local **Credential Vault** with TOTP, HTTPS domain allowlists, and `vault_fill` redaction; native first-party
+**Polery Docs** OAuth 2.1 + Streamable HTTP MCP connector (no Composio key required); and long-session **context
+guardrails & gateway/web reliability** upgrades (context budget & checkpoint compaction, oversized output spill,
+repeat-call loop guard, SQLite FTS5 `search_history`, parallel read pool, on-demand MCP loading, Host DNS-rebinding &
+`Sec-Fetch-Site` guards, and recent-thread LRU cache).
+
 ### Added
 
 - **Credential Vault (schema v18).** Local-only credential manager storing secret values in `<data>/vault-secrets.json`
