@@ -76,8 +76,18 @@ describe('Thread', () => {
     }]
     const { container } = render(<Thread conversation={dm} roster={roster} messages={resolved} thinking={false} onSend={() => {}} onDecide={() => {}} />)
     expect(screen.getByText(/Approved/)).toBeInTheDocument()
+    expect(screen.queryByText(/edited/)).toBeNull()
     expect(container.querySelector('.row.centered')).toBeTruthy()
     expect(container.querySelector('.row.from-user')).toBeNull()
+  })
+
+  it('shows the edited badge on approval_resolved rows when edited is true', () => {
+    const resolved: Message[] = [{
+      id: 11, thread_id: 'dm:researcher', sender: 'user', kind: 'approval_resolved', content: '', created_at: 11,
+      payload: { approvalId: 8, action: 'Send email to alice@acme.com', decision: 'approve', edited: true },
+    }]
+    render(<Thread conversation={dm} roster={roster} messages={resolved} thinking={false} onSend={() => {}} onDecide={() => {}} />)
+    expect(screen.getByText('✓ Approved · edited · Send email to alice@acme.com')).toBeInTheDocument()
   })
 
   it('labels each speaker in a group thread', () => {

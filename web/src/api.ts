@@ -1,11 +1,12 @@
 import { fileToBase64 } from './attachments'
 import type {
-  AboutInfo, AppKey, AttachmentPayload, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
+  AboutInfo, AppKey, ApprovalEditInput, AttachmentPayload, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
   Conversation, CreateMcpServerInput, FieldError, GatewayEvent, ImportMcpServersInput, ImportMcpServersResult, McpServersSnapshot,
   McpServerView, Message, ProviderPreset, RoutineAction, RuleDuration, ServerEvent, SettingsView, SetupInfo, UpdateMcpServerPatch,
 } from './types'
 
 export type {
+  ApprovalEditInput,
   CreateMcpServerInput,
   GatewayEvent,
   ImportMcpServersInput,
@@ -320,15 +321,19 @@ export async function createBot(name: string, role: string): Promise<Bot> {
   return res.json() as Promise<Bot>
 }
 
-/** items：一批对象里只放行这几项（下标）；不传 = 全部 */
+/** items：一批对象里只放行这几项（下标）；不传 = 全部；edit：操作者在审批卡片里修改后的参数 */
 export async function resolveApproval(
   approvalId: number,
   decision: 'approve' | 'discard',
   remember?: RuleDuration,
   items?: number[],
+  edit?: ApprovalEditInput,
 ): Promise<void> {
   await send('POST', `/api/approvals/${approvalId}`, {
-    decision, ...(remember ? { remember } : {}), ...(items ? { items } : {}),
+    decision,
+    ...(remember ? { remember } : {}),
+    ...(items ? { items } : {}),
+    ...(edit ? { edit } : {}),
   })
 }
 

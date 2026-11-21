@@ -613,8 +613,12 @@ function Workspace({
             remove: (id) => { removeUpload(id).catch(guard) },
             ...(seesImages === undefined ? {} : { seesImages }),
           }}
-          onDecide={(approvalId, decision, remember, items) => (
-            resolveApproval(approvalId, decision, remember, items).catch(guard)
+          onDecide={(approvalId, decision, remember, items, edit) => (
+            resolveApproval(approvalId, decision, remember, items, edit).catch((err: unknown) => {
+              if (err instanceof SignedOut) { setSignedOut(true); return }
+              if (edit !== undefined) throw err
+              guard(err)
+            })
           )}
           onAnswer={(messageId, choices) => answerQuestion(messageId, choices).catch((err) => { guard(err); throw err })}
           onOpenScreen={openScreen}

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { MAX_HOPS } from './a2a.js'
+import { buildPromptEditable } from './approval-edit.js'
 import {
   MAX_BATCH_ITEMS, RULEABLE_KINDS, blockText, canRemember, destinationReason, type BlockReason, normalizeItems, normalizeKind, normalizeTarget,
   type ApprovalKind,
@@ -662,6 +663,7 @@ async function execWorkflowTool(
       const reason: BlockReason | null = items ? { code: 'batch' }
         : RULEABLE_KINDS.has(kind) ? destinationReason(kind, target) : null
       const blocked = reason ? blockText(reason) : null
+      const editable = !rule && !items ? buildPromptEditable(action, detail) : undefined
       events.onMessage(insertMessage(deps.db, {
         threadId: deps.threadId, sender: deps.bot.id, kind: 'approval_request',
         payload: {
@@ -671,6 +673,7 @@ async function execWorkflowTool(
           ...(rule ? { rule } : { canRemember: !items && canRemember({ kind, target }) }),
           ...(!rule && blocked ? { rememberBlocked: blocked, rememberReason: reason } : {}),
           ...(!rule && answer.ruleHeld && deps.ruleBlock ? { ruleHeld: deps.ruleBlock } : {}),
+          ...(editable ? { editable } : {}),
         },
       }))
       // 不告诉模型是哪条规则、管哪个去向：它知道了，被注入时就能照着去向填，借规则放行别的东西

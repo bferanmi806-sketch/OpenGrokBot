@@ -7,12 +7,13 @@ import {
   deleteMcpServer,
   fetchMcpServers,
   importMcpServers,
+  resolveApproval,
   setBotMcpServers,
   setMcpServerBots,
   testMcpServer,
   updateMcpServer,
 } from '../api'
-import type { McpServerView } from '../types'
+import type { ApprovalEditInput, McpServerView } from '../types'
 import { en, type MessageKey } from './en'
 import { I18nProvider, makeT, pickLang, translate, useT } from './index'
 import { zhCN } from './zh-CN'
@@ -210,6 +211,63 @@ describe('the Chinese dictionary', () => {
     expect(en['mcp.toolsCount']).toContain('{count}')
     expect(zhCN['mcp.toolsCount']).toContain('{count}')
   })
+
+  it('includes editable approval buttons, badges, field labels, and validation messages in both languages with placeholder parity', () => {
+    const requiredEditKeys: MessageKey[] = [
+      'approval.edit',
+      'approval.approveEdited',
+      'approval.reset',
+      'approval.editedBadge',
+      'thread.editedBadge',
+      'approval.edit.to',
+      'approval.edit.cc',
+      'approval.edit.bcc',
+      'approval.edit.subject',
+      'approval.edit.body',
+      'approval.edit.replyAll',
+      'approval.edit.channel',
+      'approval.edit.thread',
+      'approval.edit.message',
+      'approval.edit.title',
+      'approval.edit.markdown',
+      'approval.edit.start',
+      'approval.edit.end',
+      'approval.edit.location',
+      'approval.edit.attendees',
+      'approval.edit.description',
+      'approval.edit.action',
+      'approval.edit.detail',
+      'approval.edit.argsJson',
+      'approval.edit.formMode',
+      'approval.edit.jsonMode',
+      'approval.edit.recipientsHint',
+      'approval.edit.invalidJson',
+      'approval.edit.jsonMustBeObject',
+      'approval.edit.requiredField',
+      'approval.edit.atLeastOneField',
+      'approval.edit.invalidNumber',
+      'approval.edit.failed',
+    ]
+    for (const key of requiredEditKeys) {
+      expect(en[key]).toBeTruthy()
+      expect(zhCN[key]).toBeTruthy()
+      expect({ key, names: placeholders(zhCN[key]) }).toEqual({ key, names: placeholders(en[key]) })
+    }
+    expect(en['approval.edit']).toBe('Edit')
+    expect(zhCN['approval.edit']).toBe('编辑')
+    expect(en['approval.approveEdited']).toBe('Approve edited')
+    expect(zhCN['approval.approveEdited']).toBe('按修改批准')
+    expect(en['approval.reset']).toBe('Reset')
+    expect(zhCN['approval.reset']).toBe('还原')
+    expect(en['approval.editedBadge']).toBe('Edited by you')
+    expect(zhCN['approval.editedBadge']).toBe('你已修改')
+    expect(en['thread.editedBadge']).toBe('edited')
+    expect(zhCN['thread.editedBadge']).toBe('已修改')
+    expect(translate('en', 'approval.edit.requiredField', { field: 'Subject' })).toBe('Subject is required.')
+    expect(translate('zh-CN', 'approval.edit.requiredField', { field: '主题' })).toBe('请填写主题。')
+    expect(translate('en', 'approval.edit.invalidNumber', { field: 'limit' })).toBe('limit must be a valid number.')
+    expect(translate('zh-CN', 'approval.edit.invalidNumber', { field: 'limit' })).toBe('limit必须是有效数字。')
+  })
 })
 
 describe('translate', () => {
@@ -367,5 +425,61 @@ describe('MCP API client', () => {
     const err = await importMcpServers({ json: '{}' }).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(ApiError)
     expect(err).toMatchObject({ status: 400, code: 'empty_import', message: 'no MCP servers found in JSON' })
+  })
+})
+
+describe('resolveApproval API client', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('forwards edit in POST /api/approvals/:id body and throws ApiError with invalid_edit on 400', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: '"subject" cannot contain line breaks.',
+        code: 'invalid_edit',
+      }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'already settled' }), { status: 409 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const edit: ApprovalEditInput = {
+      kind: 'connector',
+      tool: 'mail_send',
+      to: ['alice@example.com'],
+      cc: ['bob@example.com'],
+      subject: 'Updated subject',
+      body: 'Updated body',
+    }
+
+    await resolveApproval(42, 'approve', undefined, undefined, edit)
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/approvals/42')
+    const init0 = fetchMock.mock.calls[0]![1] as RequestInit
+    expect(init0.method).toBe('POST')
+    expect(JSON.parse(String(init0.body))).toEqual({ decision: 'approve', edit })
+
+    await resolveApproval(43, 'approve', '1h', undefined, { kind: 'prompt', action: 'Post update', detail: 'Final text' })
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/approvals/43')
+    expect(JSON.parse(String((fetchMock.mock.calls[1]![1] as RequestInit).body))).toEqual({
+      decision: 'approve',
+      remember: '1h',
+      edit: { kind: 'prompt', action: 'Post update', detail: 'Final text' },
+    })
+
+    await resolveApproval(44, 'discard')
+    expect(fetchMock.mock.calls[2]![0]).toBe('/api/approvals/44')
+    expect(JSON.parse(String((fetchMock.mock.calls[2]![1] as RequestInit).body))).toEqual({ decision: 'discard' })
+
+    const err = await resolveApproval(42, 'approve', undefined, undefined, edit).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err).toMatchObject({
+      status: 400,
+      code: 'invalid_edit',
+      message: '"subject" cannot contain line breaks.',
+    })
+
+    await expect(resolveApproval(42, 'approve', undefined, undefined, edit)).resolves.toBeUndefined()
+    await expect(resolveApproval(42, 'approve', undefined, undefined, edit)).rejects.toBeInstanceOf(SignedOut)
   })
 })

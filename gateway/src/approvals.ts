@@ -262,12 +262,45 @@ export function latestPendingApproval(db: Db, threadId: string): ApprovalRow | n
   ).get(threadId) as ApprovalRow | undefined) ?? null
 }
 
+export type ResolveApprovalPatch = {
+  action?: string
+  detail?: string
+  target?: string
+  executionJson?: string
+}
+
 /** 只有 pending 能被解决；重复点击返回 null，调用方据此跳过重复放行。 */
-export function resolveApproval(db: Db, id: number, decision: 'approve' | 'discard'): ApprovalRow | null {
+export function resolveApproval(
+  db: Db,
+  id: number,
+  decision: 'approve' | 'discard',
+  patch?: ResolveApprovalPatch,
+): ApprovalRow | null {
   const status: ApprovalStatus = decision === 'approve' ? 'approved' : 'discarded'
+  const sets = ['status = ?', 'resolved_at = ?']
+  const params: unknown[] = [status, Date.now()]
+  if (patch) {
+    if (patch.action !== undefined) {
+      sets.push('action = ?')
+      params.push(patch.action)
+    }
+    if (patch.detail !== undefined) {
+      sets.push('detail = ?')
+      params.push(patch.detail)
+    }
+    if (patch.target !== undefined) {
+      sets.push('target = ?')
+      params.push(patch.target)
+    }
+    if (patch.executionJson !== undefined) {
+      sets.push('execution_json = ?')
+      params.push(patch.executionJson)
+    }
+  }
+  params.push(id)
   const info = db.prepare(
-    `UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ? AND status = 'pending'`,
-  ).run(status, Date.now(), id)
+    `UPDATE approvals SET ${sets.join(', ')} WHERE id = ? AND status = 'pending'`,
+  ).run(...params)
   return info.changes === 0 ? null : getApproval(db, id)
 }
 

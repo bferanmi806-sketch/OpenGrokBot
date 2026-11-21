@@ -63,6 +63,7 @@ describe('hold_for_approval', () => {
     expect(chip.payload).toEqual({
       approvalId: 7, action: 'send 4 drafts', detail: 'to the Globex thread', status: 'pending',
       kind: 'other', target: '', canRemember: false,
+      editable: { kind: 'prompt', action: 'send 4 drafts', detail: 'to the Globex thread' },
     })
     expect(toolResult(llm, 1)).toMatch(/do not perform it/i)
   })

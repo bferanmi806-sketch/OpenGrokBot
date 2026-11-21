@@ -21,6 +21,188 @@ export type NoticePayload =
   | { notice: 'connector_expired'; params: { app: string; account: string } }
   | { notice: 'connector_execution'; params: { status: 'failed' | 'uncertain'; action: string; detail: string } }
 
+export type EditableMailSend = {
+  kind: 'connector'
+  tool: 'mail_send'
+  accountLabel: string
+  draftId?: string
+  to: string[]
+  cc: string[]
+  bcc: string[]
+  subject: string
+  body: string
+}
+
+export type EditableMailReply = {
+  kind: 'connector'
+  tool: 'mail_reply'
+  accountLabel: string
+  to: string[]
+  /** Extra recipients that will be CC'd when replyAll is true */
+  replyAllCc: string[]
+  subject: string
+  body: string
+  replyAll: boolean
+}
+
+export type EditableSlackMessage = {
+  kind: 'connector'
+  tool: 'slack_send_message'
+  accountLabel: string
+  channelId: string
+  threadTs?: string
+  text: string
+}
+
+export type EditableNotionCreatePage = {
+  kind: 'connector'
+  tool: 'notion_create_page'
+  accountLabel: string
+  parentPageId: string
+  title: string
+  markdown: string
+}
+
+export type EditableNotionAppend = {
+  kind: 'connector'
+  tool: 'notion_append'
+  accountLabel: string
+  pageId: string
+  markdown: string
+}
+
+export type EditableCalendarCreateEvent = {
+  kind: 'connector'
+  tool: 'calendar_create_event'
+  accountLabel: string
+  title: string
+  start: string
+  end: string
+  location: string
+  attendees: string[]
+  description: string
+}
+
+export type EditableCalendarUpdateEvent = {
+  kind: 'connector'
+  tool: 'calendar_update_event'
+  accountLabel: string
+  eventId: string
+  title?: string
+  start?: string
+  end?: string
+  location?: string
+  attendees?: string[]
+  description?: string
+}
+
+export type EditableMcp = {
+  kind: 'mcp'
+  serverName: string
+  toolName: string
+  args: Record<string, unknown>
+  /** Compact JSON Schema (omitted if serialized size exceeds 32 KB) */
+  inputSchema?: Record<string, unknown>
+}
+
+export type EditablePrompt = {
+  kind: 'prompt'
+  action: string
+  detail: string
+}
+
+export type ApprovalEditable =
+  | EditableMailSend
+  | EditableMailReply
+  | EditableSlackMessage
+  | EditableNotionCreatePage
+  | EditableNotionAppend
+  | EditableCalendarCreateEvent
+  | EditableCalendarUpdateEvent
+  | EditableMcp
+  | EditablePrompt
+
+export type MailSendEditInput = {
+  kind: 'connector'
+  tool: 'mail_send'
+  to: string[]
+  cc?: string[]
+  bcc?: string[]
+  subject: string
+  body: string
+}
+
+export type MailReplyEditInput = {
+  kind: 'connector'
+  tool: 'mail_reply'
+  body: string
+  replyAll?: boolean
+}
+
+export type SlackMessageEditInput = {
+  kind: 'connector'
+  tool: 'slack_send_message'
+  channelId: string
+  text: string
+}
+
+export type NotionCreatePageEditInput = {
+  kind: 'connector'
+  tool: 'notion_create_page'
+  title: string
+  markdown: string
+}
+
+export type NotionAppendEditInput = {
+  kind: 'connector'
+  tool: 'notion_append'
+  markdown: string
+}
+
+export type CalendarCreateEventEditInput = {
+  kind: 'connector'
+  tool: 'calendar_create_event'
+  title: string
+  start: string
+  end: string
+  location?: string
+  attendees?: string[]
+  description?: string
+}
+
+export type CalendarUpdateEventEditInput = {
+  kind: 'connector'
+  tool: 'calendar_update_event'
+  title?: string
+  start?: string
+  end?: string
+  location?: string
+  attendees?: string[]
+  description?: string
+}
+
+export type ConnectorEditInput =
+  | MailSendEditInput
+  | MailReplyEditInput
+  | SlackMessageEditInput
+  | NotionCreatePageEditInput
+  | NotionAppendEditInput
+  | CalendarCreateEventEditInput
+  | CalendarUpdateEventEditInput
+
+export type McpEditInput = {
+  kind: 'mcp'
+  args: Record<string, unknown>
+}
+
+export type PromptEditInput = {
+  kind: 'prompt'
+  action: string
+  detail: string
+}
+
+export type ApprovalEditInput = ConnectorEditInput | McpEditInput | PromptEditInput
+
 export type ApprovalPayload = {
   approvalId: number
   action: string
@@ -48,6 +230,10 @@ export type ApprovalPayload = {
   /** 连接器写操作由网关在批准后直接执行：结果记在审批卡片上 */
   executionStatus?: 'succeeded' | 'failed' | 'uncertain'
   executionDetail?: string
+  /** 可在审批卡片内直接编辑的草稿/参数投影；仅 pending 非批量、非工作流审批携带 */
+  editable?: ApprovalEditable
+  /** 操作者修改内容后再批准 */
+  edited?: boolean
 }
 export type ApprovalResolvedPayload = {
   approvalId: number
@@ -56,6 +242,8 @@ export type ApprovalResolvedPayload = {
   remembered?: { id: number; expiresAt: number | null; kind: string; target: string }
   /** 一批对象时：放行了几项、一共几项 */
   count?: { approved: number; of: number }
+  /** 操作者修改内容后再批准 */
+  edited?: boolean
 }
 export type MemoryPayload = { rule: string; diff: string; total: number; removed?: boolean; by?: 'operator' }
 export type RoutineMode = 'act' | 'watch'

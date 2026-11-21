@@ -87,6 +87,13 @@ export type ResolvedDraftSnapshot = {
   body: string
 }
 
+export type MailReplyMeta = {
+  to: string[]
+  allCc: string[]
+  subject: string
+  threadId?: string
+}
+
 export type FrozenExecution = {
   version: 1
   connectorId: string
@@ -96,6 +103,7 @@ export type FrozenExecution = {
   tool: ConnectorWriteToolName
   args: Record<string, unknown>
   resolvedDraftSnapshot?: ResolvedDraftSnapshot
+  replyMeta?: MailReplyMeta
   operationId: string
 }
 

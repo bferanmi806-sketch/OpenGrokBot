@@ -2,7 +2,9 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { createRule, getApproval } from '../src/approvals.js'
+import { listActions } from '../src/actions.js'
+import { createRule, getApproval, listActiveRules } from '../src/approvals.js'
+import { createComposioDriver } from '../src/connectors/composio-driver.js'
 import {
   activateConnectorAccount,
   createConnectorAccount,
@@ -1019,5 +1021,629 @@ describe('connector tools & deferred execution gate', () => {
     expect(getApproval(db, approvalId2)!.execution_status).toBe('failed')
     expect(statuses2.at(-1)).toBe('idle')
     expect(gw2.hello()).toEqual({ type: 'hello', statuses: {} })
+  })
+
+  it('edits inline mail_send approvals, validates invalid edits without settling, and re-evaluates standing rules against post-edit target', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'osb-conn-edit-mail-'))
+    const db = openDb(':memory:')
+    upsertBot(db, { id: 'inbox-keeper', name: 'Sorter', role: 'inbox', emoji: '📥', soul_path: '' })
+    const threadId = ensureDmThread(db, 'inbox-keeper')
+
+    const mail = activateConnectorAccount(
+      db,
+      createConnectorAccount(db, { app: 'gmail', remoteId: 'rem_m' }).id,
+      { remoteId: 'rem_m', accountLabel: 'alice@gmail.com' },
+    )!
+    setBotConnectors(db, 'inbox-keeper', [mail.id])
+
+    const executedWrites: FrozenExecution[] = []
+    const driver = makeStubDriver({
+      executeWrite: async (frozen) => {
+        executedWrites.push(frozen)
+        return { status: 'succeeded', summary: `Sent to ${(frozen.args.to as string[]).join(', ')}` }
+      },
+    })
+
+    const llm = scriptedLlm([
+      {
+        toolCalls: [
+          {
+            id: 'ms1',
+            name: 'mail_send',
+            args: {
+              to: ['bob@acme.com'],
+              cc: ['old@acme.com'],
+              subject: 'Draft Subject',
+              body: 'Original body text',
+            },
+          },
+          {
+            id: 'ms2',
+            name: 'mail_send',
+            args: {
+              to: ['bob@acme.com'],
+              subject: 'Rule Test',
+              body: 'Check standing rule edit',
+            },
+          },
+          {
+            id: 'ma1',
+            name: 'mail_archive',
+            args: { messageId: 'msg_keep' },
+          },
+        ],
+      },
+      { content: 'Held emails.' },
+      { content: 'Sent edited email 1.' },
+      { content: 'Sent edited email 2.' },
+    ])
+
+    const gw = createApp({ db, llm, dataDir, connectorDriver: driver })
+    await gw.app.request(`http://127.0.0.1:4747/api/threads/${threadId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Send emails and archive msg_keep' }),
+    })
+
+    await vi.waitFor(() => {
+      expect(listMessages(db, threadId).filter((m) => m.kind === 'approval_request')).toHaveLength(3)
+    })
+
+    const [chip1, chip2, archiveChip] = listMessages(db, threadId).filter((m) => m.kind === 'approval_request')
+    const id1 = (chip1!.payload as { approvalId: number }).approvalId
+    const id2 = (chip2!.payload as { approvalId: number }).approvalId
+    const archiveId = (archiveChip!.payload as { approvalId: number }).approvalId
+
+    // Pending mail_send chips emit editable; mail_archive omits editable
+    expect((chip1!.payload as { editable?: unknown }).editable).toEqual({
+      kind: 'connector',
+      tool: 'mail_send',
+      accountLabel: 'alice@gmail.com',
+      to: ['bob@acme.com'],
+      cc: ['old@acme.com'],
+      bcc: [],
+      subject: 'Draft Subject',
+      body: 'Original body text',
+    })
+    expect((archiveChip!.payload as { editable?: unknown }).editable).toBeUndefined()
+
+    // Invalid edits return 400 (code: 'invalid_edit') and keep approval pending
+    const badHeader = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${id1}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: {
+          kind: 'connector',
+          tool: 'mail_send',
+          to: ['carol@acme.com'],
+          subject: 'Injected\r\nBcc: evil@attacker.test',
+          body: 'Updated body',
+        },
+      }),
+    })
+    expect(badHeader.status).toBe(400)
+    expect(await badHeader.json()).toMatchObject({ code: 'invalid_edit' })
+    expect(getApproval(db, id1)!.status).toBe('pending')
+
+    const editOnDiscard = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${id1}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'discard',
+        edit: {
+          kind: 'connector',
+          tool: 'mail_send',
+          to: ['carol@acme.com'],
+          subject: 'Valid Subject',
+          body: 'Valid body',
+        },
+      }),
+    })
+    expect(editOnDiscard.status).toBe(400)
+    expect(await editOnDiscard.json()).toMatchObject({ code: 'invalid_edit' })
+    expect(getApproval(db, id1)!.status).toBe('pending')
+
+    const editArchive = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${archiveId}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: { kind: 'connector', tool: 'mail_archive' },
+      }),
+    })
+    expect(editArchive.status).toBe(400)
+    expect(await editArchive.json()).toMatchObject({ code: 'invalid_edit' })
+    expect(getApproval(db, archiveId)!.status).toBe('pending')
+    expect(executedWrites).toHaveLength(0)
+
+    // Valid inline edit on #1 executes updated to/cc/subject/body and marks edited: true
+    const okEdit1 = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${id1}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: {
+          kind: 'connector',
+          tool: 'mail_send',
+          to: ['carol@acme.com'],
+          cc: [],
+          bcc: ['audit@acme.com'],
+          subject: 'Final Subject',
+          body: 'Final edited body',
+        },
+      }),
+    })
+    expect(okEdit1.status).toBe(202)
+    expect(executedWrites).toHaveLength(1)
+    expect(executedWrites[0]!.args).toEqual({
+      to: ['carol@acme.com'],
+      bcc: ['audit@acme.com'],
+      subject: 'Final Subject',
+      body: 'Final edited body',
+    })
+
+    const updatedChip1 = listMessages(db, threadId).find((m) => m.id === chip1!.id)!
+    expect(updatedChip1.payload).toMatchObject({
+      status: 'approved',
+      edited: true,
+      action: 'Send email via alice@gmail.com to carol@acme.com',
+      target: 'carol@acme.com, audit@acme.com',
+      executionStatus: 'succeeded',
+    })
+    expect(String((updatedChip1.payload as { detail?: string }).detail)).toContain('Final Subject')
+    expect(String((updatedChip1.payload as { detail?: string }).detail)).toContain('Final edited body')
+
+    const resolved1 = listMessages(db, threadId).find(
+      (m) => m.kind === 'approval_resolved' && (m.payload as { approvalId?: number }).approvalId === id1,
+    )!
+    expect(resolved1.payload).toMatchObject({ approvalId: id1, decision: 'approve', edited: true })
+
+    const action1 = listActions(db, 'inbox-keeper', 20).find(
+      (a) => a.tool === 'approval' && a.summary.includes('carol@acme.com'),
+    )
+    expect(action1?.summary).toContain('(edited by you)')
+
+    await vi.waitFor(() => {
+      expect(listMessages(db, threadId).some((m) => m.content === 'Sent edited email 1.')).toBe(true)
+    })
+    const wakeup1 = llm.seenMessages.find((msgs) =>
+      msgs.some((m) => m.role === 'user' && String(m.content).includes('(edited by your operator)')),
+    )
+    expect(wakeup1).toBeDefined()
+
+    // Duplicate click on already-decided edited approval returns 409 idempotently (even with edit payload)
+    const dupRes = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${id1}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: { kind: 'connector', tool: 'mail_send', to: [], subject: '', body: '' },
+      }),
+    })
+    expect(dupRes.status).toBe(409)
+
+    // #2: Editing single recipient -> multiple recipients with remember: '1h' returns 400 and stays pending
+    const multiRemember = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${id2}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        remember: '1h',
+        edit: {
+          kind: 'connector',
+          tool: 'mail_send',
+          to: ['bob@acme.com', 'carol@acme.com'],
+          subject: 'Rule Test',
+          body: 'Multi recipient',
+        },
+      }),
+    })
+    expect(multiRemember.status).toBe(400)
+    expect(String((await multiRemember.json() as { error?: string }).error)).toContain('more than one destination')
+    expect(getApproval(db, id2)!.status).toBe('pending')
+    expect(listActiveRules(db, 'inbox-keeper', Date.now())).toHaveLength(0)
+
+    // #2: Editing single recipient bob@acme.com -> single recipient dave@acme.com with remember: '1h' saves rule for dave@acme.com!
+    const singleRemember = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${id2}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        remember: '1h',
+        edit: {
+          kind: 'connector',
+          tool: 'mail_send',
+          to: ['dave@acme.com'],
+          subject: 'Rule Test Edited',
+          body: 'Sent to Dave instead',
+        },
+      }),
+    })
+    expect(singleRemember.status).toBe(202)
+    expect(executedWrites).toHaveLength(2)
+    expect(executedWrites[1]!.args).toMatchObject({ to: ['dave@acme.com'], subject: 'Rule Test Edited' })
+    const rules = listActiveRules(db, 'inbox-keeper', Date.now())
+    expect(rules).toHaveLength(1)
+    expect(rules[0]).toMatchObject({ kind: 'email', target: 'dave@acme.com' })
+  })
+
+  it('verifies TOCTOU before updating draftId on edit, clears Outlook ccRecipients/bccRecipients on PATCH, and blocks send on TOCTOU mismatch or draft update error', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'osb-conn-edit-draft-'))
+    const db = openDb(':memory:')
+    upsertBot(db, { id: 'inbox-keeper', name: 'Sorter', role: 'inbox', emoji: '📥', soul_path: '' })
+    const threadId = ensureDmThread(db, 'inbox-keeper')
+
+    const outlook = activateConnectorAccount(
+      db,
+      createConnectorAccount(db, { app: 'outlook', remoteId: 'rem_o1' }).id,
+      { remoteId: 'rem_o1', accountLabel: 'alice@outlook.com' },
+    )!
+    setBotConnectors(db, 'inbox-keeper', [outlook.id])
+
+    const proxyCalls: Array<{ endpoint: string; method: string; body?: unknown }> = []
+    let remoteDraft = {
+      id: 'odraft_1',
+      toRecipients: [{ emailAddress: { address: 'bob@acme.com' } }],
+      ccRecipients: [{ emailAddress: { address: 'oldcc@acme.com' } }],
+      bccRecipients: [{ emailAddress: { address: 'oldbcc@acme.com' } }],
+      subject: 'Initial Draft Subject',
+      body: { contentType: 'Text', content: 'Initial draft body' },
+    }
+    let failPatchWith401 = false
+
+    const realOutlookDriver = createComposioDriver({
+      getApiKey: () => 'test-composio-key',
+      fetchImpl: async (_input, init) => {
+        const req = JSON.parse(String(init?.body ?? '{}')) as {
+          endpoint: string
+          method: string
+          body?: Record<string, unknown>
+        }
+        proxyCalls.push({ endpoint: req.endpoint, method: req.method, body: req.body })
+
+        if (req.endpoint === '/v1.0/me/messages' && req.method === 'POST') {
+          return Response.json({ status: 201, data: { id: 'odraft_new' } })
+        }
+        if (req.endpoint === '/v1.0/me/messages/odraft_1' && req.method === 'GET') {
+          return Response.json({ status: 200, data: remoteDraft })
+        }
+        if (req.endpoint === '/v1.0/me/messages/odraft_1' && req.method === 'PATCH') {
+          if (failPatchWith401) {
+            return Response.json({ status: 401, data: { error: { message: 'Token expired on PATCH' } } })
+          }
+          return Response.json({ status: 200, data: { id: 'odraft_1' } })
+        }
+        if (req.endpoint === '/v1.0/me/messages/odraft_1/send' && req.method === 'POST') {
+          return Response.json({ status: 202, data: {} })
+        }
+        return Response.json({ status: 404, data: { error: 'unexpected endpoint' } })
+      },
+    })
+
+    // Sanity check: creating a NEW Outlook draft (!existingId) with empty cc/bcc preserves omitting ccRecipients/bccRecipients
+    await realOutlookDriver.createOrUpdateDraft(outlook, {
+      to: ['bob@acme.com'],
+      cc: [],
+      bcc: [],
+      subject: 'Brand New',
+      body: 'Body',
+    })
+    const createCall = proxyCalls.find((c) => c.endpoint === '/v1.0/me/messages' && c.method === 'POST')!
+    expect(createCall.body).not.toHaveProperty('ccRecipients')
+    expect(createCall.body).not.toHaveProperty('bccRecipients')
+    proxyCalls.length = 0
+
+    // Hold 3 draft sends: #1 succeeds with cleared CC/BCC, #2 hits TOCTOU mismatch, #3 hits PATCH auth_expired
+    const llm = scriptedLlm([
+      {
+        toolCalls: [
+          { id: 'd1', name: 'mail_send', args: { draftId: 'odraft_1' } },
+          { id: 'd2', name: 'mail_send', args: { draftId: 'odraft_1' } },
+          { id: 'd3', name: 'mail_send', args: { draftId: 'odraft_1' } },
+        ],
+      },
+      { content: 'Held 3 drafts.' },
+      { content: 'Sent edited draft 1.' },
+    ])
+
+    const gw = createApp({ db, llm, dataDir, connectorDriver: realOutlookDriver })
+    await gw.app.request(`http://127.0.0.1:4747/api/threads/${threadId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Send odraft_1' }),
+    })
+
+    await vi.waitFor(() => {
+      expect(listMessages(db, threadId).filter((m) => m.kind === 'approval_request')).toHaveLength(3)
+    })
+
+    const [chip1, chip2, chip3] = listMessages(db, threadId).filter((m) => m.kind === 'approval_request')
+    const id1 = (chip1!.payload as { approvalId: number }).approvalId
+    const id2 = (chip2!.payload as { approvalId: number }).approvalId
+    const id3 = (chip3!.payload as { approvalId: number }).approvalId
+
+    expect((chip1!.payload as { editable?: unknown }).editable).toEqual({
+      kind: 'connector',
+      tool: 'mail_send',
+      accountLabel: 'alice@outlook.com',
+      draftId: 'odraft_1',
+      to: ['bob@acme.com'],
+      cc: ['oldcc@acme.com'],
+      bcc: ['oldbcc@acme.com'],
+      subject: 'Initial Draft Subject',
+      body: 'Initial draft body',
+    })
+
+    // 1. Edit draft #1 clearing cc & bcc: GET (TOCTOU against original) -> PATCH (ccRecipients: [], bccRecipients: []) -> POST /send
+    proxyCalls.length = 0
+    const res1 = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${id1}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: {
+          kind: 'connector',
+          tool: 'mail_send',
+          to: ['carol@acme.com'],
+          cc: [],
+          bcc: [],
+          subject: 'Edited Draft Subject',
+          body: 'Edited draft body',
+        },
+      }),
+    })
+    expect(res1.status).toBe(202)
+    expect(proxyCalls.map((c) => `${c.method} ${c.endpoint}`)).toEqual([
+      'GET /v1.0/me/messages/odraft_1',
+      'PATCH /v1.0/me/messages/odraft_1',
+      'POST /v1.0/me/messages/odraft_1/send',
+    ])
+    expect(proxyCalls[1]!.body).toEqual({
+      subject: 'Edited Draft Subject',
+      body: { contentType: 'Text', content: 'Edited draft body' },
+      toRecipients: [{ emailAddress: { address: 'carol@acme.com' } }],
+      ccRecipients: [],
+      bccRecipients: [],
+    })
+    expect(getApproval(db, id1)!.execution_status).toBe('succeeded')
+
+    // 2. External modification before editing draft #2 -> TOCTOU mismatch blocks BOTH PATCH and /send!
+    proxyCalls.length = 0
+    const savedRemote = remoteDraft
+    remoteDraft = {
+      ...remoteDraft,
+      body: { contentType: 'Text', content: 'Externally tampered body!' },
+    }
+    const res2 = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${id2}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: {
+          kind: 'connector',
+          tool: 'mail_send',
+          to: ['bob@acme.com'],
+          cc: [],
+          bcc: [],
+          subject: 'Operator Edit',
+          body: 'Operator body',
+        },
+      }),
+    })
+    expect(res2.status).toBe(202)
+    expect(proxyCalls.map((c) => `${c.method} ${c.endpoint}`)).toEqual(['GET /v1.0/me/messages/odraft_1'])
+    expect(getApproval(db, id2)!.execution_status).toBe('failed')
+
+    // 3. PATCH fails with auth_expired on draft #3 -> marks expired and does NOT call /send!
+    remoteDraft = savedRemote
+    failPatchWith401 = true
+    proxyCalls.length = 0
+    const res3 = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${id3}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: {
+          kind: 'connector',
+          tool: 'mail_send',
+          to: ['bob@acme.com'],
+          cc: [],
+          bcc: [],
+          subject: 'Will Fail Patch',
+          body: 'Should not send',
+        },
+      }),
+    })
+    expect(res3.status).toBe(202)
+    expect(proxyCalls.map((c) => `${c.method} ${c.endpoint}`)).toEqual([
+      'GET /v1.0/me/messages/odraft_1',
+      'PATCH /v1.0/me/messages/odraft_1',
+    ])
+    expect(getApproval(db, id3)!.execution_status).toBe('failed')
+    expect(getConnectorAccount(db, outlook.id)!.status).toBe('expired')
+  })
+
+  it('supports editing mail_reply (including replyAll toggle), slack_send_message, notion_create_page, and calendar_create_event', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'osb-conn-edit-all-'))
+    const db = openDb(':memory:')
+    upsertBot(db, { id: 'inbox-keeper', name: 'Sorter', role: 'inbox', emoji: '📥', soul_path: '' })
+    const threadId = ensureDmThread(db, 'inbox-keeper')
+
+    const mail = activateConnectorAccount(
+      db,
+      createConnectorAccount(db, { app: 'gmail', remoteId: 'rem_m' }).id,
+      { remoteId: 'rem_m', accountLabel: 'alice@gmail.com' },
+    )!
+    const slack = activateConnectorAccount(
+      db,
+      createConnectorAccount(db, { app: 'slack', remoteId: 'rem_s' }).id,
+      { remoteId: 'rem_s', accountLabel: 'Acme Slack' },
+    )!
+    const notion = activateConnectorAccount(
+      db,
+      createConnectorAccount(db, { app: 'notion', remoteId: 'rem_n' }).id,
+      { remoteId: 'rem_n', accountLabel: 'Acme Wiki' },
+    )!
+    const cal = activateConnectorAccount(
+      db,
+      createConnectorAccount(db, { app: 'google_calendar', remoteId: 'rem_c' }).id,
+      { remoteId: 'rem_c', accountLabel: 'alice@gmail.com' },
+    )!
+    setBotConnectors(db, 'inbox-keeper', [mail.id, slack.id, notion.id, cal.id])
+
+    const executed: FrozenExecution[] = []
+    const driver = makeStubDriver({
+      readMail: async (_acc, sel) => {
+        if (sel.messageId === 'msg_reply_1') {
+          return {
+            messages: [
+              {
+                id: 'msg_reply_1',
+                threadId: 'th_reply_1',
+                from: 'Carol <carol@other.com>',
+                to: ['alice@gmail.com', 'dave@other.com'],
+                cc: ['erin@other.com'],
+                subject: 'Launch Plan',
+                date: 'now',
+                body: 'Ready to ship?',
+                automated: false,
+                attachments: [],
+              },
+            ],
+          }
+        }
+        return { messages: [] }
+      },
+      executeWrite: async (frozen) => {
+        executed.push(frozen)
+        return { status: 'succeeded', summary: `Executed ${frozen.tool}` }
+      },
+    })
+
+    const llm = scriptedLlm([
+      {
+        toolCalls: [
+          { id: 'r1', name: 'mail_reply', args: { messageId: 'msg_reply_1', body: 'Initial reply' } },
+          { id: 's1', name: 'slack_send_message', args: { channelId: 'C111', threadTs: '1700.1', text: 'Draft msg' } },
+          { id: 'n1', name: 'notion_create_page', args: { parentPageId: 'p_parent', title: 'Old Title', markdown: '# Old' } },
+          {
+            id: 'c1',
+            name: 'calendar_create_event',
+            args: { title: 'Old Sync', start: '2026-11-21T10:00:00Z', end: '2026-11-21T10:30:00Z' },
+          },
+        ],
+      },
+      { content: 'Held all 4.' },
+      { content: 'Done 1.' },
+      { content: 'Done 2.' },
+      { content: 'Done 3.' },
+      { content: 'Done 4.' },
+    ])
+
+    const gw = createApp({ db, llm, dataDir, connectorDriver: driver })
+    await gw.app.request(`http://127.0.0.1:4747/api/threads/${threadId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Prepare reply, Slack post, Notion page, and calendar invite' }),
+    })
+
+    await vi.waitFor(() => {
+      expect(listMessages(db, threadId).filter((m) => m.kind === 'approval_request')).toHaveLength(4)
+    })
+
+    const [replyChip, slackChip, notionChip, calChip] = listMessages(db, threadId).filter(
+      (m) => m.kind === 'approval_request',
+    )
+
+    // mail_reply carries allCc even when replyAll was initially false
+    expect((replyChip!.payload as { editable?: unknown }).editable).toEqual({
+      kind: 'connector',
+      tool: 'mail_reply',
+      accountLabel: 'alice@gmail.com',
+      to: ['Carol <carol@other.com>'],
+      replyAllCc: ['dave@other.com', 'erin@other.com'],
+      subject: 'Re: Launch Plan',
+      body: 'Initial reply',
+      replyAll: false,
+    })
+
+    const replyId = (replyChip!.payload as { approvalId: number }).approvalId
+    const slackId = (slackChip!.payload as { approvalId: number }).approvalId
+    const notionId = (notionChip!.payload as { approvalId: number }).approvalId
+    const calId = (calChip!.payload as { approvalId: number }).approvalId
+
+    // 1. Toggle replyAll: true on mail_reply
+    const replyRes = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${replyId}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: { kind: 'connector', tool: 'mail_reply', body: 'Updated reply to all', replyAll: true },
+      }),
+    })
+    expect(replyRes.status).toBe(202)
+    expect(executed[0]!.args).toEqual({
+      messageId: 'msg_reply_1',
+      body: 'Updated reply to all',
+      replyAll: true,
+    })
+    expect(getApproval(db, replyId)!.target).toContain('dave@other.com')
+    expect(getApproval(db, replyId)!.target).toContain('erin@other.com')
+    const updatedReplyChip = listMessages(db, threadId).find((m) => m.id === replyChip!.id)!
+    expect(updatedReplyChip.payload).toMatchObject({ edited: true, status: 'approved' })
+    expect(String((updatedReplyChip.payload as { detail?: string }).detail)).toContain('Cc: dave@other.com, erin@other.com')
+
+    // 2. Edit slack_send_message (preserving threadTs)
+    const slackRes = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${slackId}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: { kind: 'connector', tool: 'slack_send_message', channelId: 'C222', text: 'Final Slack message' },
+      }),
+    })
+    expect(slackRes.status).toBe(202)
+    expect(executed[1]!.args).toEqual({ channelId: 'C222', text: 'Final Slack message', threadTs: '1700.1' })
+
+    // 3. Edit notion_create_page (preserving parentPageId)
+    const notionRes = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${notionId}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: { kind: 'connector', tool: 'notion_create_page', title: 'Final Title', markdown: '# Final Notes' },
+      }),
+    })
+    expect(notionRes.status).toBe(202)
+    expect(executed[2]!.args).toEqual({ parentPageId: 'p_parent', title: 'Final Title', markdown: '# Final Notes' })
+
+    // 4. Edit calendar_create_event
+    const calRes = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${calId}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: {
+          kind: 'connector',
+          tool: 'calendar_create_event',
+          title: 'Final Sync',
+          start: '2026-11-21T14:00:00Z',
+          end: '2026-11-21T15:00:00Z',
+          location: 'Room B',
+          attendees: ['bob@acme.com'],
+          description: 'Updated agenda',
+        },
+      }),
+    })
+    expect(calRes.status).toBe(202)
+    expect(executed[3]!.args).toEqual({
+      title: 'Final Sync',
+      start: '2026-11-21T14:00:00Z',
+      end: '2026-11-21T15:00:00Z',
+      location: 'Room B',
+      attendees: ['bob@acme.com'],
+      description: 'Updated agenda',
+    })
   })
 })
