@@ -577,7 +577,7 @@ export function buildConnectorEditable(frozen: FrozenExecution): ApprovalEditabl
         title,
         start,
         end,
-        location: typeof args.location === 'string' ? args.location : '',
+        location: typeof args.location === 'string' ? args.location.trim() : '',
         attendees: cleanStringArray(args.attendees),
         description,
       }
@@ -630,13 +630,28 @@ export function buildConnectorEditable(frozen: FrozenExecution): ApprovalEditabl
 export function buildMcpEditable(
   frozen: FrozenMcpExecution,
   inputSchema?: Record<string, unknown>,
-): EditableMcp {
-  const args = cloneJsonObjectSafe(frozen.args)
+): EditableMcp | undefined {
+  if (!isPlainObject(frozen.args)) return undefined
+  let args: Record<string, unknown>
+  try {
+    const serializedArgs = JSON.stringify(frozen.args)
+    if (typeof serializedArgs !== 'string' || Buffer.byteLength(serializedArgs, 'utf8') > MAX_MCP_ARGS_BYTES) {
+      return undefined
+    }
+    const parsedArgs = JSON.parse(serializedArgs) as unknown
+    if (!isPlainObject(parsedArgs) || validateMcpJsonValue(parsedArgs, 0, new Set()) !== null) {
+      return undefined
+    }
+    args = parsedArgs
+  } catch {
+    return undefined
+  }
+
   let safeSchema: Record<string, unknown> | undefined
   if (inputSchema && isPlainObject(inputSchema)) {
     try {
       const serialized = JSON.stringify(inputSchema)
-      if (typeof serialized === 'string' && serialized.length <= MAX_EDITABLE_SCHEMA_BYTES) {
+      if (typeof serialized === 'string' && Buffer.byteLength(serialized, 'utf8') <= MAX_EDITABLE_SCHEMA_BYTES) {
         const parsed = JSON.parse(serialized) as unknown
         if (isPlainObject(parsed)) safeSchema = parsed
       }
@@ -653,10 +668,14 @@ export function buildMcpEditable(
   }
 }
 
-export function buildPromptEditable(action: string, detail: string): EditablePrompt {
+export function buildPromptEditable(action: string, detail: string): EditablePrompt | undefined {
+  const trimmedAction = action.trim()
+  if (!trimmedAction || trimmedAction.length > MAX_EDIT_ACTION_CHARS || detail.length > MAX_EDIT_TEXT_CHARS) {
+    return undefined
+  }
   return {
     kind: 'prompt',
-    action,
+    action: trimmedAction,
     detail,
   }
 }
@@ -677,13 +696,15 @@ function applyPromptEdit(approval: ApprovalRow, raw: Record<string, unknown>): A
   const action = actionRes.value
   const detail = detailRes.value
   const changed = action !== approval.action || detail !== approval.detail
+  const finalAction = changed ? action : approval.action
+  const finalDetail = changed ? detail : approval.detail
   return {
     ok: true,
     applied: {
-      action,
-      detail,
+      action: finalAction,
+      detail: finalDetail,
       target: approval.target,
-      editable: buildPromptEditable(action, detail),
+      editable: { kind: 'prompt', action: finalAction, detail: finalDetail },
       changed,
     },
   }
@@ -719,14 +740,31 @@ function applyMcpEdit(
   const prevArgs = isPlainObject(frozen.args) ? frozen.args : {}
   const changed = !deepJsonEqual(prevArgs, nextArgs)
 
+  if (!changed) {
+    return {
+      ok: true,
+      applied: {
+        action: approval.action,
+        detail: approval.detail,
+        target: approval.target,
+        executionJson: approval.execution_json ?? JSON.stringify({ ...frozen, args: prevArgs }),
+        editable: {
+          kind: 'mcp',
+          serverName: frozen.serverName,
+          toolName: frozen.toolName,
+          args: cloneJsonObjectSafe(prevArgs),
+        },
+        changed: false,
+      },
+    }
+  }
+
   const action =
     frozen.serverName && frozen.toolName ? `${frozen.serverName} · ${frozen.toolName}` : approval.action
   const detail = formatMcpWriteApprovalDetail(nextArgs)
   const target =
     frozen.serverSlug && frozen.toolName ? `mcp:${frozen.serverSlug}/${frozen.toolName}` : approval.target
-  const nextExecutionJson = changed
-    ? JSON.stringify({ ...frozen, args: nextArgs })
-    : (approval.execution_json ?? JSON.stringify({ ...frozen, args: nextArgs }))
+  const nextExecutionJson = JSON.stringify({ ...frozen, args: nextArgs })
 
   return {
     ok: true,
@@ -741,7 +779,7 @@ function applyMcpEdit(
         toolName: frozen.toolName,
         args: cloneJsonObjectSafe(nextArgs),
       },
-      changed,
+      changed: true,
     },
   }
 }
@@ -813,7 +851,7 @@ function applyConnectorEdit(
           !sameStringArray(draftToctouSnapshot.to, to) ||
           !sameStringArray(draftToctouSnapshot.cc, cc) ||
           !sameStringArray(draftToctouSnapshot.bcc, bcc) ||
-          draftToctouSnapshot.subject !== subject ||
+          draftToctouSnapshot.subject.trim() !== subject ||
           draftToctouSnapshot.body !== body
 
         const headerLines = [
@@ -844,9 +882,9 @@ function applyConnectorEdit(
         return {
           ok: true,
           applied: {
-            action,
-            detail,
-            target,
+            action: changed ? action : approval.action,
+            detail: changed ? detail : approval.detail,
+            target: changed ? target : approval.target,
             executionJson,
             editable: {
               kind: 'connector',
@@ -856,7 +894,7 @@ function applyConnectorEdit(
               to: [...to],
               cc: [...cc],
               bcc: [...bcc],
-              subject,
+              subject: changed ? subject : draftToctouSnapshot.subject,
               body,
             },
             changed,
@@ -869,7 +907,7 @@ function applyConnectorEdit(
       const prevTo = cleanStringArray(frozen.args.to)
       const prevCc = cleanStringArray(frozen.args.cc)
       const prevBcc = cleanStringArray(frozen.args.bcc)
-      const prevSubject = typeof frozen.args.subject === 'string' ? frozen.args.subject : ''
+      const prevSubject = typeof frozen.args.subject === 'string' ? frozen.args.subject.trim() : ''
       const prevBody = typeof frozen.args.body === 'string' ? frozen.args.body : ''
       const changed =
         !sameStringArray(prevTo, to) ||
@@ -901,9 +939,9 @@ function applyConnectorEdit(
       return {
         ok: true,
         applied: {
-          action,
-          detail,
-          target,
+          action: changed ? action : approval.action,
+          detail: changed ? detail : approval.detail,
+          target: changed ? target : approval.target,
           executionJson,
           editable: {
             kind: 'connector',
@@ -965,7 +1003,7 @@ function applyConnectorEdit(
           ok: true,
           applied: {
             action: approval.action,
-            detail,
+            detail: changed ? detail : approval.detail,
             target: approval.target,
             executionJson,
             editable: {
@@ -1001,9 +1039,9 @@ function applyConnectorEdit(
       return {
         ok: true,
         applied: {
-          action,
-          detail,
-          target,
+          action: changed ? action : approval.action,
+          detail: changed ? detail : approval.detail,
+          target: changed ? target : approval.target,
           executionJson,
           editable: {
             kind: 'connector',
@@ -1049,9 +1087,9 @@ function applyConnectorEdit(
       return {
         ok: true,
         applied: {
-          action,
-          detail,
-          target,
+          action: changed ? action : approval.action,
+          detail: changed ? detail : approval.detail,
+          target: changed ? target : approval.target,
           executionJson,
           editable: {
             kind: 'connector',
@@ -1100,9 +1138,9 @@ function applyConnectorEdit(
       return {
         ok: true,
         applied: {
-          action,
-          detail,
-          target,
+          action: changed ? action : approval.action,
+          detail: changed ? detail : approval.detail,
+          target: changed ? target : approval.target,
           executionJson,
           editable: {
             kind: 'connector',
@@ -1144,9 +1182,9 @@ function applyConnectorEdit(
       return {
         ok: true,
         applied: {
-          action,
-          detail,
-          target,
+          action: changed ? action : approval.action,
+          detail: changed ? detail : approval.detail,
+          target: changed ? target : approval.target,
           executionJson,
           editable: {
             kind: 'connector',
@@ -1251,9 +1289,9 @@ function applyConnectorEdit(
       return {
         ok: true,
         applied: {
-          action,
-          detail,
-          target,
+          action: changed ? action : approval.action,
+          detail: changed ? detail : approval.detail,
+          target: changed ? target : approval.target,
           executionJson,
           editable: {
             kind: 'connector',
@@ -1393,9 +1431,9 @@ function applyConnectorEdit(
       return {
         ok: true,
         applied: {
-          action,
-          detail,
-          target,
+          action: changed ? action : approval.action,
+          detail: changed ? detail : approval.detail,
+          target: changed ? target : approval.target,
           executionJson,
           editable,
           changed,

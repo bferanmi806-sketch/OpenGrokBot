@@ -224,7 +224,12 @@ describe('projection builders', () => {
             app: 'google_calendar',
             accountLabel: 'me@acme.com',
             tool: 'calendar_create_event',
-            args: { title: 'Sync', start: '2026-11-22T10:00:00Z', end: '2026-11-22T10:30:00Z' },
+            args: {
+              title: 'Sync',
+              start: '2026-11-22T10:00:00Z',
+              end: '2026-11-22T10:30:00Z',
+              location: '  Room B  ',
+            },
           }),
         ),
       ).toEqual({
@@ -234,7 +239,7 @@ describe('projection builders', () => {
         title: 'Sync',
         start: '2026-11-22T10:00:00Z',
         end: '2026-11-22T10:30:00Z',
-        location: '',
+        location: 'Room B',
         attendees: [],
         description: '',
       })
@@ -296,31 +301,63 @@ describe('projection builders', () => {
         args: { nested: { a: 1 }, tags: ['p1'] },
         inputSchema: schema,
       })
-      ;(editable.args.nested as { a: number }).a = 999
+      ;(editable!.args.nested as { a: number }).a = 999
       expect((frozen.args.nested as { a: number }).a).toBe(1)
     })
 
-    it('omits inputSchema when serialized length exceeds 32,768 bytes and keeps it at the exact limit', () => {
+    it('enforces UTF-8 byte boundary (32,768 bytes) on inputSchema including multi-byte CJK', () => {
       const frozen = makeFrozenMcp()
       const wrapper = JSON.stringify({ type: 'object', description: '' })
       const exactPad = MAX_EDITABLE_SCHEMA_BYTES - wrapper.length
       const exactSchema = { type: 'object', description: 'x'.repeat(exactPad) }
-      expect(JSON.stringify(exactSchema).length).toBe(MAX_EDITABLE_SCHEMA_BYTES)
-      expect(buildMcpEditable(frozen, exactSchema).inputSchema).toEqual(exactSchema)
+      expect(Buffer.byteLength(JSON.stringify(exactSchema), 'utf8')).toBe(MAX_EDITABLE_SCHEMA_BYTES)
+      expect(buildMcpEditable(frozen, exactSchema)?.inputSchema).toEqual(exactSchema)
 
       const oversizedSchema = { type: 'object', description: 'x'.repeat(exactPad + 1) }
-      expect(JSON.stringify(oversizedSchema).length).toBe(MAX_EDITABLE_SCHEMA_BYTES + 1)
-      expect(buildMcpEditable(frozen, oversizedSchema).inputSchema).toBeUndefined()
+      expect(Buffer.byteLength(JSON.stringify(oversizedSchema), 'utf8')).toBe(MAX_EDITABLE_SCHEMA_BYTES + 1)
+      expect(buildMcpEditable(frozen, oversizedSchema)?.inputSchema).toBeUndefined()
+
+      // Multi-byte CJK: 3 UTF-8 bytes per char; character length < 32,768 but UTF-8 bytes > 32,768
+      const cjkCountFit = Math.floor((MAX_EDITABLE_SCHEMA_BYTES - wrapper.length) / 3)
+      const cjkFitSchema = { type: 'object', description: '汉'.repeat(cjkCountFit) }
+      expect(Buffer.byteLength(JSON.stringify(cjkFitSchema), 'utf8')).toBeLessThanOrEqual(MAX_EDITABLE_SCHEMA_BYTES)
+      expect(buildMcpEditable(frozen, cjkFitSchema)?.inputSchema).toEqual(cjkFitSchema)
+
+      const cjkOverSchema = { type: 'object', description: '汉'.repeat(cjkCountFit + 1) }
+      expect(JSON.stringify(cjkOverSchema).length).toBeLessThan(MAX_EDITABLE_SCHEMA_BYTES)
+      expect(Buffer.byteLength(JSON.stringify(cjkOverSchema), 'utf8')).toBeGreaterThan(MAX_EDITABLE_SCHEMA_BYTES)
+      expect(buildMcpEditable(frozen, cjkOverSchema)?.inputSchema).toBeUndefined()
+    })
+
+    it('returns undefined when frozen.args is oversized (ASCII or CJK UTF-8) or invalid', () => {
+      const asciiOver = makeFrozenMcp({ args: { blob: 'x'.repeat(MAX_MCP_ARGS_BYTES) } })
+      expect(buildMcpEditable(asciiOver)).toBeUndefined()
+
+      // Multi-byte CJK: 3 bytes/char -> ~43,000 chars (< 128,000 chars) exceeds 128,000 UTF-8 bytes
+      const cjkCountOver = Math.floor(MAX_MCP_ARGS_BYTES / 3) + 10
+      const cjkOverArgs = { text: '中'.repeat(cjkCountOver) }
+      expect(JSON.stringify(cjkOverArgs).length).toBeLessThan(MAX_MCP_ARGS_BYTES)
+      expect(Buffer.byteLength(JSON.stringify(cjkOverArgs), 'utf8')).toBeGreaterThan(MAX_MCP_ARGS_BYTES)
+      expect(buildMcpEditable(makeFrozenMcp({ args: cjkOverArgs }))).toBeUndefined()
+
+      // Circular / non-plain args
+      const circular: Record<string, unknown> = {}
+      circular.self = circular
+      expect(buildMcpEditable(makeFrozenMcp({ args: circular }))).toBeUndefined()
+      expect(buildMcpEditable(makeFrozenMcp({ args: null as unknown as Record<string, unknown> }))).toBeUndefined()
     })
   })
 
   describe('buildPromptEditable', () => {
-    it('returns prompt editable shape', () => {
+    it('returns prompt editable shape when within bounds and undefined when empty or oversized', () => {
       expect(buildPromptEditable('Post tweet', 'Hello world')).toEqual({
         kind: 'prompt',
         action: 'Post tweet',
         detail: 'Hello world',
       })
+      expect(buildPromptEditable('   ', 'Hello world')).toBeUndefined()
+      expect(buildPromptEditable('a'.repeat(MAX_EDIT_ACTION_CHARS + 1), 'Hello')).toBeUndefined()
+      expect(buildPromptEditable('Post tweet', 'd'.repeat(MAX_EDIT_TEXT_CHARS + 1))).toBeUndefined()
     })
   })
 })
@@ -380,6 +417,34 @@ describe('applyApprovalEdit — connector tools', () => {
       to: ['alice@acme.com'],
       cc: ['bob@acme.com'],
       bcc: ['audit@acme.com'],
+      subject: 'Updated subject',
+      body: 'Updated body',
+    })
+
+    // Omitting cc/bcc clears prior cc/bcc to []
+    const rowWithCcBcc = makeApprovalRow({
+      action: edited.applied.action,
+      detail: edited.applied.detail,
+      target: edited.applied.target,
+      execution_json: edited.applied.executionJson!,
+    })
+    const cleared = applyApprovalEdit(rowWithCcBcc, {
+      kind: 'connector',
+      tool: 'mail_send',
+      to: ['alice@acme.com'],
+      subject: 'Updated subject',
+      body: 'Updated body',
+    })
+    expect(cleared.ok).toBe(true)
+    if (!cleared.ok) return
+    expect(cleared.applied.changed).toBe(true)
+    expect(cleared.applied.target).toBe('alice@acme.com')
+    expect(cleared.applied.detail).not.toContain('Cc:')
+    expect(cleared.applied.detail).not.toContain('Bcc:')
+    expect(cleared.applied.editable).toMatchObject({ cc: [], bcc: [] })
+    const clearedFrozen = JSON.parse(cleared.applied.executionJson!) as FrozenExecution
+    expect(clearedFrozen.args).toEqual({
+      to: ['alice@acme.com'],
       subject: 'Updated subject',
       body: 'Updated body',
     })
@@ -477,6 +542,44 @@ describe('applyApprovalEdit — connector tools', () => {
       subject: 'Draft subj (final)',
       body: 'Edited draft body',
     })
+  })
+
+  it('treats draftId mail_send with untrimmed subject as no-op while preserving raw draftToctouSnapshot', () => {
+    const rawSnap: ResolvedDraftSnapshot = {
+      to: ['bob@acme.com'],
+      cc: [],
+      bcc: [],
+      subject: ' Weekly sync ',
+      body: 'See you at 10.',
+    }
+    const frozen = makeFrozenConnector({
+      args: { draftId: 'draft-trim' },
+      resolvedDraftSnapshot: rawSnap,
+    })
+    const origDetail =
+      'Account: Gmail · me@acme.com (conn-1)\nDraft: draft-trim\nTo: bob@acme.com\nSubject:  Weekly sync \n\nSee you at 10.'
+    const row = makeApprovalRow({
+      action: 'Send email via me@acme.com to bob@acme.com',
+      detail: origDetail,
+      target: 'bob@acme.com',
+      execution_json: JSON.stringify(frozen),
+    })
+
+    const res = applyApprovalEdit(row, {
+      kind: 'connector',
+      tool: 'mail_send',
+      to: ['bob@acme.com'],
+      subject: ' Weekly sync ',
+      body: 'See you at 10.',
+    })
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.applied.changed).toBe(false)
+    expect(res.applied.draftUpdate).toBeUndefined()
+    expect(res.applied.draftToctouSnapshot).toEqual(rawSnap)
+    expect(res.applied.action).toBe(row.action)
+    expect(res.applied.detail).toBe(origDetail)
+    expect(res.applied.target).toBe(row.target)
   })
 
   it('rejects editing draftId mail_send when resolvedDraftSnapshot is missing', () => {
@@ -936,7 +1039,7 @@ describe('applyApprovalEdit — MCP & prompt', () => {
       execution_json: JSON.stringify(frozen),
     })
 
-    // No-op with different key order
+    // No-op with different key order preserves detail and editable.args key order verbatim
     const noop = applyApprovalEdit(row, {
       kind: 'mcp',
       args: { nested: { b: [1, 2], a: true }, priority: 2, title: 'Bug' },
@@ -945,7 +1048,12 @@ describe('applyApprovalEdit — MCP & prompt', () => {
     if (noop.ok) {
       expect(noop.applied.changed).toBe(false)
       expect(noop.applied.action).toBe('Linear · create_issue')
+      expect(noop.applied.detail).toBe(origDetail)
       expect(noop.applied.target).toBe('mcp:linear/create_issue')
+      expect(noop.applied.editable.kind).toBe('mcp')
+      if (noop.applied.editable.kind === 'mcp') {
+        expect(Object.keys(noop.applied.editable.args)).toEqual(['title', 'priority', 'nested'])
+      }
     }
 
     // Real edit
@@ -1017,11 +1125,18 @@ describe('applyApprovalEdit — MCP & prompt', () => {
     customProto.x = 1
     expect(applyApprovalEdit(row, { kind: 'mcp', args: customProto }).ok).toBe(false)
 
-    // Oversized args (> 128 KB)
+    // Oversized args (> 128 KB ASCII and multi-byte UTF-8 CJK)
     const bigArgs = { blob: 'x'.repeat(MAX_MCP_ARGS_BYTES) }
     const rBig = applyApprovalEdit(row, { kind: 'mcp', args: bigArgs })
     expect(rBig.ok).toBe(false)
     if (!rBig.ok) expect(rBig.error).toMatch(/128000/)
+
+    const cjkBigArgs = { blob: '中'.repeat(Math.floor(MAX_MCP_ARGS_BYTES / 3) + 10) }
+    expect(JSON.stringify(cjkBigArgs).length).toBeLessThan(MAX_MCP_ARGS_BYTES)
+    expect(Buffer.byteLength(JSON.stringify(cjkBigArgs), 'utf8')).toBeGreaterThan(MAX_MCP_ARGS_BYTES)
+    const rCjkBig = applyApprovalEdit(row, { kind: 'mcp', args: cjkBigArgs })
+    expect(rCjkBig.ok).toBe(false)
+    if (!rCjkBig.ok) expect(rCjkBig.error).toMatch(/128000/)
 
     // Circular reference
     const circular: Record<string, unknown> = {}
