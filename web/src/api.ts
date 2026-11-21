@@ -1,9 +1,9 @@
 import { fileToBase64 } from './attachments'
 import type {
   AboutInfo, AppKey, ApprovalEditInput, AttachmentPayload, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
-  Conversation, CreateMcpServerInput, FieldError, GatewayEvent, ImportMcpServersInput, ImportMcpServersResult, McpServersSnapshot,
-  McpServerView, Message, ProviderPreset, QuietDigestBotSummary, QuietDigestFlushResponse, QuietDigestSummary, ResolveRuleProposalResponse,
-  RoutineAction, RuleDuration, RuleProposalStatus, RuleProposalView, ServerEvent, SettingsView, SetupInfo, UpdateMcpServerPatch,
+  Conversation, CreateMcpServerInput, FieldError, GatewayEvent, ImportMcpServersInput, ImportMcpServersResult, LlmPriority, LlmQueueEndpointView,
+  LlmQueueSnapshot, McpServersSnapshot, McpServerView, Message, ProviderPreset, QuietDigestBotSummary, QuietDigestFlushResponse, QuietDigestSummary,
+  ResolveRuleProposalResponse, RoutineAction, RuleDuration, RuleProposalStatus, RuleProposalView, ServerEvent, SettingsView, SetupInfo, UpdateMcpServerPatch,
   WikiCreateInput, WikiKind, WikiListResponse, WikiPageResponse, WikiSaveInput,
 } from './types'
 
@@ -13,6 +13,9 @@ export type {
   GatewayEvent,
   ImportMcpServersInput,
   ImportMcpServersResult,
+  LlmPriority,
+  LlmQueueEndpointView,
+  LlmQueueSnapshot,
   QuietDigestBotSummary,
   QuietDigestFlushResponse,
   QuietDigestSummary,
@@ -365,6 +368,11 @@ export async function deleteWikiPage(kind: WikiKind, slug: string): Promise<void
 /** 免打扰晨报摘要与待投递数量 */
 export function fetchQuietDigest(): Promise<QuietDigestSummary> {
   return getApiJson<QuietDigestSummary>('/api/quiet-digest')
+}
+
+/** 本地模型优先级队列快照（并发上限、各端点运行中与排队中数量） */
+export function fetchLlmQueue(): Promise<LlmQueueSnapshot> {
+  return getApiJson<LlmQueueSnapshot>('/api/llm-queue')
 }
 
 /** 立即投递免打扰期间暂存的晨报更新（可按同事筛选） */

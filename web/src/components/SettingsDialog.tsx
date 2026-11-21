@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
-  ApiError, FieldErrors, SignedOut, downloadBrowser, fetchAbout, fetchQuietDigest, fetchSettings, fetchSetup, flushQuietDigest, saveSettings,
+  ApiError, FieldErrors, SignedOut, downloadBrowser, fetchAbout, fetchLlmQueue, fetchQuietDigest, fetchSettings, fetchSetup, flushQuietDigest, saveSettings,
 } from '../api'
 import { desktopApi, type DesktopInfo } from '../desktop'
 import { useT, type MessageKey } from '../i18n'
 import { errorText } from '../i18n/describe'
 import type {
-  AboutInfo, BrowserStatus, ConnectionsState, FieldError, ProviderPreset, QuietDigestSummary, SettingsView, SetupInfo, ThemeSetting,
+  AboutInfo, BrowserStatus, ConnectionsState, FieldError, LlmQueueSnapshot, ProviderPreset, QuietDigestSummary, SettingsView, SetupInfo, ThemeSetting,
 } from '../types'
 import { connectionLabel, fieldText, isDefaultConnection } from './ModelsDialog'
 import { BrowserLine, type LanguageSetting } from './SetupWizard'
@@ -17,6 +17,13 @@ import { XIcon } from './Icons'
 type Computers = SettingsView['values']['computers']
 const COMPUTERS: Computers[] = ['auto', 'local', 'docker']
 const THEMES: ThemeSetting[] = ['dark', 'light', 'system']
+const LOCAL_LLM_PRESETS = [1, 2, 4, 8] as const
+
+function localLlmOptions(current: number): number[] {
+  const set = new Set<number>(LOCAL_LLM_PRESETS)
+  if (Number.isInteger(current) && current > 0) set.add(current)
+  return [...[...set].sort((a, b) => a - b), 0]
+}
 
 /** 一块设置：标题 + 内容 */
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -64,6 +71,7 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
   const [quietStart, setQuietStart] = useState('22:00')
   const [quietEnd, setQuietEnd] = useState('08:00')
   const [quietDigest, setQuietDigest] = useState<QuietDigestSummary | null>(null)
+  const [llmQueue, setLlmQueue] = useState<LlmQueueSnapshot | null>(null)
   const [delivering, setDelivering] = useState(false)
   const [deliverMessage, setDeliverMessage] = useState<string | null>(null)
   const [deliverError, setDeliverError] = useState<string | null>(null)
@@ -72,6 +80,7 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
 
   const mountedRef = useRef(true)
   const digestReqSeqRef = useRef(0)
+  const llmQueueReqSeqRef = useRef(0)
   const deliveringRef = useRef(false)
 
   useEffect(() => {
@@ -82,6 +91,7 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
   useEffect(() => {
     let live = true
     const digestSeq = ++digestReqSeqRef.current
+    const queueSeq = ++llmQueueReqSeqRef.current
     const api = desktopApi()
     const desktopPromise: Promise<DesktopInfo | null> = api
       ? Promise.resolve(api.info()).catch(() => null)
@@ -92,8 +102,14 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
         if (err instanceof SignedOut) throw err
         return { ok: false as const, notFound: err instanceof ApiError && err.status === 404 }
       })
-    Promise.all([fetchSettings(), fetchSetup(), fetchAbout(), desktopPromise, digestPromise])
-      .then(([s, su, a, d, qd]) => {
+    const queuePromise: Promise<{ ok: true; value: LlmQueueSnapshot } | { ok: false; notFound: boolean }> = fetchLlmQueue()
+      .then((value) => ({ ok: true as const, value }))
+      .catch((err: unknown) => {
+        if (err instanceof SignedOut) throw err
+        return { ok: false as const, notFound: err instanceof ApiError && err.status === 404 }
+      })
+    Promise.all([fetchSettings(), fetchSetup(), fetchAbout(), desktopPromise, digestPromise, queuePromise])
+      .then(([s, su, a, d, qd, lq]) => {
         if (!live) return
         setSettings(s)
         setMirror(s.values.browserMirror)
@@ -105,6 +121,10 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
         if (digestSeq === digestReqSeqRef.current) {
           if (qd.ok) setQuietDigest(qd.value)
           else if (qd.notFound) setQuietDigest(null)
+        }
+        if (queueSeq === llmQueueReqSeqRef.current) {
+          if (lq.ok) setLlmQueue(lq.value)
+          else if (lq.notFound) setLlmQueue(null)
         }
       })
       .catch((err: unknown) => {
@@ -145,6 +165,20 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
       if (err instanceof SignedOut) onSignedOut()
       else if (mountedRef.current && seq === digestReqSeqRef.current && err instanceof ApiError && err.status === 404) {
         setQuietDigest(null)
+      }
+    }
+  }
+
+  const refreshLlmQueue = async () => {
+    const seq = ++llmQueueReqSeqRef.current
+    try {
+      const lq = await fetchLlmQueue()
+      if (!mountedRef.current || seq !== llmQueueReqSeqRef.current) return
+      setLlmQueue(lq)
+    } catch (err: unknown) {
+      if (err instanceof SignedOut) onSignedOut()
+      else if (mountedRef.current && seq === llmQueueReqSeqRef.current && err instanceof ApiError && err.status === 404) {
+        setLlmQueue(null)
       }
     }
   }
@@ -237,6 +271,9 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
   const savedQuietStart = settings?.values.quietHoursStart ?? '22:00'
   const savedQuietEnd = settings?.values.quietHoursEnd ?? '08:00'
   const quietDirty = quietStart !== savedQuietStart || quietEnd !== savedQuietEnd
+  const localConcurrency = settings?.values.localLlmConcurrency ?? 1
+  const llmQueueActive = llmQueue ? llmQueue.endpoints.reduce((sum, ep) => sum + ep.active, 0) : 0
+  const llmQueueQueued = llmQueue ? llmQueue.endpoints.reduce((sum, ep) => sum + ep.queued, 0) : 0
   const scrimDown = useRef(false)
 
   return (
@@ -270,6 +307,45 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
                 {demo ? <button type="button" className="primary" onClick={onWizard}>{t('settings.connectReal')}</button> : null}
                 {llms ? <button type="button" onClick={onModels}>{t('settings.manageModels')}</button> : null}
                 {demo ? null : <button type="button" onClick={onWizard}>{t('settings.rerunWizard')}</button>}
+              </div>
+              <div className="settings-local-llm">
+                <div className="settings-local-llm-row">
+                  <label className="conn-label" htmlFor="settings-local-llm-concurrency">
+                    {t('settings.localLlm.label')}
+                  </label>
+                  <select
+                    id="settings-local-llm-concurrency"
+                    aria-label={t('settings.localLlm.label')}
+                    value={String(localConcurrency)}
+                    disabled={locked('localLlmConcurrency') || saving}
+                    onChange={(e) => {
+                      const nextConcurrency = Number(e.target.value)
+                      void save({ localLlmConcurrency: nextConcurrency }).then((next) => {
+                        if (next) return refreshLlmQueue()
+                      })
+                    }}
+                  >
+                    {localLlmOptions(localConcurrency).map((count) => (
+                      <option key={count} value={String(count)}>
+                        {count === 1
+                          ? t('settings.localLlm.one')
+                          : count === 0
+                            ? t('settings.localLlm.unlimited')
+                            : t('settings.localLlm.option', { count })}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {llmQueueActive > 0 || llmQueueQueued > 0 ? (
+                  <div className="settings-local-llm-status" role="status">
+                    {llmQueueQueued > 0
+                      ? t('settings.localLlm.queueBusy', { active: llmQueueActive, queued: llmQueueQueued })
+                      : t('settings.localLlm.queueActive', { active: llmQueueActive })}
+                  </div>
+                ) : null}
+                {locked('localLlmConcurrency') ? lockedNote('OPENSUPERBOT_LOCAL_LLM_CONCURRENCY') : null}
+                {errorFor('localLlmConcurrency')}
+                <p className="setup-hint">{t('settings.localLlm.hint')}</p>
               </div>
             </Section>
 

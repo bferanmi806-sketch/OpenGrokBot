@@ -7,6 +7,7 @@ import {
   createWikiPage,
   deleteMcpServer,
   deleteWikiPage,
+  fetchLlmQueue,
   fetchMcpServers,
   fetchQuietDigest,
   fetchRuleProposals,
@@ -27,6 +28,9 @@ import type {
   ApprovalEditInput,
   BotRefPayload,
   GatewayEvent,
+  LlmPriority,
+  LlmQueueEndpointView,
+  LlmQueueSnapshot,
   McpServerView,
   Message,
   QuietDigestFlushResponse,
@@ -458,6 +462,35 @@ describe('the Chinese dictionary', () => {
     expect(translate('zh-CN', 'settings.quietHours.delivered', { count: 2 })).toBe('已投递 2 条暂存更新。')
     expect(translate('en', 'sidebar.preview.quietDigestMany', { count: 5 })).toBe('Morning digest (5 updates)')
     expect(translate('zh-CN', 'sidebar.preview.quietDigestMany', { count: 5 })).toBe('晨报汇总（5 条更新）')
+  })
+
+  it('includes local LLM concurrency and queue status keys in both languages with placeholder parity', () => {
+    const requiredLocalLlmKeys: MessageKey[] = [
+      'settings.localLlm.label',
+      'settings.localLlm.hint',
+      'settings.localLlm.one',
+      'settings.localLlm.unlimited',
+      'settings.localLlm.option',
+      'settings.localLlm.queueBusy',
+      'settings.localLlm.queueActive',
+    ]
+    for (const key of requiredLocalLlmKeys) {
+      expect(en[key]).toBeTruthy()
+      expect(zhCN[key]).toBeTruthy()
+      expect({ key, names: placeholders(zhCN[key]) }).toEqual({ key, names: placeholders(en[key]) })
+    }
+    expect(en['settings.localLlm.label']).toBe('Local model concurrency')
+    expect(zhCN['settings.localLlm.label']).toBe('本地模型并发上限')
+    expect(en['settings.localLlm.one']).toBe('1 (Recommended)')
+    expect(zhCN['settings.localLlm.one']).toBe('1（推荐）')
+    expect(en['settings.localLlm.unlimited']).toBe('Unlimited')
+    expect(zhCN['settings.localLlm.unlimited']).toBe('不限制')
+    expect(translate('en', 'settings.localLlm.option', { count: 4 })).toBe('4 concurrent')
+    expect(translate('zh-CN', 'settings.localLlm.option', { count: 4 })).toBe('4 并发')
+    expect(translate('en', 'settings.localLlm.queueBusy', { active: 1, queued: 2 })).toBe('Local queue: 1 active · 2 waiting')
+    expect(translate('zh-CN', 'settings.localLlm.queueBusy', { active: 1, queued: 2 })).toBe('本地队列：1 运行中 · 2 排队中')
+    expect(translate('en', 'settings.localLlm.queueActive', { active: 2 })).toBe('Local queue: 2 active')
+    expect(translate('zh-CN', 'settings.localLlm.queueActive', { active: 2 })).toBe('本地队列：2 运行中')
   })
 })
 
@@ -1067,5 +1100,52 @@ describe('Proactive Quiet Digest & Rule Proposals API client', () => {
     expect(proposalMsg.kind).toBe('rule_proposal')
     expect(ev.type).toBe('quiet_digest_changed')
     expect(settingsQuiet.quietHoursEnabled).toBe(true)
+  })
+})
+
+describe('Local LLM Queue API client', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('fetches GET /api/llm-queue and throws ApiError on failure and SignedOut on 401', async () => {
+    const priority: LlmPriority = 'interactive'
+    const endpoint: LlmQueueEndpointView = {
+      key: 'local:loopback:11434',
+      active: 1,
+      queued: 2,
+      byPriority: { interactive: 1, background: 0, routine: 1, low: 0 },
+    }
+    const snapshot: LlmQueueSnapshot = {
+      concurrency: 1,
+      endpoints: [endpoint],
+    }
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(snapshot), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'not found' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(await fetchLlmQueue()).toEqual(snapshot)
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/llm-queue')
+
+    const notFoundErr = await fetchLlmQueue().catch((e: unknown) => e)
+    expect(notFoundErr).toBeInstanceOf(ApiError)
+    expect(notFoundErr).toMatchObject({ status: 404, message: 'not found' })
+
+    await expect(fetchLlmQueue()).rejects.toBeInstanceOf(SignedOut)
+
+    const settingsWithLocalConcurrency: SettingsView['values'] = {
+      provider: 'ollama',
+      baseURL: 'http://localhost:11434/v1',
+      model: 'qwen3:8b',
+      vision: false,
+      language: 'en',
+      computers: 'local',
+      browserMirror: '',
+      checkUpdates: true,
+      localLlmConcurrency: 2,
+    }
+    expect(priority).toBe('interactive')
+    expect(settingsWithLocalConcurrency.localLlmConcurrency).toBe(2)
   })
 })
