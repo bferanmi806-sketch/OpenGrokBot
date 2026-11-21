@@ -62,6 +62,9 @@
 | Quiet Hours | 免打扰时段 | 暂存非紧急定时巡检汇报、结束后合并发送的时段设置 |
 | Morning digest | 晨报汇总 | 免打扰时段结束或手动投递后汇总发出的一张更新卡片 |
 | rule proposal | 规矩提议 | 同事或多次驳回触发的、待你核对并存入 `MEMORY.md` 的常驻规矩建议 |
+| background task | 后台任务 | 同事在后台通道独立执行的耗时任务，不阻塞前台继续对话 |
+| steer / steering note | 发送纠偏 / 纠偏指令 | 向排队中或运行中的后台任务发出的中途方向调整说明 |
+| using browser | 占用浏览器 | 后台任务持有该同事浏览器租约时的状态标识 |
 | handoff | 转交 | 同事之间 |
 | take over / sign in for it | 接管 / 登录 | 你在它的浏览器里亲手操作 |
 | needs you | 等你 | 侧栏状态 |

@@ -2,7 +2,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import type { Conversation } from './types'
+import type { BackgroundTaskView, Conversation, Message } from './types'
 
 class FakeSocket {
   static last: FakeSocket | null = null
@@ -41,6 +41,12 @@ function mockGateway(opts: {
   wiki?: (url: string, init?: RequestInit) => unknown | Promise<unknown>
   /** POST /api/rule-proposals/:id 的回答 */
   resolveRuleProposal?: (url: string, body: Record<string, unknown>) => { status?: number; body: unknown }
+  /** GET /api/bots/:botId/background-tasks 的回答 */
+  backgroundTasks?: (url: string) => unknown
+  /** POST /api/background-tasks/:id/steer 的回答 */
+  steerBackgroundTask?: (url: string, body: Record<string, unknown>) => { status?: number; body: unknown }
+  /** POST /api/background-tasks/:id/cancel 的回答 */
+  cancelBackgroundTask?: (url: string) => { status?: number; body: unknown }
 } = {}) {
   const calls: string[] = []
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -90,6 +96,18 @@ function mockGateway(opts: {
     if (url.startsWith('/api/rule-proposals/') && init?.method === 'POST' && opts.resolveRuleProposal) {
       const sent = init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {}
       const reply = opts.resolveRuleProposal(url, sent)
+      return json(reply.body, reply.status ?? 200)
+    }
+    if (url.endsWith('/background-tasks') && opts.backgroundTasks) {
+      return json(opts.backgroundTasks(url))
+    }
+    if (url.startsWith('/api/background-tasks/') && url.endsWith('/steer') && init?.method === 'POST' && opts.steerBackgroundTask) {
+      const sent = init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {}
+      const reply = opts.steerBackgroundTask(url, sent)
+      return json(reply.body, reply.status ?? 200)
+    }
+    if (url.startsWith('/api/background-tasks/') && url.endsWith('/cancel') && init?.method === 'POST' && opts.cancelBackgroundTask) {
+      const reply = opts.cancelBackgroundTask(url)
       return json(reply.body, reply.status ?? 200)
     }
     if (url.startsWith('/api/threads/')) return json(opts.messages ? await opts.messages(url) : [])
@@ -931,5 +949,234 @@ describe('App', () => {
     await act(async () => { releaseFetch([pendingCard]) })
     expect(screen.getByText('Saved to MEMORY.md')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Save to MEMORY.md' })).not.toBeInTheDocument()
+  })
+
+  it('tracks background_task_changed over WebSocket in the DM header pill and live-patches open ComputerPanel', async () => {
+    const task1 = {
+      id: 'bg-1111aaaa',
+      botId: 'researcher',
+      threadId: 'dm:researcher',
+      title: 'Deep market scan',
+      instructions: 'Scan top 5 vendors',
+      status: 'running' as const,
+      stepCount: 1,
+      lastStep: 'browser_goto: https://vendor1.example',
+      steps: [{ tool: 'browser_goto', summary: 'https://vendor1.example', ok: true, at: 100 }],
+      summary: '',
+      error: '',
+      usesBrowser: true,
+      messageId: 50,
+      createdAt: 100,
+      startedAt: 105,
+      finishedAt: null,
+    }
+    const task2 = {
+      ...task1,
+      id: 'bg-2222bbbb',
+      title: 'Draft executive brief',
+      status: 'queued' as const,
+      stepCount: 0,
+      lastStep: '',
+      steps: [],
+      usesBrowser: false,
+      messageId: 51,
+      createdAt: 200,
+      startedAt: null,
+    }
+    mockGateway({
+      backgroundTasks: () => ({ tasks: [] }),
+      computer: {
+        botId: 'researcher',
+        running: false,
+        vncUrl: null,
+        routines: [],
+        backgroundTasks: [task1],
+      },
+    })
+
+    render(<App />)
+    const socket = await ready()
+    expect(screen.queryByRole('button', { name: /background task/i })).toBeNull()
+
+    // One active background task appears -> header pill shows "⚡ 1 background task"
+    await act(async () => {
+      socket.emit({ type: 'background_task_changed', botId: 'researcher', task: task1 })
+    })
+    const pill1 = await screen.findByRole('button', { name: /1 background task/ })
+    expect(pill1).toBeInTheDocument()
+
+    // Clicking the pill opens ComputerPanel with the live task
+    await userEvent.click(pill1)
+    expect(await screen.findByText('Background tasks')).toBeInTheDocument()
+    expect(screen.getByText('Deep market scan')).toBeInTheDocument()
+    expect(screen.getByText('Using browser')).toBeInTheDocument()
+
+    // A second queued task arrives -> header pill updates to "⚡ 2 background tasks" and open panel live-patches in place
+    await act(async () => {
+      socket.emit({ type: 'background_task_changed', botId: 'researcher', task: task2 })
+    })
+    expect(await screen.findByRole('button', { name: /2 background tasks/ })).toBeInTheDocument()
+    expect(screen.getByText('Draft executive brief')).toBeInTheDocument()
+
+    // Both settle -> open panel reflects completed/cancelled and header pill disappears
+    await act(async () => {
+      socket.emit({
+        type: 'background_task_changed',
+        botId: 'researcher',
+        task: { ...task1, status: 'completed', summary: 'Vendor matrix complete.', finishedAt: 500 },
+      })
+      socket.emit({
+        type: 'background_task_changed',
+        botId: 'researcher',
+        task: { ...task2, status: 'cancelled', finishedAt: 505 },
+      })
+    })
+    expect(await screen.findByText('Vendor matrix complete.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /background task/i })).toBeNull()
+  })
+
+  it('patches background_task immediately on steer/cancel 200 and resyncs stale active cards on 409', async () => {
+    let serverTasks: BackgroundTaskView[] = [
+      {
+        id: 'bg-aaaa1111',
+        botId: 'researcher',
+        threadId: 'dm:researcher',
+        title: 'Compile pricing matrix',
+        instructions: 'Gather pricing',
+        status: 'running',
+        stepCount: 1,
+        lastStep: 'wiki_search: pricing',
+        steps: [{ tool: 'wiki_search', summary: 'pricing', ok: true, at: 100 }],
+        summary: '',
+        error: '',
+        usesBrowser: false,
+        messageId: 60,
+        createdAt: 100,
+        startedAt: 110,
+        finishedAt: null,
+      },
+      {
+        id: 'bg-bbbb2222',
+        botId: 'researcher',
+        threadId: 'dm:researcher',
+        title: 'Legacy migration scan',
+        instructions: 'Scan repo',
+        status: 'running',
+        stepCount: 2,
+        lastStep: 'read_file: README.md',
+        steps: [{ tool: 'read_file', summary: 'README.md', ok: true, at: 150 }],
+        summary: '',
+        error: '',
+        usesBrowser: false,
+        messageId: 61,
+        createdAt: 150,
+        startedAt: 160,
+        finishedAt: null,
+      },
+    ]
+    let serverMessages: Message[] = [
+      {
+        id: 60,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'background_task',
+        content: '',
+        payload: {
+          taskId: 'bg-aaaa1111',
+          title: 'Compile pricing matrix',
+          status: 'running',
+          stepCount: 1,
+          lastStep: 'wiki_search: pricing',
+          steps: [{ tool: 'wiki_search', summary: 'pricing', ok: true, at: 100 }],
+          usesBrowser: false,
+          createdAt: 100,
+          startedAt: 110,
+          finishedAt: null,
+        },
+        created_at: 100,
+      },
+      {
+        id: 61,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'background_task',
+        content: '',
+        payload: {
+          taskId: 'bg-bbbb2222',
+          title: 'Legacy migration scan',
+          status: 'running',
+          stepCount: 2,
+          lastStep: 'read_file: README.md',
+          steps: [{ tool: 'read_file', summary: 'README.md', ok: true, at: 150 }],
+          usesBrowser: false,
+          createdAt: 150,
+          startedAt: 160,
+          finishedAt: null,
+        },
+        created_at: 150,
+      },
+    ]
+
+    mockGateway({
+      messages: () => serverMessages,
+      backgroundTasks: () => ({ tasks: serverTasks }),
+      steerBackgroundTask: (url, body) => {
+        if (url === '/api/background-tasks/bg-aaaa1111/steer') {
+          const note = String(body.note ?? '')
+          const updated: BackgroundTaskView = {
+            ...serverTasks[0]!,
+            lastStep: `steer: ${note}`,
+            steps: [...serverTasks[0]!.steps, { tool: 'steer', summary: note, ok: true, at: 200 }],
+          }
+          serverTasks = [updated, serverTasks[1]!]
+          return { status: 200, body: { ok: true, task: updated } }
+        }
+        return { status: 404, body: { error: 'not found', code: 'not_found' } }
+      },
+      cancelBackgroundTask: (url) => {
+        if (url === '/api/background-tasks/bg-aaaa1111/cancel') {
+          const cancelled: BackgroundTaskView = {
+            ...serverTasks[0]!,
+            status: 'cancelled',
+            finishedAt: 300,
+          }
+          serverTasks = [cancelled, serverTasks[1]!]
+          return { status: 200, body: { ok: true, task: cancelled } }
+        }
+        // Simulate bg-bbbb2222 already completed on server -> 409 settled triggers resync
+        serverTasks = [
+          serverTasks[0]!,
+          { ...serverTasks[1]!, status: 'completed', summary: 'Finished already on server.', finishedAt: 350 },
+        ]
+        serverMessages = serverMessages.map((m) => (
+          m.id === 61 && m.payload && 'taskId' in m.payload
+            ? { ...m, payload: { ...m.payload, status: 'completed', summary: 'Finished already on server.', finishedAt: 350 } }
+            : m
+        ))
+        return { status: 409, body: { error: 'Background task bg-bbbb2222 is already completed.', code: 'settled' } }
+      },
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    await ready()
+
+    const steerInputs = await screen.findAllByPlaceholderText('Send a steering note…')
+    const steerBtns = screen.getAllByRole('button', { name: 'Steer' })
+    const cancelBtns = screen.getAllByRole('button', { name: 'Cancel' })
+
+    // Steer bg-aaaa1111 -> 200 patches step immediately without waiting for WS
+    await user.type(steerInputs[0]!, 'Include annual discounts')
+    await user.click(steerBtns[0]!)
+    expect(await screen.findByText('Include annual discounts')).toBeInTheDocument()
+
+    // Cancel bg-aaaa1111 -> 200 flips card to Cancelled immediately without waiting for WS
+    await user.click(cancelBtns[0]!)
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument()
+
+    // Cancel stale bg-bbbb2222 -> 409 settled resyncs thread & flips card to Completed with server summary
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByText('Finished already on server.')).toBeInTheDocument()
+    expect(screen.getByText('Completed')).toBeInTheDocument()
   })
 })

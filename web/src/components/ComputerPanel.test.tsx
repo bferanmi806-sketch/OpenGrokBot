@@ -383,3 +383,137 @@ describe('MCP server access toggles', () => {
     expect(screen.getByText('3 个工具')).toBeInTheDocument()
   })
 })
+
+describe('background tasks section', () => {
+  it('omits Background tasks when info.backgroundTasks is undefined and shows empty state when empty', () => {
+    const { rerender } = render(<ComputerPanel info={running} botName="Scout" onClose={() => {}} />)
+    expect(screen.queryByText('Background tasks')).toBeNull()
+
+    rerender(<ComputerPanel info={{ ...running, backgroundTasks: [] }} botName="Scout" onClose={() => {}} />)
+    expect(screen.getByText('Background tasks')).toBeInTheDocument()
+    expect(screen.getByText('No background tasks yet')).toBeInTheDocument()
+  })
+
+  it('lists live and finished background tasks, forwards steer and cancel, and renders background action trigger', async () => {
+    const onSteer = vi.fn().mockResolvedValue(undefined)
+    const onCancel = vi.fn().mockResolvedValue(undefined)
+    const user = userEvent.setup()
+
+    const { unmount } = render(
+      <ComputerPanel
+        info={{
+          ...running,
+          backgroundTasks: [
+            {
+              id: 'bg-11112222',
+              botId: 'researcher',
+              threadId: 'dm:researcher',
+              title: 'Scrape competitor docs',
+              instructions: 'Collect feature comparison table',
+              status: 'running',
+              stepCount: 3,
+              lastStep: 'browser_extract: feature matrix',
+              steps: [],
+              summary: '',
+              error: '',
+              usesBrowser: true,
+              messageId: 40,
+              createdAt: 1000,
+              startedAt: 1050,
+              finishedAt: null,
+            },
+            {
+              id: 'bg-33334444',
+              botId: 'researcher',
+              threadId: 'dm:researcher',
+              title: 'Summarize Q2 notes',
+              instructions: 'Summarize notes',
+              status: 'completed',
+              stepCount: 2,
+              lastStep: 'write_file: summary.md',
+              steps: [],
+              summary: 'Summary saved to workspace.',
+              error: '',
+              usesBrowser: false,
+              messageId: 39,
+              createdAt: 900,
+              startedAt: 910,
+              finishedAt: 990,
+            },
+            {
+              id: 'bg-55556666',
+              botId: 'researcher',
+              threadId: 'dm:researcher',
+              title: 'Broken export',
+              instructions: 'Export CSV',
+              status: 'failed',
+              stepCount: 1,
+              lastStep: 'shell: export.sh',
+              steps: [],
+              summary: '',
+              error: 'Permission denied',
+              usesBrowser: true,
+              messageId: 38,
+              createdAt: 800,
+              startedAt: 810,
+              finishedAt: 820,
+            },
+          ],
+          actions: [
+            { id: 10, thread_id: 'dm:researcher', trigger: 'background', tool: 'background_task', summary: 'completed: Summarize Q2 notes', ok: true, ms: 80, created_at: Date.now() },
+          ],
+        }}
+        botName="Scout"
+        onClose={() => {}}
+        onSteerBackgroundTask={onSteer}
+        onCancelBackgroundTask={onCancel}
+      />,
+    )
+
+    expect(screen.getByText('Background tasks')).toBeInTheDocument()
+    expect(screen.getByText('Scrape competitor docs')).toBeInTheDocument()
+    expect(screen.getByText('Running')).toBeInTheDocument()
+    expect(screen.getByText('Using browser')).toBeInTheDocument()
+    expect(screen.getByText('3 steps')).toBeInTheDocument()
+    expect(screen.getByText('browser_extract: feature matrix')).toBeInTheDocument()
+
+    expect(screen.getByText('Summarize Q2 notes')).toBeInTheDocument()
+    expect(screen.getByText('Summary saved to workspace.')).toBeInTheDocument()
+    expect(screen.getByText('Broken export')).toBeInTheDocument()
+    expect(screen.getByText('Permission denied')).toBeInTheDocument()
+    expect(screen.getByText(/· Background$/)).toBeInTheDocument()
+
+    // Inline steer validates and forwards
+    const steerInput = screen.getByPlaceholderText('Send a steering note…') as HTMLInputElement
+    await user.click(screen.getByRole('button', { name: 'Steer' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a steering note first.')
+    expect(onSteer).not.toHaveBeenCalled()
+
+    await user.type(steerInput, 'Include enterprise pricing')
+    await user.click(screen.getByRole('button', { name: 'Steer' }))
+    expect(onSteer).toHaveBeenCalledWith('bg-11112222', 'Include enterprise pricing')
+    expect(steerInput.value).toBe('')
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).toHaveBeenCalledWith('bg-11112222')
+
+    unmount()
+    render(
+      <I18nProvider lang="zh-CN">
+        <ComputerPanel
+          info={{
+            ...running,
+            backgroundTasks: [],
+            actions: [
+              { id: 11, thread_id: 'dm:researcher', trigger: 'background', tool: 'background_task', summary: 'completed: 整理调研报告', ok: true, ms: 80, created_at: Date.now() },
+            ],
+          }}
+          botName="Scout"
+          onClose={() => {}}
+        />
+      </I18nProvider>,
+    )
+    expect(screen.getByText('暂无后台任务')).toBeInTheDocument()
+    expect(screen.getByText(/· 后台任务$/)).toBeInTheDocument()
+  })
+})

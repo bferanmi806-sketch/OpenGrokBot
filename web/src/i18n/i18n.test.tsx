@@ -3,10 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
   SignedOut,
+  cancelBackgroundTask,
   createMcpServer,
   createWikiPage,
   deleteMcpServer,
   deleteWikiPage,
+  fetchBackgroundTasks,
   fetchLlmQueue,
   fetchMcpServers,
   fetchQuietDigest,
@@ -21,12 +23,19 @@ import {
   saveWikiPage,
   setBotMcpServers,
   setMcpServerBots,
+  steerBackgroundTask,
   testMcpServer,
   updateMcpServer,
 } from '../api'
 import type {
   ApprovalEditInput,
+  ApprovalPayload,
+  BackgroundTaskActionResponse,
+  BackgroundTaskPayload,
+  BackgroundTaskStatus,
+  BackgroundTaskView,
   BotRefPayload,
+  ComputerInfo,
   GatewayEvent,
   LlmPriority,
   LlmQueueEndpointView,
@@ -491,6 +500,60 @@ describe('the Chinese dictionary', () => {
     expect(translate('zh-CN', 'settings.localLlm.queueBusy', { active: 1, queued: 2 })).toBe('本地队列：1 运行中 · 2 排队中')
     expect(translate('en', 'settings.localLlm.queueActive', { active: 2 })).toBe('Local queue: 2 active')
     expect(translate('zh-CN', 'settings.localLlm.queueActive', { active: 2 })).toBe('本地队列：2 运行中')
+  })
+
+  it('includes Phase 7 background task, panel, approval held, error, and sidebar preview keys in both languages with placeholder parity', () => {
+    const requiredBgKeys: MessageKey[] = [
+      'approval.held.background',
+      'panel.trigger.background',
+      'panel.backgroundTasks',
+      'panel.noBackgroundTasks',
+      'error.invalid_note',
+      'error.queue_full',
+      'error.browser_in_use',
+      'error.not_found',
+      'bgTask.label',
+      'bgTask.status.queued',
+      'bgTask.status.running',
+      'bgTask.status.completed',
+      'bgTask.status.failed',
+      'bgTask.status.cancelled',
+      'bgTask.usingBrowser',
+      'bgTask.stepsOne',
+      'bgTask.stepsMany',
+      'bgTask.steerPlaceholder',
+      'bgTask.steerSend',
+      'bgTask.steering',
+      'bgTask.cancel',
+      'bgTask.cancelling',
+      'bgTask.showSteps',
+      'bgTask.hideSteps',
+      'bgTask.activePillOne',
+      'bgTask.activePillMany',
+      'bgTask.steerFailed',
+      'bgTask.cancelFailed',
+      'bgTask.emptyNote',
+      'bgTask.noteTooLong',
+      'bgTask.alreadySettled',
+      'sidebar.preview.backgroundTask',
+    ]
+    for (const key of requiredBgKeys) {
+      expect(en[key]).toBeTruthy()
+      expect(zhCN[key]).toBeTruthy()
+      expect({ key, names: placeholders(zhCN[key]) }).toEqual({ key, names: placeholders(en[key]) })
+    }
+    expect(en['panel.trigger.background']).toBe('Background')
+    expect(zhCN['panel.trigger.background']).toBe('后台任务')
+    expect(en['bgTask.usingBrowser']).toBe('Using browser')
+    expect(zhCN['bgTask.usingBrowser']).toBe('占用浏览器')
+    expect(translate('en', 'bgTask.stepsMany', { count: 4 })).toBe('4 steps')
+    expect(translate('zh-CN', 'bgTask.stepsMany', { count: 4 })).toBe('4 步')
+    expect(translate('en', 'bgTask.activePillMany', { count: 2 })).toBe('2 background tasks')
+    expect(translate('zh-CN', 'bgTask.activePillMany', { count: 2 })).toBe('2 项后台任务')
+    expect(translate('en', 'bgTask.noteTooLong', { max: 1000 })).toBe('Steering note must be 1000 characters or fewer.')
+    expect(translate('zh-CN', 'bgTask.noteTooLong', { max: 1000 })).toBe('纠偏指令不能超过 1000 个字符。')
+    expect(translate('en', 'sidebar.preview.backgroundTask', { title: 'Audit' })).toBe('Background: Audit')
+    expect(translate('zh-CN', 'sidebar.preview.backgroundTask', { title: '竞品调研' })).toBe('后台任务：竞品调研')
   })
 })
 
@@ -1147,5 +1210,143 @@ describe('Local LLM Queue API client', () => {
     }
     expect(priority).toBe('interactive')
     expect(settingsWithLocalConcurrency.localLlmConcurrency).toBe(2)
+  })
+})
+
+describe('Background Tasks API client', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  const sampleTask: BackgroundTaskView = {
+    id: 'bg-a1b2c3d4',
+    botId: 'inbox keeper',
+    threadId: 'dm:inbox keeper',
+    title: 'Compile Q3 pricing matrix',
+    instructions: 'Check top 3 competitors',
+    status: 'running',
+    stepCount: 2,
+    lastStep: 'browser_extract: pricing table',
+    steps: [
+      { tool: 'browser_goto', summary: 'https://competitor.example', ok: true, ms: 300, at: 1000 },
+      { tool: 'browser_extract', summary: 'pricing table', ok: true, ms: 500, at: 2000 },
+    ],
+    summary: '',
+    error: '',
+    usesBrowser: true,
+    messageId: 44,
+    createdAt: 1000,
+    startedAt: 1050,
+    finishedAt: null,
+  }
+
+  it('fetches, steers, and cancels background tasks with URL encoding, strict ApiError codes, and SignedOut', async () => {
+    const steeredRes: BackgroundTaskActionResponse = {
+      ok: true,
+      task: {
+        ...sampleTask,
+        lastStep: 'steer: Focus on enterprise',
+        steps: [...sampleTask.steps, { tool: 'steer', summary: 'Focus on enterprise', ok: true, at: 3000 }],
+      },
+    }
+    const cancelledRes: BackgroundTaskActionResponse = {
+      ok: true,
+      task: { ...sampleTask, status: 'cancelled', finishedAt: 4000 },
+    }
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ tasks: [sampleTask] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'unknown bot' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(steeredRes), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Steering note must be 1–1000 characters.', code: 'invalid_note' }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Background task bg-a1b2c3d4 is already completed.', code: 'settled' }), { status: 409 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(cancelledRes), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Background task bg-missing not found.', code: 'not_found' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Background task bg-a1b2c3d4 is already cancelled.', code: 'settled' }), { status: 409 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    // fetchBackgroundTasks
+    expect(await fetchBackgroundTasks('inbox keeper')).toEqual({ tasks: [sampleTask] })
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/bots/inbox%20keeper/background-tasks')
+
+    const listErr = await fetchBackgroundTasks('missing').catch((e: unknown) => e)
+    expect(listErr).toBeInstanceOf(ApiError)
+    expect(listErr).toMatchObject({ status: 404, message: 'unknown bot' })
+
+    await expect(fetchBackgroundTasks('researcher')).rejects.toBeInstanceOf(SignedOut)
+
+    // steerBackgroundTask
+    expect(await steerBackgroundTask('bg/a1', 'Focus on enterprise')).toEqual(steeredRes)
+    expect(fetchMock.mock.calls[3]![0]).toBe('/api/background-tasks/bg%2Fa1/steer')
+    expect((fetchMock.mock.calls[3]![1] as RequestInit).method).toBe('POST')
+    expect(JSON.parse(String((fetchMock.mock.calls[3]![1] as RequestInit).body))).toEqual({ note: 'Focus on enterprise' })
+
+    const invalidNoteErr = await steerBackgroundTask('bg-a1b2c3d4', '').catch((e: unknown) => e)
+    expect(invalidNoteErr).toBeInstanceOf(ApiError)
+    expect(invalidNoteErr).toMatchObject({ status: 400, code: 'invalid_note' })
+
+    const steerSettledErr = await steerBackgroundTask('bg-a1b2c3d4', 'Too late').catch((e: unknown) => e)
+    expect(steerSettledErr).toBeInstanceOf(ApiError)
+    expect(steerSettledErr).toMatchObject({ status: 409, code: 'settled' })
+
+    await expect(steerBackgroundTask('bg-a1b2c3d4', 'Note')).rejects.toBeInstanceOf(SignedOut)
+
+    // cancelBackgroundTask
+    expect(await cancelBackgroundTask('bg/a1')).toEqual(cancelledRes)
+    expect(fetchMock.mock.calls[7]![0]).toBe('/api/background-tasks/bg%2Fa1/cancel')
+    expect((fetchMock.mock.calls[7]![1] as RequestInit).method).toBe('POST')
+
+    const cancelMissingErr = await cancelBackgroundTask('bg-missing').catch((e: unknown) => e)
+    expect(cancelMissingErr).toBeInstanceOf(ApiError)
+    expect(cancelMissingErr).toMatchObject({ status: 404, code: 'not_found' })
+
+    const cancelSettledErr = await cancelBackgroundTask('bg-a1b2c3d4').catch((e: unknown) => e)
+    expect(cancelSettledErr).toBeInstanceOf(ApiError)
+    expect(cancelSettledErr).toMatchObject({ status: 409, code: 'settled' })
+
+    await expect(cancelBackgroundTask('bg-a1b2c3d4')).rejects.toBeInstanceOf(SignedOut)
+
+    // Verify Phase 7 types compile and match gateway contracts
+    const status: BackgroundTaskStatus = 'running'
+    const payload: BackgroundTaskPayload = {
+      taskId: sampleTask.id,
+      title: sampleTask.title,
+      status,
+      stepCount: sampleTask.stepCount,
+      lastStep: sampleTask.lastStep,
+      steps: sampleTask.steps,
+      usesBrowser: sampleTask.usesBrowser,
+      createdAt: sampleTask.createdAt,
+      startedAt: sampleTask.startedAt,
+      finishedAt: sampleTask.finishedAt,
+    }
+    const msg: Message = {
+      id: 44,
+      thread_id: sampleTask.threadId,
+      sender: sampleTask.botId,
+      kind: 'background_task',
+      content: '',
+      payload,
+      created_at: 1000,
+    }
+    const approval: ApprovalPayload = {
+      approvalId: 1,
+      action: 'send report',
+      status: 'pending',
+      ruleHeld: 'background',
+    }
+    const ev: GatewayEvent = { type: 'background_task_changed', botId: sampleTask.botId, task: sampleTask }
+    const comp: ComputerInfo = {
+      botId: sampleTask.botId,
+      running: true,
+      vncUrl: null,
+      routines: [],
+      backgroundTasks: [sampleTask],
+    }
+    expect(msg.kind).toBe('background_task')
+    expect(approval.ruleHeld).toBe('background')
+    expect(ev.type).toBe('background_task_changed')
+    expect(comp.backgroundTasks).toHaveLength(1)
   })
 })

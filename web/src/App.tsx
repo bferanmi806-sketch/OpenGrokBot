@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  ApiError, SignedOut, answerQuestion, checkSession, connectEvents, createBot, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
+  ApiError, SignedOut, answerQuestion, cancelBackgroundTask, checkSession, connectEvents, createBot, fetchBackgroundTasks, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
   fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchUiPrefs, forgetMemoryRule, removeUpload, resolveApproval, resolveRuleProposal, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers,
-  setComputerShell, setComputerWindow, stopThread, updateRoutine, uploadFile,
+  setComputerShell, setComputerWindow, steerBackgroundTask, stopThread, updateRoutine, uploadFile,
 } from './api'
 import { BotModelChip, BotModelPicker, botModel, botSeesImages } from './components/BotModelPicker'
 import { ConfirmDialog, useEscape } from './components/ConfirmDialog'
@@ -23,7 +23,7 @@ import { errorText } from './i18n/describe'
 import { applyHello, applyStatus, clearDone } from './presence'
 import { applyTheme, hasStoredTheme, readStoredTheme, resolveTheme, systemTheme, writeStoredTheme } from './theme'
 import type {
-  BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, RuleProposalPayload, SetupInfo, ThemeSetting,
+  BackgroundTaskPayload, BackgroundTaskView, BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, RuleProposalPayload, SetupInfo, ThemeSetting,
 } from './types'
 
 const EMPTY_CONNECTORS: ConnectorsSnapshot = {
@@ -31,6 +31,38 @@ const EMPTY_CONNECTORS: ConnectorsSnapshot = {
   catalog: [],
   accounts: [],
   botGrants: {},
+}
+
+const isActiveBgTask = (task: BackgroundTaskView): boolean =>
+  task.status === 'queued' || task.status === 'running'
+
+function upsertBackgroundTaskList(list: BackgroundTaskView[] | undefined, task: BackgroundTaskView): BackgroundTaskView[] {
+  const next = (list ?? []).filter((item) => item.id !== task.id)
+  next.push(task)
+  next.sort((a, b) => {
+    const aActive = isActiveBgTask(a) ? 0 : 1
+    const bActive = isActiveBgTask(b) ? 0 : 1
+    if (aActive !== bActive) return aActive - bActive
+    return b.createdAt - a.createdAt
+  })
+  return next.slice(0, 20)
+}
+
+function bgTaskViewToPayload(task: BackgroundTaskView): BackgroundTaskPayload {
+  return {
+    taskId: task.id,
+    title: task.title,
+    status: task.status,
+    stepCount: task.stepCount,
+    lastStep: task.lastStep,
+    steps: task.steps,
+    ...(task.summary ? { summary: task.summary } : {}),
+    ...(task.error ? { error: task.error } : {}),
+    usesBrowser: task.usesBrowser,
+    createdAt: task.createdAt,
+    startedAt: task.startedAt,
+    finishedAt: task.finishedAt,
+  }
 }
 
 /** 网关锁着：告诉人去哪拿登录链接，而不是一片空白。 */
@@ -126,6 +158,7 @@ function Workspace({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [statuses, setStatuses] = useState<Record<string, BotStatus>>({})
+  const [bgTasksByBot, setBgTasksByBot] = useState<Record<string, BackgroundTaskView[]>>({})
   /** 电脑面板开给谁；info 为 null 表示那台电脑还在醒 */
   const [panel, setPanel] = useState<{ botId: string; info: ComputerInfo | null } | null>(null)
   const [hiring, setHiring] = useState(false)
@@ -176,6 +209,9 @@ function Workspace({
   const threadId = selected?.id ?? null
   const threadIdRef = useRef<string | null>(null)
   threadIdRef.current = threadId
+  const selectedDmBotId = selected?.kind === 'dm' ? (selected.members[0] ?? null) : null
+  const selectedDmBotIdRef = useRef<string | null>(null)
+  selectedDmBotIdRef.current = selectedDmBotId
   // 正看着的单聊里有谁：他们干完了你自己看得见，不用再标「done」；点开单聊的那一刻把已有的「done」消掉（打开群聊不清个人单聊的 done）
   const watchingRef = useRef<string[]>([])
   /** 这一轮忙碌里真往线程说过话的同事：只有它们收工时才标「done」 */
@@ -282,16 +318,71 @@ function Workspace({
     }
   }, [])
 
+  /** 某位同事的后台任务列表；老网关没有这个路由时静默忽略 */
+  const loadBackgroundTasks = useCallback(async (botId: string) => {
+    try {
+      const res = await fetchBackgroundTasks(botId)
+      setBgTasksByBot((prev) => ({ ...prev, [botId]: res.tasks }))
+      if (panelFor.current === botId) {
+        setPanel((curr) => (
+          curr && curr.botId === botId && curr.info
+            ? { ...curr, info: { ...curr.info, backgroundTasks: res.tasks } }
+            : curr
+        ))
+      }
+    } catch (err) {
+      if (err instanceof SignedOut) setSignedOut(true)
+    }
+  }, [])
+
+  const applyBackgroundTaskUpdate = useCallback((
+    botId: string,
+    task: BackgroundTaskView,
+    opts?: { patchMessage?: boolean },
+  ) => {
+    setBgTasksByBot((prev) => ({
+      ...prev,
+      [botId]: upsertBackgroundTaskList(prev[botId], task),
+    }))
+    if (panelFor.current === botId) {
+      setPanel((curr) => (
+        curr && curr.botId === botId && curr.info
+          ? { ...curr, info: { ...curr.info, backgroundTasks: upsertBackgroundTaskList(curr.info.backgroundTasks, task) } }
+          : curr
+      ))
+    }
+    if (opts?.patchMessage) {
+      const nextPayload = bgTaskViewToPayload(task)
+      setMessages((ms) => {
+        let changed = false
+        const next = ms.map((m) => {
+          if (m.kind !== 'background_task') return m
+          const payload = m.payload as BackgroundTaskPayload | null
+          const matchesId = task.messageId !== null && m.id === task.messageId
+          const matchesTask = payload?.taskId === task.id
+          if (!matchesId && !matchesTask) return m
+          changed = true
+          const updated: Message = { ...m, payload: nextPayload }
+          if (inFlightFetches.current > 0) liveDuringFetch.current.set(updated.id, updated)
+          return updated
+        })
+        return changed ? next : ms
+      })
+    }
+  }, [])
+
   /** 首次加载和每次重连都走这里：断线期间错过的消息、审批数、名册一次补齐。 */
   const resync = useCallback(async () => {
     try {
       await Promise.all([refreshConversations(), loadRoster(), loadLlms(), loadConnectors(), loadMcpServers()])
       const current = threadIdRef.current
       if (current) await loadMessages(current)
+      const currentBot = selectedDmBotIdRef.current
+      if (currentBot) void loadBackgroundTasks(currentBot)
     } catch (err) {
       guard(err)
     }
-  }, [guard, loadConnectors, loadLlms, loadMcpServers, loadMessages, loadRoster, refreshConversations])
+  }, [guard, loadBackgroundTasks, loadConnectors, loadLlms, loadMcpServers, loadMessages, loadRoster, refreshConversations])
 
   useEffect(() => {
     checkSession()
@@ -314,12 +405,20 @@ function Workspace({
     loadMessages(threadId).catch(guard)
   }, [threadId, guard, loadMessages])
 
+  useEffect(() => {
+    if (signedOut !== false || !selectedDmBotId) return
+    void loadBackgroundTasks(selectedDmBotId)
+  }, [signedOut, selectedDmBotId, loadBackgroundTasks])
+
   const signOut = useCallback(() => setSignedOut(true), [])
 
   /** 拉一次面板数据；只在面板还开给同一位同事时才放进去 */
   const loadPanel = useCallback(async (botId: string) => {
     try {
       const info = await fetchComputer(botId)
+      if (Array.isArray(info.backgroundTasks)) {
+        setBgTasksByBot((prev) => ({ ...prev, [botId]: info.backgroundTasks! }))
+      }
       if (panelFor.current === botId) showPanel({ botId, info })
     } catch (err) {
       if (panelFor.current === botId) showPanel(null)
@@ -368,6 +467,10 @@ function Workspace({
         setQuietDigestTick((n) => n + 1)
         return
       }
+      if (e.type === 'background_task_changed') {
+        applyBackgroundTaskUpdate(e.botId, e.task, { patchMessage: true })
+        return
+      }
       if (e.type !== 'message') return // 更新的网关发来不认识的事件，不归这里管
       if (e.message.sender !== 'user' && e.message.kind !== 'activity') postedRef.current.add(e.message.sender)
       // 就地更新的旧消息（activity 卡片收尾、审批 chip 翻转）不该顶掉更新的那条预览；没变就不换数组引用
@@ -382,9 +485,15 @@ function Workspace({
       if (['approval_request', 'approval_resolved', 'question'].includes(e.message.kind)) {
         void refreshConversations().catch(guard)
       }
-      // 面板开着时，记忆规则变动、规矩提议、晨报汇总、放行规则落地或例行任务改动都实时刷新
-      if (panelFor.current && ['memory_updated', 'approval_resolved', 'activity', 'rule_proposal', 'quiet_digest'].includes(e.message.kind)) {
-        void loadPanel(panelFor.current)
+      // 面板开着时，记忆规则变动、规矩提议、晨报汇总、放行规则落地或后台任务结束都实时刷新（后台步骤更新由 background_task_changed 就地修补，避免频繁拉 /computer）
+      if (panelFor.current) {
+        const settledBg = e.message.kind === 'background_task' && (() => {
+          const st = (e.message.payload as BackgroundTaskPayload | null)?.status
+          return st === 'completed' || st === 'failed' || st === 'cancelled'
+        })()
+        if (settledBg || ['memory_updated', 'approval_resolved', 'activity', 'rule_proposal', 'quiet_digest'].includes(e.message.kind)) {
+          void loadPanel(panelFor.current)
+        }
       }
       if (e.threadId === threadIdRef.current) {
         if (inFlightFetches.current > 0) liveDuringFetch.current.set(e.message.id, e.message)
@@ -398,7 +507,7 @@ function Workspace({
         })
       }
     }, { onSignedOut: signOut })
-  }, [signedOut, resync, refreshConversations, loadConnectors, loadMcpServers, loadPanel, guard, signOut])
+  }, [signedOut, resync, refreshConversations, loadConnectors, loadMcpServers, loadPanel, applyBackgroundTaskUpdate, guard, signOut])
 
   const waiting = conversations.reduce((sum, c) => sum + (c.pending ?? 0), 0)
   useEffect(() => {
@@ -499,6 +608,56 @@ function Workspace({
       }
     },
     [guard, loadMessages, resync],
+  )
+
+  const onSteerBackgroundTask = useCallback(
+    async (taskId: string, note: string) => {
+      try {
+        const res = await steerBackgroundTask(taskId, note)
+        applyBackgroundTaskUpdate(res.task.botId, res.task, { patchMessage: true })
+      } catch (err: unknown) {
+        if (err instanceof SignedOut) {
+          setSignedOut(true)
+          return
+        }
+        if (err instanceof ApiError && err.status === 409) {
+          const currentThread = threadIdRef.current
+          const currentBot = panelFor.current ?? selectedDmBotIdRef.current
+          if (currentThread) void loadMessages(currentThread).catch(guard)
+          else void resync()
+          if (currentBot) void loadBackgroundTasks(currentBot)
+          throw err
+        }
+        guard(err)
+        throw err
+      }
+    },
+    [applyBackgroundTaskUpdate, guard, loadBackgroundTasks, loadMessages, resync],
+  )
+
+  const onCancelBackgroundTask = useCallback(
+    async (taskId: string) => {
+      try {
+        const res = await cancelBackgroundTask(taskId)
+        applyBackgroundTaskUpdate(res.task.botId, res.task, { patchMessage: true })
+      } catch (err: unknown) {
+        if (err instanceof SignedOut) {
+          setSignedOut(true)
+          return
+        }
+        if (err instanceof ApiError && err.status === 409) {
+          const currentThread = threadIdRef.current
+          const currentBot = panelFor.current ?? selectedDmBotIdRef.current
+          if (currentThread) void loadMessages(currentThread).catch(guard)
+          else void resync()
+          if (currentBot) void loadBackgroundTasks(currentBot)
+          throw err
+        }
+        guard(err)
+        throw err
+      }
+    },
+    [applyBackgroundTaskUpdate, guard, loadBackgroundTasks, loadMessages, resync],
   )
 
   const onForgetRule = (rule: string) => {
@@ -645,6 +804,31 @@ function Workspace({
       onConnect={() => void reopenWizard()}
     />
   ) : null
+  const activeBgCount = selectedDmBotId
+    ? (bgTasksByBot[selectedDmBotId] ?? []).filter(isActiveBgTask).length
+    : 0
+  const dmHeaderExtra = selected?.kind === 'dm' && selectedDmBotId && (activeBgCount > 0 || llms) ? (
+    <>
+      {activeBgCount > 0 ? (
+        <button
+          type="button"
+          className="header-bg-pill"
+          onClick={openScreen}
+          title={t('thread.openComputer')}
+        >
+          <span className="header-bg-pill-dot" aria-hidden="true" />
+          <span>
+            ⚡ {activeBgCount === 1
+              ? t('bgTask.activePillOne')
+              : t('bgTask.activePillMany', { count: activeBgCount })}
+          </span>
+        </button>
+      ) : null}
+      {llms ? (
+        <BotModelChip botId={selectedDmBotId} state={llms} providers={providers} onOpen={() => setPickerFor(selectedDmBotId)} />
+      ) : null}
+    </>
+  ) : null
 
   return (
     <div className="app">
@@ -691,15 +875,15 @@ function Workspace({
           )}
           onAnswer={(messageId, choices) => answerQuestion(messageId, choices).catch((err) => { guard(err); throw err })}
           onResolveRuleProposal={onResolveRuleProposal}
+          onSteerBackgroundTask={onSteerBackgroundTask}
+          onCancelBackgroundTask={onCancelBackgroundTask}
           onOpenScreen={openScreen}
           onToggleScreen={toggleScreen}
           panelOpen={Boolean(selected.kind === 'dm' && selected.members[0] && panel?.botId === selected.members[0])}
           onToggleSidebar={() => setSidebarOpen((o) => !o)}
           onStop={() => { if (threadId) stopThread(threadId).catch(guard) }}
           banner={demoBanner}
-          headerExtra={llms && selected.kind === 'dm' && selected.members[0] ? (
-            <BotModelChip botId={selected.members[0]} state={llms} providers={providers} onOpen={() => setPickerFor(selected.members[0]!)} />
-          ) : null}
+          headerExtra={dmHeaderExtra}
         />
       ) : (
         <main className="thread thread-empty">
@@ -728,6 +912,8 @@ function Workspace({
           onShell={onShell}
           onToggleConnector={onToggleConnector}
           onToggleMcpServer={onToggleMcpServer}
+          onSteerBackgroundTask={onSteerBackgroundTask}
+          onCancelBackgroundTask={onCancelBackgroundTask}
         />
       ) : null}
       {settingsOpen && !modelsOpen && !connectorsOpen && !wikiOpen ? (
