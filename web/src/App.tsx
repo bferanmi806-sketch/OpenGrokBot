@@ -1,20 +1,21 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  ApiError, SignedOut, answerQuestion, cancelBackgroundTask, checkSession, connectEvents, createBot, fetchBackgroundTasks, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
+  ApiError, SignedOut, answerQuestion, cancelBackgroundTask, cancelDispatchPlan, checkSession, connectEvents, createBot, fetchBackgroundTasks, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
   fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchUiPrefs, forgetMemoryRule, removeUpload, resolveApproval, resolveRuleProposal, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers,
-  setComputerShell, setComputerWindow, steerBackgroundTask, stopThread, updateRoutine, uploadFile,
+  setComputerShell, setComputerWindow, startDispatchPlan, steerBackgroundTask, stopThread, updateRoutine, uploadFile,
 } from './api'
 import { BotModelChip, BotModelPicker, botModel, botSeesImages } from './components/BotModelPicker'
 import { ConfirmDialog, useEscape } from './components/ConfirmDialog'
 import { ConnectorsDialog } from './components/ConnectorsDialog'
 import { DemoBanner } from './components/DemoBanner'
 import { ComputerPanel } from './components/ComputerPanel'
-import { SidebarIcon, XIcon } from './components/Icons'
+import { BookOpenIcon, SidebarIcon, XIcon } from './components/Icons'
 import { ModelsDialog } from './components/ModelsDialog'
 import { NewBotForm } from './components/NewBotForm'
 import { SettingsDialog } from './components/SettingsDialog'
 import { SetupWizard, type LanguageSetting } from './components/SetupWizard'
 import { Sidebar } from './components/Sidebar'
+import { TeamCharterDialog } from './components/TeamCharterDialog'
 import { Thread } from './components/Thread'
 import { WikiDialog } from './components/WikiDialog'
 import { desktopApi } from './desktop'
@@ -23,7 +24,7 @@ import { errorText } from './i18n/describe'
 import { applyHello, applyStatus, clearDone } from './presence'
 import { applyTheme, hasStoredTheme, readStoredTheme, resolveTheme, systemTheme, writeStoredTheme } from './theme'
 import type {
-  BackgroundTaskPayload, BackgroundTaskView, BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, RuleProposalPayload, SetupInfo, ThemeSetting,
+  BackgroundTaskPayload, BackgroundTaskView, BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, DispatchPlanPayload, DispatchPlanView, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, RuleProposalPayload, SetupInfo, ThemeSetting,
 } from './types'
 
 const EMPTY_CONNECTORS: ConnectorsSnapshot = {
@@ -74,6 +75,22 @@ function bgTaskViewToPayload(task: BackgroundTaskView): BackgroundTaskPayload {
     createdAt: task.createdAt,
     startedAt: task.startedAt,
     finishedAt: task.finishedAt,
+  }
+}
+
+function planToPayload(plan: DispatchPlanView): DispatchPlanPayload {
+  return {
+    planId: plan.id,
+    threadId: plan.threadId,
+    createdBy: plan.createdBy,
+    title: plan.title,
+    status: plan.status,
+    sourceTainted: plan.sourceTainted,
+    error: plan.error,
+    steps: plan.steps,
+    createdAt: plan.createdAt,
+    startedAt: plan.startedAt,
+    finishedAt: plan.finishedAt,
   }
 }
 
@@ -188,6 +205,8 @@ function Workspace({
   const [wikiOpen, setWikiOpen] = useState(false)
   const [wikiRefreshTick, setWikiRefreshTick] = useState(0)
   const [quietDigestTick, setQuietDigestTick] = useState(0)
+  const [charterOpen, setCharterOpen] = useState(false)
+  const [teamCharterTick, setTeamCharterTick] = useState(0)
   const [pickerFor, setPickerFor] = useState<string | null>(null)
   /** 首次启动向导：网关说要（needsSetup）才出；走完之前一直开着，哪怕中途已经存好了 key */
   const [setup, setSetup] = useState<SetupInfo | null>(null)
@@ -240,8 +259,11 @@ function Workspace({
     panelFor.current = next?.botId ?? null
     setPanel(next)
   }, [])
-  // 面板属于某一位同事：换了线程就收起，免得新名字盖在旧屏幕上
-  useEffect(() => { showPanel(null) }, [selected?.id, showPanel])
+  // 面板属于某一位同事、团队章程属于某个群聊：换了线程就收起
+  useEffect(() => {
+    showPanel(null)
+    setCharterOpen(false)
+  }, [selected?.id, showPanel])
 
   /** 拉消息期间经 WS 到达的更新先记下来，拉回来后叠在快照上；重叠拉取按序号只认最新那次，绝不让慢快照抹掉刚收到的实时消息 */
   const liveDuringFetch = useRef(new Map<number, Message>())
@@ -411,6 +433,36 @@ function Workspace({
     }
   }, [])
 
+  const applyDispatchPlanUpdate = useCallback((plan: DispatchPlanView) => {
+    const nextPayload = planToPayload(plan)
+    if (inFlightFetches.current > 0) {
+      for (const [id, m] of liveDuringFetch.current) {
+        if (m.kind !== 'dispatch_plan' || m.thread_id !== plan.threadId) continue
+        const payload = m.payload as DispatchPlanPayload | null
+        const matchesId = plan.messageId !== null && m.id === plan.messageId
+        const matchesPlan = payload?.planId === plan.id
+        if (matchesId || matchesPlan) {
+          liveDuringFetch.current.set(id, { ...m, payload: nextPayload })
+        }
+      }
+    }
+    setMessages((ms) => {
+      let changed = false
+      const next = ms.map((m) => {
+        if (m.kind !== 'dispatch_plan' || m.thread_id !== plan.threadId) return m
+        const payload = m.payload as DispatchPlanPayload | null
+        const matchesId = plan.messageId !== null && m.id === plan.messageId
+        const matchesPlan = payload?.planId === plan.id
+        if (!matchesId && !matchesPlan) return m
+        changed = true
+        const updated: Message = { ...m, payload: nextPayload }
+        if (inFlightFetches.current > 0) liveDuringFetch.current.set(updated.id, updated)
+        return updated
+      })
+      return changed ? next : ms
+    })
+  }, [])
+
   /** 首次加载和每次重连都走这里：断线期间错过的消息、审批数、名册一次补齐。 */
   const resync = useCallback(async () => {
     try {
@@ -494,6 +546,7 @@ function Workspace({
         if (panelFor.current) void loadPanel(panelFor.current)
         setWikiRefreshTick((n) => n + 1)
         setQuietDigestTick((n) => n + 1)
+        setTeamCharterTick((n) => n + 1)
         return
       }
       if (e.type === 'status') {
@@ -530,6 +583,17 @@ function Workspace({
         applyBackgroundTaskUpdate(e.botId, e.task, { patchMessage: true })
         return
       }
+      if (e.type === 'team_charter_changed') {
+        if (e.threadId === threadIdRef.current) setTeamCharterTick((n) => n + 1)
+        return
+      }
+      if (e.type === 'dispatch_plan_changed') {
+        applyDispatchPlanUpdate(e.plan)
+        if (panelFor.current && (e.plan.status === 'completed' || e.plan.status === 'failed' || e.plan.status === 'cancelled')) {
+          void loadPanel(panelFor.current)
+        }
+        return
+      }
       if (e.type !== 'message') return // 更新的网关发来不认识的事件，不归这里管
       if (e.message.sender !== 'user' && e.message.kind !== 'activity') postedRef.current.add(e.message.sender)
       // 就地更新的旧消息（activity 卡片收尾、审批 chip 翻转）不该顶掉更新的那条预览；没变就不换数组引用
@@ -544,13 +608,17 @@ function Workspace({
       if (['approval_request', 'approval_resolved', 'question'].includes(e.message.kind)) {
         void refreshConversations().catch(guard)
       }
-      // 面板开着时，记忆规则变动、规矩提议、晨报汇总、放行规则落地或后台任务结束都实时刷新（后台步骤更新由 background_task_changed 就地修补，避免频繁拉 /computer）
+      // 面板开着时，记忆规则变动、规矩提议、晨报汇总、放行规则落地或后台任务/流水线结束都实时刷新（步骤更新由事件就地修补，避免频繁拉 /computer）
       if (panelFor.current) {
         const settledBg = e.message.kind === 'background_task' && (() => {
           const st = (e.message.payload as BackgroundTaskPayload | null)?.status
           return st === 'completed' || st === 'failed' || st === 'cancelled'
         })()
-        if (settledBg || ['memory_updated', 'approval_resolved', 'activity', 'rule_proposal', 'quiet_digest'].includes(e.message.kind)) {
+        const settledDispatch = e.message.kind === 'dispatch_plan' && (() => {
+          const st = (e.message.payload as DispatchPlanPayload | null)?.status
+          return st === 'completed' || st === 'failed' || st === 'cancelled'
+        })()
+        if (settledBg || settledDispatch || ['memory_updated', 'approval_resolved', 'activity', 'rule_proposal', 'quiet_digest'].includes(e.message.kind)) {
           void loadPanel(panelFor.current)
         }
       }
@@ -566,7 +634,7 @@ function Workspace({
         })
       }
     }, { onSignedOut: signOut })
-  }, [signedOut, resync, refreshConversations, loadConnectors, loadMcpServers, loadPanel, applyBackgroundTaskUpdate, guard, signOut])
+  }, [signedOut, resync, refreshConversations, loadConnectors, loadMcpServers, loadPanel, applyBackgroundTaskUpdate, applyDispatchPlanUpdate, guard, signOut])
 
   const waiting = conversations.reduce((sum, c) => sum + (c.pending ?? 0), 0)
   useEffect(() => {
@@ -717,6 +785,52 @@ function Workspace({
       }
     },
     [applyBackgroundTaskUpdate, guard, loadBackgroundTasks, loadMessages, resync],
+  )
+
+  const onStartDispatchPlan = useCallback(
+    async (planId: string) => {
+      try {
+        const res = await startDispatchPlan(planId)
+        applyDispatchPlanUpdate(res.plan)
+      } catch (err: unknown) {
+        if (err instanceof SignedOut) {
+          setSignedOut(true)
+          return
+        }
+        if (err instanceof ApiError && err.status === 409) {
+          const currentThread = threadIdRef.current
+          if (currentThread) void loadMessages(currentThread).catch(guard)
+          else void resync()
+          throw err
+        }
+        guard(err)
+        throw err
+      }
+    },
+    [applyDispatchPlanUpdate, guard, loadMessages, resync],
+  )
+
+  const onCancelDispatchPlan = useCallback(
+    async (planId: string) => {
+      try {
+        const res = await cancelDispatchPlan(planId)
+        applyDispatchPlanUpdate(res.plan)
+      } catch (err: unknown) {
+        if (err instanceof SignedOut) {
+          setSignedOut(true)
+          return
+        }
+        if (err instanceof ApiError && err.status === 409) {
+          const currentThread = threadIdRef.current
+          if (currentThread) void loadMessages(currentThread).catch(guard)
+          else void resync()
+          throw err
+        }
+        guard(err)
+        throw err
+      }
+    },
+    [applyDispatchPlanUpdate, guard, loadMessages, resync],
   )
 
   const onForgetRule = (rule: string) => {
@@ -888,6 +1002,17 @@ function Workspace({
       ) : null}
     </>
   ) : null
+  const groupHeaderExtra = selected?.kind === 'group' ? (
+    <button
+      type="button"
+      className="header-charter-btn"
+      onClick={() => setCharterOpen(true)}
+      title={t('teamCharter.title')}
+    >
+      <BookOpenIcon size={14} />
+      <span>{t('teamCharter.button')}</span>
+    </button>
+  ) : null
 
   return (
     <div className="app">
@@ -936,13 +1061,15 @@ function Workspace({
           onResolveRuleProposal={onResolveRuleProposal}
           onSteerBackgroundTask={onSteerBackgroundTask}
           onCancelBackgroundTask={onCancelBackgroundTask}
+          onStartDispatchPlan={onStartDispatchPlan}
+          onCancelDispatchPlan={onCancelDispatchPlan}
           onOpenScreen={openScreen}
           onToggleScreen={toggleScreen}
           panelOpen={Boolean(selected.kind === 'dm' && selected.members[0] && panel?.botId === selected.members[0])}
           onToggleSidebar={() => setSidebarOpen((o) => !o)}
           onStop={() => { if (threadId) stopThread(threadId).catch(guard) }}
           banner={demoBanner}
-          headerExtra={dmHeaderExtra}
+          headerExtra={selected.kind === 'group' ? groupHeaderExtra : dmHeaderExtra}
         />
       ) : (
         <main className="thread thread-empty">
@@ -1019,6 +1146,15 @@ function Workspace({
           refreshTick={wikiRefreshTick}
           onClose={() => setWikiOpen(false)}
           onSignedOut={signOut}
+        />
+      ) : null}
+      {charterOpen && selected?.kind === 'group' ? (
+        <TeamCharterDialog
+          threadId={selected.id}
+          groupTitle={selected.title}
+          refreshTick={teamCharterTick}
+          onSignedOut={signOut}
+          onClose={() => setCharterOpen(false)}
         />
       ) : null}
       {llms && pickerFor && !modelsOpen && !connectorsOpen && !wikiOpen ? (

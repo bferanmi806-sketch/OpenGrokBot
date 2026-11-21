@@ -376,6 +376,7 @@ export type MessageKind =
   | 'quiet_digest'
   | 'rule_proposal'
   | 'background_task'
+  | 'dispatch_plan'
 
 export type Message = {
   id: number
@@ -400,6 +401,7 @@ export type Message = {
     | QuietDigestPayload
     | RuleProposalPayload
     | BackgroundTaskPayload
+    | DispatchPlanPayload
     | null
   created_at: number
 }
@@ -442,6 +444,8 @@ export type GatewayEvent =
   | { type: 'wiki_changed' }
   | { type: 'quiet_digest_changed' }
   | { type: 'background_task_changed'; botId: string; task: BackgroundTaskView }
+  | { type: 'dispatch_plan_changed'; threadId: string; plan: DispatchPlanView }
+  | { type: 'team_charter_changed'; threadId: string }
 
 export type ServerEvent = GatewayEvent
 
@@ -898,4 +902,73 @@ export type BackgroundTaskPayload = {
 export type BackgroundTaskActionResponse = {
   ok: true
   task: BackgroundTaskView
+}
+
+export type DispatchPlanStatus = 'draft' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
+
+export type DispatchStepStatus =
+  | 'pending'
+  | 'running'
+  | 'waiting_approval'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+  | 'cancelled'
+
+export type DispatchStepView = {
+  id: string
+  seq: number
+  wave: number
+  botId: string
+  title: string
+  instructions: string
+  dependsOn: string[]
+  status: DispatchStepStatus
+  output: string
+  error: string
+  outputTainted: boolean
+  waitingApprovalId: number | null
+  waitingQuestionId: number | null
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export type DispatchPlanView = {
+  id: string
+  threadId: string
+  createdBy: string
+  title: string
+  status: DispatchPlanStatus
+  sourceTainted: boolean
+  messageId: number | null
+  error: string
+  steps: DispatchStepView[]
+  createdAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export type DispatchPlanPayload = {
+  planId: string
+  threadId: string
+  createdBy: string
+  title: string
+  status: DispatchPlanStatus
+  sourceTainted: boolean
+  error: string
+  steps: DispatchStepView[]
+  createdAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export type DispatchPlanActionResponse = {
+  ok: true
+  plan: DispatchPlanView
+}
+
+export type TeamCharterView = {
+  threadId: string
+  content: string
+  updatedAt: number | null
 }

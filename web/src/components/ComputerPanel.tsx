@@ -100,7 +100,7 @@ const TRIGGER: Record<string, MessageKey> = {
   you: 'panel.trigger.you', group: 'panel.trigger.group', handoff: 'panel.trigger.handoff',
   approval: 'panel.trigger.approval', question: 'panel.trigger.question', routine: 'panel.trigger.routine',
   watch: 'panel.trigger.watch', prepare: 'panel.trigger.prepare', webhook: 'panel.trigger.webhook',
-  background: 'panel.trigger.background',
+  background: 'panel.trigger.background', pipeline: 'panel.trigger.pipeline',
 }
 
 function PanelBackgroundTaskRow({

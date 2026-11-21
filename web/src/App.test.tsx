@@ -2,7 +2,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import type { BackgroundTaskView, Conversation, Message } from './types'
+import type { BackgroundTaskView, Conversation, DispatchPlanView, Message } from './types'
 
 class FakeSocket {
   static last: FakeSocket | null = null
@@ -47,6 +47,12 @@ function mockGateway(opts: {
   steerBackgroundTask?: (url: string, body: Record<string, unknown>) => { status?: number; body: unknown }
   /** POST /api/background-tasks/:id/cancel 的回答 */
   cancelBackgroundTask?: (url: string) => { status?: number; body: unknown }
+  /** GET/PUT /api/threads/:id/team 的回答 */
+  teamCharter?: (url: string, init?: RequestInit) => { status?: number; body: unknown } | Promise<{ status?: number; body: unknown }>
+  /** POST /api/dispatch-plans/:id/start 的回答 */
+  startDispatchPlan?: (url: string) => { status?: number; body: unknown }
+  /** POST /api/dispatch-plans/:id/cancel 的回答 */
+  cancelDispatchPlan?: (url: string) => { status?: number; body: unknown }
 } = {}) {
   const calls: string[] = []
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -108,6 +114,18 @@ function mockGateway(opts: {
     }
     if (url.startsWith('/api/background-tasks/') && url.endsWith('/cancel') && init?.method === 'POST' && opts.cancelBackgroundTask) {
       const reply = opts.cancelBackgroundTask(url)
+      return json(reply.body, reply.status ?? 200)
+    }
+    if (url.startsWith('/api/threads/') && url.endsWith('/team') && opts.teamCharter) {
+      const reply = await opts.teamCharter(url, init)
+      return json(reply.body, reply.status ?? 200)
+    }
+    if (url.startsWith('/api/dispatch-plans/') && url.endsWith('/start') && init?.method === 'POST' && opts.startDispatchPlan) {
+      const reply = opts.startDispatchPlan(url)
+      return json(reply.body, reply.status ?? 200)
+    }
+    if (url.startsWith('/api/dispatch-plans/') && url.endsWith('/cancel') && init?.method === 'POST' && opts.cancelDispatchPlan) {
+      const reply = opts.cancelDispatchPlan(url)
       return json(reply.body, reply.status ?? 200)
     }
     if (url.startsWith('/api/threads/')) return json(opts.messages ? await opts.messages(url) : [])
@@ -1289,5 +1307,245 @@ describe('App', () => {
     })
     expect(await screen.findByText('Completed while panel was waking.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /background task/i })).toBeNull()
+  })
+
+  it('opens Team charter modal from a group thread header, saves team.md, and refreshes on team_charter_changed', async () => {
+    let charterContent = '- Scout researches before Ticker prices.'
+    const groupConv = conversation({
+      id: 'group:offsite-crew',
+      kind: 'group',
+      title: 'Offsite crew',
+      emoji: '👥',
+      subtitle: 'Chief, Scout, Ticker',
+      members: ['chief', 'researcher', 'market-watch'],
+    })
+
+    const calls = mockGateway({
+      conversations: [conversation({}), groupConv],
+      bots: [
+        { id: 'chief', name: 'Chief', role: 'lead', emoji: '🧭', thread_id: 'dm:chief', last_message: null },
+        { id: 'researcher', name: 'Scout', role: 'research', emoji: '🔎', thread_id: 'dm:researcher', last_message: null },
+        { id: 'market-watch', name: 'Ticker', role: 'pricing', emoji: '📈', thread_id: 'dm:market-watch', last_message: null },
+      ],
+      teamCharter: (_url, init) => {
+        if (init?.method === 'PUT') {
+          const sent = JSON.parse(String(init.body)) as { content: string }
+          charterContent = sent.content
+          return { status: 200, body: { threadId: 'group:offsite-crew', content: charterContent, updatedAt: 2000 } }
+        }
+        return { status: 200, body: { threadId: 'group:offsite-crew', content: charterContent, updatedAt: 1000 } }
+      },
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    const socket = await ready()
+
+    // DM thread must NOT render Team charter button
+    expect(screen.queryByRole('button', { name: 'Team charter' })).toBeNull()
+
+    // Switch to group thread -> Team charter button appears in header
+    await user.click(screen.getByRole('button', { name: /Offsite crew/ }))
+    const charterBtn = await screen.findByRole('button', { name: 'Team charter' })
+    await user.click(charterBtn)
+
+    const textarea = await screen.findByRole('textbox', { name: 'Team charter (team.md)' }) as HTMLTextAreaElement
+    expect(textarea.value).toBe('- Scout researches before Ticker prices.')
+
+    // Edit & save
+    await user.type(textarea, '\n- Keep updates concise.')
+    await user.click(screen.getByRole('button', { name: 'Save charter' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved to team.md.')
+    expect(calls.some((c) => c.startsWith('PUT /api/threads/group%3Aoffsite-crew/team '))).toBe(true)
+
+    // Remote team_charter_changed event refreshes clean dialog
+    charterContent = '- Updated remotely.'
+    await act(async () => {
+      socket.emit({ type: 'team_charter_changed', threadId: 'group:offsite-crew' })
+    })
+    await waitFor(() => {
+      expect(textarea.value).toBe('- Updated remotely.')
+    })
+  })
+
+  it('live-patches dispatch_plan_changed over WS, patches immediately on Start/Cancel 200, and resyncs stale plans on 409', async () => {
+    const groupConv = conversation({
+      id: 'group:offsite-crew',
+      kind: 'group',
+      title: 'Offsite crew',
+      emoji: '👥',
+      subtitle: 'Chief, Scout, Ticker',
+      members: ['chief', 'researcher', 'market-watch'],
+    })
+
+    const baseStep1 = {
+      id: 's1',
+      seq: 0,
+      wave: 0,
+      botId: 'researcher',
+      title: 'Gather facts',
+      instructions: 'Research competitors',
+      dependsOn: [],
+      status: 'pending' as const,
+      output: '',
+      error: '',
+      outputTainted: false,
+      waitingApprovalId: null,
+      waitingQuestionId: null,
+      startedAt: null,
+      finishedAt: null,
+    }
+
+    const plan1Draft: DispatchPlanView = {
+      id: 'dp-aaaa1111',
+      threadId: 'group:offsite-crew',
+      createdBy: 'chief',
+      title: 'Q3 launch workflow',
+      status: 'draft',
+      sourceTainted: false,
+      messageId: 90,
+      error: '',
+      steps: [baseStep1],
+      createdAt: 100,
+      startedAt: null,
+      finishedAt: null,
+    }
+    const plan2Draft: DispatchPlanView = {
+      ...plan1Draft,
+      id: 'dp-bbbb2222',
+      title: 'Stale workflow',
+      messageId: 91,
+      createdAt: 110,
+    }
+
+    let serverMessages: Message[] = [
+      {
+        id: 90,
+        thread_id: 'group:offsite-crew',
+        sender: 'chief',
+        kind: 'dispatch_plan',
+        content: '',
+        payload: {
+          planId: plan1Draft.id,
+          threadId: plan1Draft.threadId,
+          createdBy: plan1Draft.createdBy,
+          title: plan1Draft.title,
+          status: plan1Draft.status,
+          sourceTainted: plan1Draft.sourceTainted,
+          error: plan1Draft.error,
+          steps: plan1Draft.steps,
+          createdAt: plan1Draft.createdAt,
+          startedAt: plan1Draft.startedAt,
+          finishedAt: plan1Draft.finishedAt,
+        },
+        created_at: 100,
+      },
+      {
+        id: 91,
+        thread_id: 'group:offsite-crew',
+        sender: 'chief',
+        kind: 'dispatch_plan',
+        content: '',
+        payload: {
+          planId: plan2Draft.id,
+          threadId: plan2Draft.threadId,
+          createdBy: plan2Draft.createdBy,
+          title: plan2Draft.title,
+          status: plan2Draft.status,
+          sourceTainted: plan2Draft.sourceTainted,
+          error: plan2Draft.error,
+          steps: plan2Draft.steps,
+          createdAt: plan2Draft.createdAt,
+          startedAt: plan2Draft.startedAt,
+          finishedAt: plan2Draft.finishedAt,
+        },
+        created_at: 110,
+      },
+    ]
+
+    mockGateway({
+      conversations: [groupConv],
+      bots: [
+        { id: 'chief', name: 'Chief', role: 'lead', emoji: '🧭', thread_id: 'dm:chief', last_message: null },
+        { id: 'researcher', name: 'Scout', role: 'research', emoji: '🔎', thread_id: 'dm:researcher', last_message: null },
+        { id: 'market-watch', name: 'Ticker', role: 'pricing', emoji: '📈', thread_id: 'dm:market-watch', last_message: null },
+      ],
+      messages: () => serverMessages,
+      startDispatchPlan: (url) => {
+        if (url === '/api/dispatch-plans/dp-aaaa1111/start') {
+          const started: DispatchPlanView = {
+            ...plan1Draft,
+            status: 'running',
+            startedAt: 200,
+            steps: [{ ...baseStep1, status: 'running', startedAt: 200 }],
+          }
+          return { status: 200, body: { ok: true, plan: started } }
+        }
+        // Stale plan2 returns 409 invalid_state -> server has it completed
+        serverMessages = serverMessages.map((m) => (
+          m.id === 91 && m.payload && 'planId' in m.payload
+            ? {
+                ...m,
+                payload: {
+                  ...m.payload,
+                  status: 'completed',
+                  finishedAt: 350,
+                  steps: [{ ...baseStep1, status: 'completed', output: 'Already done on server.' }],
+                },
+              }
+            : m
+        ))
+        return { status: 409, body: { error: 'Plan dp-bbbb2222 is already completed.', code: 'invalid_state' } }
+      },
+      cancelDispatchPlan: (url) => {
+        if (url === '/api/dispatch-plans/dp-aaaa1111/cancel') {
+          const cancelled: DispatchPlanView = {
+            ...plan1Draft,
+            status: 'cancelled',
+            finishedAt: 260,
+            steps: [{ ...baseStep1, status: 'cancelled', finishedAt: 260 }],
+          }
+          return { status: 200, body: { ok: true, plan: cancelled } }
+        }
+        return { status: 409, body: { error: 'already settled', code: 'settled' } }
+      },
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findAllByText('Offsite crew')
+    await waitFor(() => expect(FakeSocket.last).not.toBeNull())
+    await act(async () => {})
+    const socket = FakeSocket.last!
+
+    // Start plan1 -> 200 patches immediately to Running without waiting for WS
+    const startBtns = await screen.findAllByRole('button', { name: 'Start pipeline' })
+    await user.click(startBtns[0]!)
+    expect((await screen.findAllByText('Running')).length).toBeGreaterThanOrEqual(2)
+
+    // WS dispatch_plan_changed updates plan1 step to waiting_approval / paused live
+    await act(async () => {
+      socket.emit({
+        type: 'dispatch_plan_changed',
+        threadId: 'group:offsite-crew',
+        plan: {
+          ...plan1Draft,
+          status: 'paused',
+          startedAt: 200,
+          steps: [{ ...baseStep1, status: 'waiting_approval', waitingApprovalId: 5 }],
+        },
+      })
+    })
+    expect(await screen.findByText('Waiting on approval')).toBeInTheDocument()
+    expect(screen.getByText('Waiting on you')).toBeInTheDocument()
+
+    // Cancel plan1 -> 200 patches immediately to Cancelled
+    const cancelBtns = screen.getAllByRole('button', { name: 'Cancel pipeline' })
+    await user.click(cancelBtns[0]!)
+    expect((await screen.findAllByText('Cancelled')).length).toBeGreaterThanOrEqual(2)
+
+    // Start stale plan2 -> 409 triggers thread resync and flips card to Completed
+    await user.click(screen.getByRole('button', { name: 'Start pipeline' }))
+    expect(await screen.findByText('Completed')).toBeInTheDocument()
   })
 })

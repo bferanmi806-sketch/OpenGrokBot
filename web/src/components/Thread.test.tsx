@@ -536,4 +536,90 @@ describe('Thread', () => {
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(onCancel).toHaveBeenCalledWith('bg-abcd1234')
   })
+
+  it('renders dispatch_plan messages with roster names and forwards start and cancel callbacks', async () => {
+    const onStart = vi.fn().mockResolvedValue(undefined)
+    const onCancel = vi.fn().mockResolvedValue(undefined)
+    const user = userEvent.setup()
+    const planMessages: Message[] = [
+      {
+        id: 80,
+        thread_id: 'group:offsite-crew',
+        sender: 'chief',
+        kind: 'dispatch_plan',
+        content: '',
+        created_at: 80,
+        payload: {
+          planId: 'dp-abcd1234',
+          threadId: 'group:offsite-crew',
+          createdBy: 'chief',
+          title: 'Pricing brief pipeline',
+          status: 'draft',
+          sourceTainted: false,
+          error: '',
+          steps: [
+            {
+              id: 's1',
+              seq: 0,
+              wave: 0,
+              botId: 'researcher',
+              title: 'Research competitors',
+              instructions: 'Collect benchmarks',
+              dependsOn: [],
+              status: 'pending',
+              output: '',
+              error: '',
+              outputTainted: false,
+              waitingApprovalId: null,
+              waitingQuestionId: null,
+              startedAt: null,
+              finishedAt: null,
+            },
+            {
+              id: 's2',
+              seq: 1,
+              wave: 1,
+              botId: 'market-watch',
+              title: 'Model pricing tiers',
+              instructions: 'Build tier model',
+              dependsOn: ['s1'],
+              status: 'pending',
+              output: '',
+              error: '',
+              outputTainted: false,
+              waitingApprovalId: null,
+              waitingQuestionId: null,
+              startedAt: null,
+              finishedAt: null,
+            },
+          ],
+          createdAt: 80,
+          startedAt: null,
+          finishedAt: null,
+        },
+      },
+    ]
+    render(
+      <Thread
+        conversation={group}
+        roster={roster}
+        messages={planMessages}
+        thinking={false}
+        onSend={() => {}}
+        onDecide={() => {}}
+        onStartDispatchPlan={onStart}
+        onCancelDispatchPlan={onCancel}
+      />,
+    )
+    expect(screen.getByText('Pricing brief pipeline')).toBeInTheDocument()
+    expect(screen.getByText('🔎 Scout')).toBeInTheDocument()
+    expect(screen.getByText('📈 Ticker')).toBeInTheDocument()
+    expect(screen.getByText('After s1')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Start pipeline' }))
+    expect(onStart).toHaveBeenCalledWith('dp-abcd1234')
+
+    await user.click(screen.getByRole('button', { name: 'Cancel pipeline' }))
+    expect(onCancel).toHaveBeenCalledWith('dp-abcd1234')
+  })
 })

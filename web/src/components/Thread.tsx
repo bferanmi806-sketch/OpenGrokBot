@@ -1,6 +1,6 @@
 import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
 import type {
-  ActivityPayload, ApprovalEditInput, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BackgroundTaskPayload, BotRefPayload, Conversation, LoginPayload, MemoryPayload,
+  ActivityPayload, ApprovalEditInput, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BackgroundTaskPayload, BotRefPayload, Conversation, DispatchPlanPayload, LoginPayload, MemoryPayload,
   Message, QuestionPayload, QuietDigestPayload, ReportPayload, RoutinePayload, RuleDuration, RuleProposalPayload, ScreenshotPayload, WebhookPayload,
 } from '../types'
 import { ApiError } from '../api'
@@ -15,6 +15,7 @@ import { BotAvatar, conversationSeed } from './BotAvatar'
 import { BotRefChip } from './BotRefChip'
 import { PendingFiles, usePendingFiles, type FilesIO } from './ComposerFiles'
 import { ConfirmDialog } from './ConfirmDialog'
+import { DispatchPlanChip } from './DispatchPlanChip'
 import { ArrowDownIcon, ArrowUpIcon, AtSignIcon, MonitorIcon, PaperclipIcon, SidebarIcon, StopSquareIcon } from './Icons'
 import { Lightbox, type LightboxImage } from './Lightbox'
 import { LoginChip } from './LoginChip'
@@ -60,20 +61,23 @@ type Mention = { id: string; name: string; emoji: string }
 
 /** 单条消息独立 memo：底部输入框每次敲键盘、挪光标都不再把上面 ~200 条 Markdown 重新编译一遍 */
 const ThreadMessageRow = memo(function ThreadMessageRow({
-  message, dayHeader, showTime, sameSpeakerNext, speaker, t,
-  onDecide, onAnswer, onResolveRuleProposal, onSteerBackgroundTask, onCancelBackgroundTask, onOpenScreen, onPreview, onRemoveFile, onRequestRemoveFile,
+  message, dayHeader, showTime, sameSpeakerNext, speaker, roster, t,
+  onDecide, onAnswer, onResolveRuleProposal, onSteerBackgroundTask, onCancelBackgroundTask, onStartDispatchPlan, onCancelDispatchPlan, onOpenScreen, onPreview, onRemoveFile, onRequestRemoveFile,
 }: {
   message: Message
   dayHeader: string | null
   showTime: boolean
   sameSpeakerNext: boolean
   speaker: { name: string; emoji: string } | undefined
+  roster: Record<string, { name: string; emoji: string }>
   t: T
   onDecide: (approvalId: number, decision: 'approve' | 'discard', remember?: RuleDuration, items?: number[], edit?: ApprovalEditInput) => void | Promise<void>
   onAnswer?: ((messageId: number, choices: string[]) => void | Promise<void>) | undefined
   onResolveRuleProposal?: ((proposalId: number, decision: 'accept' | 'dismiss', rule?: string) => void | Promise<void>) | undefined
   onSteerBackgroundTask?: ((taskId: string, note: string) => void | Promise<void>) | undefined
   onCancelBackgroundTask?: ((taskId: string) => void | Promise<void>) | undefined
+  onStartDispatchPlan?: ((planId: string) => void | Promise<void>) | undefined
+  onCancelDispatchPlan?: ((planId: string) => void | Promise<void>) | undefined
   onOpenScreen?: (() => void) | undefined
   onPreview: (img: LightboxImage) => void
   onRemoveFile?: ((id: string) => void) | undefined
@@ -130,6 +134,15 @@ const ThreadMessageRow = memo(function ThreadMessageRow({
             payload={m.payload as BackgroundTaskPayload}
             {...(onSteerBackgroundTask ? { onSteer: onSteerBackgroundTask } : {})}
             {...(onCancelBackgroundTask ? { onCancel: onCancelBackgroundTask } : {})}
+          />
+        )
+      case 'dispatch_plan':
+        return (
+          <DispatchPlanChip
+            payload={m.payload as DispatchPlanPayload}
+            roster={roster}
+            {...(onStartDispatchPlan ? { onStart: onStartDispatchPlan } : {})}
+            {...(onCancelDispatchPlan ? { onCancel: onCancelDispatchPlan } : {})}
           />
         )
       case 'approval_resolved': {
@@ -196,7 +209,7 @@ const carriesFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).i
 
 export function Thread({
   conversation, messages, thinking, onSend, onDecide, onAnswer, onResolveRuleProposal,
-  onSteerBackgroundTask, onCancelBackgroundTask, roster,
+  onSteerBackgroundTask, onCancelBackgroundTask, onStartDispatchPlan, onCancelDispatchPlan, roster,
   onOpenScreen, onToggleScreen, panelOpen, onStop, headerExtra, banner, files, onToggleSidebar,
 }: {
   conversation: Conversation
@@ -216,6 +229,10 @@ export function Thread({
   onSteerBackgroundTask?: (taskId: string, note: string) => void | Promise<void>
   /** 取消排队中或运行中的后台任务 */
   onCancelBackgroundTask?: (taskId: string) => void | Promise<void>
+  /** 启动一条草稿协作流水线 */
+  onStartDispatchPlan?: (planId: string) => void | Promise<void>
+  /** 取消一条草稿、运行中或暂停中的协作流水线 */
+  onCancelDispatchPlan?: (planId: string) => void | Promise<void>
   roster: Record<string, { name: string; emoji: string }>
   onOpenScreen?: () => void
   onToggleScreen?: () => void
@@ -477,10 +494,10 @@ export function Thread({
   }
 
   const callbacksRef = useRef({
-    onDecide, onAnswer, onResolveRuleProposal, onSteerBackgroundTask, onCancelBackgroundTask, onOpenScreen, removeFile: files?.remove,
+    onDecide, onAnswer, onResolveRuleProposal, onSteerBackgroundTask, onCancelBackgroundTask, onStartDispatchPlan, onCancelDispatchPlan, onOpenScreen, removeFile: files?.remove,
   })
   callbacksRef.current = {
-    onDecide, onAnswer, onResolveRuleProposal, onSteerBackgroundTask, onCancelBackgroundTask, onOpenScreen, removeFile: files?.remove,
+    onDecide, onAnswer, onResolveRuleProposal, onSteerBackgroundTask, onCancelBackgroundTask, onStartDispatchPlan, onCancelDispatchPlan, onOpenScreen, removeFile: files?.remove,
   }
   const stableDecide = useCallback(
     (...args: Parameters<typeof onDecide>) => callbacksRef.current.onDecide(...args),
@@ -498,6 +515,14 @@ export function Thread({
   )
   const stableCancelBackgroundTask = useCallback(
     (taskId: string) => callbacksRef.current.onCancelBackgroundTask?.(taskId),
+    [],
+  )
+  const stableStartDispatchPlan = useCallback(
+    (planId: string) => callbacksRef.current.onStartDispatchPlan?.(planId),
+    [],
+  )
+  const stableCancelDispatchPlan = useCallback(
+    (planId: string) => callbacksRef.current.onCancelDispatchPlan?.(planId),
     [],
   )
   const stableOpenScreen = useCallback(() => callbacksRef.current.onOpenScreen?.(), [])
@@ -623,12 +648,15 @@ export function Thread({
               showTime={showTime}
               sameSpeakerNext={sameSpeakerNext}
               speaker={speaker}
+              roster={roster}
               t={t}
               onDecide={stableDecide}
               onAnswer={onAnswer ? stableAnswer : undefined}
               onResolveRuleProposal={onResolveRuleProposal ? stableResolveRuleProposal : undefined}
               onSteerBackgroundTask={onSteerBackgroundTask ? stableSteerBackgroundTask : undefined}
               onCancelBackgroundTask={onCancelBackgroundTask ? stableCancelBackgroundTask : undefined}
+              onStartDispatchPlan={onStartDispatchPlan ? stableStartDispatchPlan : undefined}
+              onCancelDispatchPlan={onCancelDispatchPlan ? stableCancelDispatchPlan : undefined}
               onOpenScreen={onOpenScreen ? stableOpenScreen : undefined}
               onPreview={setLightbox}
               onRemoveFile={hasRemoveFile ? stableRemoveFile : undefined}

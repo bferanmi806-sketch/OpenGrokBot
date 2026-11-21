@@ -4,15 +4,18 @@ import {
   ApiError,
   SignedOut,
   cancelBackgroundTask,
+  cancelDispatchPlan,
   createMcpServer,
   createWikiPage,
   deleteMcpServer,
   deleteWikiPage,
   fetchBackgroundTasks,
+  fetchDispatchPlans,
   fetchLlmQueue,
   fetchMcpServers,
   fetchQuietDigest,
   fetchRuleProposals,
+  fetchTeamCharter,
   fetchWiki,
   fetchWikiPage,
   flushQuietDigest,
@@ -20,9 +23,11 @@ import {
   resolveApproval,
   resolveRuleProposal,
   revertWikiPage,
+  saveTeamCharter,
   saveWikiPage,
   setBotMcpServers,
   setMcpServerBots,
+  startDispatchPlan,
   steerBackgroundTask,
   testMcpServer,
   updateMcpServer,
@@ -36,6 +41,11 @@ import type {
   BackgroundTaskView,
   BotRefPayload,
   ComputerInfo,
+  DispatchPlanActionResponse,
+  DispatchPlanPayload,
+  DispatchPlanStatus,
+  DispatchPlanView,
+  DispatchStepStatus,
   GatewayEvent,
   LlmPriority,
   LlmQueueEndpointView,
@@ -50,6 +60,7 @@ import type {
   RuleProposalPayload,
   RuleProposalView,
   SettingsView,
+  TeamCharterView,
   WikiListResponse,
   WikiPageDetail,
   WikiPageResponse,
@@ -554,6 +565,74 @@ describe('the Chinese dictionary', () => {
     expect(translate('zh-CN', 'bgTask.noteTooLong', { max: 1000 })).toBe('纠偏指令不能超过 1000 个字符。')
     expect(translate('en', 'sidebar.preview.backgroundTask', { title: 'Audit' })).toBe('Background: Audit')
     expect(translate('zh-CN', 'sidebar.preview.backgroundTask', { title: '竞品调研' })).toBe('后台任务：竞品调研')
+  })
+
+  it('includes Phase 8 dispatch pipeline, team charter, panel trigger, error, and sidebar preview keys in both languages with placeholder parity', () => {
+    const requiredPhase8Keys: MessageKey[] = [
+      'panel.trigger.pipeline',
+      'error.invalid_state',
+      'error.invalid_content',
+      'sidebar.preview.dispatchPlan',
+      'dispatch.label',
+      'dispatch.status.draft',
+      'dispatch.status.running',
+      'dispatch.status.paused',
+      'dispatch.status.completed',
+      'dispatch.status.failed',
+      'dispatch.status.cancelled',
+      'dispatch.stepStatus.pending',
+      'dispatch.stepStatus.running',
+      'dispatch.stepStatus.waiting_approval',
+      'dispatch.stepStatus.completed',
+      'dispatch.stepStatus.failed',
+      'dispatch.stepStatus.skipped',
+      'dispatch.stepStatus.cancelled',
+      'dispatch.taintedBadge',
+      'dispatch.after',
+      'dispatch.wave',
+      'dispatch.start',
+      'dispatch.starting',
+      'dispatch.cancel',
+      'dispatch.cancelling',
+      'dispatch.draftHint',
+      'dispatch.startFailed',
+      'dispatch.cancelFailed',
+      'dispatch.alreadySettled',
+      'dispatch.showOutput',
+      'dispatch.hideOutput',
+      'teamCharter.button',
+      'teamCharter.title',
+      'teamCharter.subtitle',
+      'teamCharter.placeholder',
+      'teamCharter.loading',
+      'teamCharter.loadFailed',
+      'teamCharter.save',
+      'teamCharter.saving',
+      'teamCharter.saved',
+      'teamCharter.tooLong',
+      'teamCharter.saveFailed',
+      'teamCharter.close',
+      'teamCharter.cancel',
+    ]
+    for (const key of requiredPhase8Keys) {
+      expect(en[key]).toBeTruthy()
+      expect(zhCN[key]).toBeTruthy()
+      expect({ key, names: placeholders(zhCN[key]) }).toEqual({ key, names: placeholders(en[key]) })
+    }
+    expect(en['panel.trigger.pipeline']).toBe('Pipeline')
+    expect(zhCN['panel.trigger.pipeline']).toBe('流水线')
+    expect(en['dispatch.label']).toBe('Dispatch pipeline')
+    expect(zhCN['dispatch.label']).toBe('协作流水线')
+    expect(en['teamCharter.button']).toBe('Team charter')
+    expect(zhCN['teamCharter.button']).toBe('团队章程')
+    expect(translate('en', 'dispatch.after', { deps: 's1, s2' })).toBe('After s1, s2')
+    expect(translate('zh-CN', 'dispatch.after', { deps: 's1, s2' })).toBe('依赖 s1, s2')
+    expect(translate('en', 'dispatch.wave', { wave: 2 })).toBe('Stage 2')
+    expect(translate('zh-CN', 'dispatch.wave', { wave: 2 })).toBe('阶段 2')
+    expect(translate('en', 'teamCharter.tooLong', { max: 16384 })).toBe('Team charter must be 16384 characters or fewer.')
+    expect(translate('zh-CN', 'teamCharter.tooLong', { max: 16384 })).toBe('团队章程不能超过 16384 个字符。')
+    expect(translate('en', 'sidebar.preview.dispatchPlan', { title: 'Q3 rollout' })).toBe('Pipeline: Q3 rollout')
+    expect(translate('zh-CN', 'sidebar.preview.dispatchPlan', { title: 'Q3 发布' })).toBe('流水线：Q3 发布')
   })
 })
 
@@ -1348,5 +1427,166 @@ describe('Background Tasks API client', () => {
     expect(approval.ruleHeld).toBe('background')
     expect(ev.type).toBe('background_task_changed')
     expect(comp.backgroundTasks).toHaveLength(1)
+  })
+})
+
+describe('Team Charter & Dispatch Plans API client', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  const sampleCharter: TeamCharterView = {
+    threadId: 'group:offsite crew',
+    content: '- Scout researches first.',
+    updatedAt: 1000,
+  }
+
+  const samplePlan: DispatchPlanView = {
+    id: 'dp-a1b2c3d4',
+    threadId: 'group:offsite crew',
+    createdBy: 'chief',
+    title: 'Q3 pricing & outreach',
+    status: 'draft',
+    sourceTainted: false,
+    messageId: 88,
+    error: '',
+    steps: [
+      {
+        id: 's1',
+        seq: 0,
+        wave: 0,
+        botId: 'researcher',
+        title: 'Gather facts',
+        instructions: 'Write findings to team wiki',
+        dependsOn: [],
+        status: 'pending',
+        output: '',
+        error: '',
+        outputTainted: false,
+        waitingApprovalId: null,
+        waitingQuestionId: null,
+        startedAt: null,
+        finishedAt: null,
+      },
+    ],
+    createdAt: 1000,
+    startedAt: null,
+    finishedAt: null,
+  }
+
+  it('fetches/saves team charter and fetches/starts/cancels dispatch plans with URL encoding, strict ApiError codes, and SignedOut', async () => {
+    const startedRes: DispatchPlanActionResponse = {
+      ok: true,
+      plan: { ...samplePlan, status: 'running', startedAt: 2000 },
+    }
+    const cancelledRes: DispatchPlanActionResponse = {
+      ok: true,
+      plan: { ...samplePlan, status: 'cancelled', finishedAt: 3000 },
+    }
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(sampleCharter), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'unknown group thread' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...sampleCharter, content: 'Updated charter', updatedAt: 2000 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'too long', code: 'invalid_content' }), { status: 400 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ plans: [samplePlan] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'unknown group thread' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(startedRes), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'not draft', code: 'invalid_state' }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'missing', code: 'not_found' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(cancelledRes), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'already done', code: 'settled' }), { status: 409 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    // fetchTeamCharter
+    expect(await fetchTeamCharter('group:offsite crew')).toEqual(sampleCharter)
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/threads/group%3Aoffsite%20crew/team')
+
+    const charter404 = await fetchTeamCharter('dm:scout').catch((e: unknown) => e)
+    expect(charter404).toBeInstanceOf(ApiError)
+    expect(charter404).toMatchObject({ status: 404, message: 'unknown group thread' })
+    await expect(fetchTeamCharter('group:x')).rejects.toBeInstanceOf(SignedOut)
+
+    // saveTeamCharter
+    expect(await saveTeamCharter('group:offsite crew', 'Updated charter')).toEqual({
+      ...sampleCharter,
+      content: 'Updated charter',
+      updatedAt: 2000,
+    })
+    expect(fetchMock.mock.calls[3]![0]).toBe('/api/threads/group%3Aoffsite%20crew/team')
+    expect((fetchMock.mock.calls[3]![1] as RequestInit).method).toBe('PUT')
+    expect(JSON.parse(String((fetchMock.mock.calls[3]![1] as RequestInit).body))).toEqual({ content: 'Updated charter' })
+
+    const charter400 = await saveTeamCharter('group:offsite crew', 'x'.repeat(20000)).catch((e: unknown) => e)
+    expect(charter400).toBeInstanceOf(ApiError)
+    expect(charter400).toMatchObject({ status: 400, code: 'invalid_content' })
+    await expect(saveTeamCharter('group:x', 'ok')).rejects.toBeInstanceOf(SignedOut)
+
+    // fetchDispatchPlans
+    expect(await fetchDispatchPlans('group:offsite crew')).toEqual({ plans: [samplePlan] })
+    expect(fetchMock.mock.calls[6]![0]).toBe('/api/threads/group%3Aoffsite%20crew/dispatch-plans')
+
+    const plans404 = await fetchDispatchPlans('dm:scout').catch((e: unknown) => e)
+    expect(plans404).toBeInstanceOf(ApiError)
+    expect(plans404).toMatchObject({ status: 404 })
+    await expect(fetchDispatchPlans('group:x')).rejects.toBeInstanceOf(SignedOut)
+
+    // startDispatchPlan
+    expect(await startDispatchPlan('dp/a1')).toEqual(startedRes)
+    expect(fetchMock.mock.calls[9]![0]).toBe('/api/dispatch-plans/dp%2Fa1/start')
+    expect((fetchMock.mock.calls[9]![1] as RequestInit).method).toBe('POST')
+
+    const start409 = await startDispatchPlan('dp-a1b2c3d4').catch((e: unknown) => e)
+    expect(start409).toBeInstanceOf(ApiError)
+    expect(start409).toMatchObject({ status: 409, code: 'invalid_state' })
+
+    const start404 = await startDispatchPlan('dp-missing').catch((e: unknown) => e)
+    expect(start404).toBeInstanceOf(ApiError)
+    expect(start404).toMatchObject({ status: 404, code: 'not_found' })
+    await expect(startDispatchPlan('dp-a1b2c3d4')).rejects.toBeInstanceOf(SignedOut)
+
+    // cancelDispatchPlan
+    expect(await cancelDispatchPlan('dp/a1')).toEqual(cancelledRes)
+    expect(fetchMock.mock.calls[13]![0]).toBe('/api/dispatch-plans/dp%2Fa1/cancel')
+    expect((fetchMock.mock.calls[13]![1] as RequestInit).method).toBe('POST')
+
+    const cancel409 = await cancelDispatchPlan('dp-a1b2c3d4').catch((e: unknown) => e)
+    expect(cancel409).toBeInstanceOf(ApiError)
+    expect(cancel409).toMatchObject({ status: 409, code: 'settled' })
+    await expect(cancelDispatchPlan('dp-a1b2c3d4')).rejects.toBeInstanceOf(SignedOut)
+
+    // Verify Phase 8 types compile and match gateway contracts
+    const planStatus: DispatchPlanStatus = 'paused'
+    const stepStatus: DispatchStepStatus = 'waiting_approval'
+    const payload: DispatchPlanPayload = {
+      planId: samplePlan.id,
+      threadId: samplePlan.threadId,
+      createdBy: samplePlan.createdBy,
+      title: samplePlan.title,
+      status: planStatus,
+      sourceTainted: false,
+      error: '',
+      steps: [{ ...samplePlan.steps[0]!, status: stepStatus }],
+      createdAt: samplePlan.createdAt,
+      startedAt: null,
+      finishedAt: null,
+    }
+    const msg: Message = {
+      id: 88,
+      thread_id: samplePlan.threadId,
+      sender: 'chief',
+      kind: 'dispatch_plan',
+      content: '',
+      payload,
+      created_at: 1000,
+    }
+    const ev1: GatewayEvent = { type: 'dispatch_plan_changed', threadId: samplePlan.threadId, plan: samplePlan }
+    const ev2: GatewayEvent = { type: 'team_charter_changed', threadId: samplePlan.threadId }
+    expect(msg.kind).toBe('dispatch_plan')
+    expect(ev1.type).toBe('dispatch_plan_changed')
+    expect(ev2.type).toBe('team_charter_changed')
   })
 })

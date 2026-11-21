@@ -1,5 +1,5 @@
 import type {
-  ActivityPayload, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BackgroundTaskPayload, BotRefPayload, BotStatus, Conversation, LoginPayload,
+  ActivityPayload, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BackgroundTaskPayload, BotRefPayload, BotStatus, Conversation, DispatchPlanPayload, LoginPayload,
   MemoryPayload, QuestionPayload, QuietDigestPayload, ReportPayload, ResolvedTheme, RoutinePayload, RuleProposalPayload, ScreenshotPayload, WebhookPayload,
 } from '../types'
 import { useT, type MessageKey, type T } from '../i18n'
@@ -90,6 +90,10 @@ function preview(c: Conversation, t: T): string {
     case 'background_task': {
       const p = m.payload as BackgroundTaskPayload | null
       return `⚡ ${p?.title ? t('sidebar.preview.backgroundTask', { title: p.title }) : t('bgTask.label')}`
+    }
+    case 'dispatch_plan': {
+      const p = m.payload as DispatchPlanPayload | null
+      return `🔀 ${p?.title ? t('sidebar.preview.dispatchPlan', { title: p.title }) : t('dispatch.label')}`
     }
     default:
       if (m.kind === 'text' && isNotice(m.payload)) {
