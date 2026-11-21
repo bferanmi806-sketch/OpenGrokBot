@@ -1,8 +1,8 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../i18n'
-import type { AboutInfo, ConnectionsState, ModelConnection, ProviderPreset, QuietDigestSummary, SettingsView, SetupInfo } from '../types'
+import type { AboutInfo, ConnectionsState, LlmQueueSnapshot, ModelConnection, ProviderPreset, QuietDigestSummary, SettingsView, SetupInfo } from '../types'
 import { SettingsDialog } from './SettingsDialog'
 
 const providers: ProviderPreset[] = [
@@ -458,5 +458,121 @@ describe('SettingsDialog', () => {
     await Promise.resolve()
     expect(screen.getByText('Timezone: America/Los_Angeles')).toBeInTheDocument()
     expect(screen.getByText('No updates waiting')).toBeInTheDocument()
+  })
+
+  it('defaults local model concurrency to 1 (Recommended), saves changes, and refreshes /api/llm-queue', async () => {
+    let concurrency = 1
+    let queueSnapshot: LlmQueueSnapshot = {
+      concurrency: 1,
+      endpoints: [
+        {
+          key: 'local:loopback:11434',
+          active: 1,
+          queued: 1,
+          byPriority: { interactive: 0, background: 0, routine: 1, low: 0 },
+        },
+      ],
+    }
+
+    const calls = gateway(view(), {
+      'GET /api/llm-queue': () => ({ body: queueSnapshot }),
+      'PUT /api/settings': (b) => {
+        concurrency = Number(b.localLlmConcurrency)
+        queueSnapshot = {
+          concurrency,
+          endpoints: [
+            {
+              key: 'local:loopback:11434',
+              active: 2,
+              queued: 0,
+              byPriority: { interactive: 0, background: 0, routine: 0, low: 0 },
+            },
+          ],
+        }
+        return { body: view({ localLlmConcurrency: concurrency }, { localLlmConcurrency: 'saved' }) }
+      },
+    })
+
+    const user = userEvent.setup()
+    show()
+
+    const select = (await screen.findByLabelText('Local model concurrency')) as HTMLSelectElement
+    expect(select.value).toBe('1')
+    expect(select.options[select.selectedIndex]!.textContent).toBe('1 (Recommended)')
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(['1', '2', '4', '8', '0'])
+    expect(screen.getByText('Local queue: 1 active · 1 waiting')).toBeInTheDocument()
+    expect(screen.getByText(/Applies to local endpoints \(Ollama, localhost, LAN\)/)).toBeInTheDocument()
+
+    const initialQueueCalls = calls.filter((c) => c.method === 'GET' && c.path === '/api/llm-queue').length
+    expect(initialQueueCalls).toBe(1)
+
+    await user.selectOptions(select, '2')
+
+    await waitFor(() => {
+      expect(calls).toContainEqual({
+        method: 'PUT',
+        path: '/api/settings',
+        body: { localLlmConcurrency: 2 },
+      })
+    })
+    await waitFor(() => {
+      expect(calls.filter((c) => c.method === 'GET' && c.path === '/api/llm-queue').length).toBe(2)
+    })
+    expect(select.value).toBe('2')
+    expect(await screen.findByText('Local queue: 2 active')).toBeInTheDocument()
+  })
+
+  it('displays custom local concurrency value (e.g. 3) accurately and disables selector when env-locked', async () => {
+    gateway(
+      view({ localLlmConcurrency: 3 }, { localLlmConcurrency: 'env' }),
+      {
+        'GET /api/llm-queue': () => ({ body: { concurrency: 3, endpoints: [] } satisfies LlmQueueSnapshot }),
+      },
+    )
+
+    show()
+
+    const select = (await screen.findByLabelText('Local model concurrency')) as HTMLSelectElement
+    expect(select.value).toBe('3')
+    expect(select.options[select.selectedIndex]!.textContent).toBe('3 concurrent')
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(['1', '2', '3', '4', '8', '0'])
+    expect(select).toBeDisabled()
+    expect(screen.getByText(/OPENSUPERBOT_LOCAL_LLM_CONCURRENCY; change it there/)).toBeInTheDocument()
+    expect(screen.queryByText(/Local queue:/)).toBeNull()
+  })
+
+  it('renders live local queue status pill aggregated across endpoints in English and Chinese', async () => {
+    const busySnapshot: LlmQueueSnapshot = {
+      concurrency: 1,
+      endpoints: [
+        {
+          key: 'local:loopback:11434',
+          active: 1,
+          queued: 1,
+          byPriority: { interactive: 1, background: 0, routine: 0, low: 0 },
+        },
+        {
+          key: 'local:lan:192.168.1.50:8000',
+          active: 0,
+          queued: 1,
+          byPriority: { interactive: 0, background: 0, routine: 1, low: 0 },
+        },
+      ],
+    }
+
+    gateway(view({ localLlmConcurrency: 1 }), {
+      'GET /api/llm-queue': () => ({ body: busySnapshot }),
+    })
+
+    show()
+    expect(await screen.findByText('Local queue: 1 active · 2 waiting')).toBeInTheDocument()
+
+    cleanup()
+    gateway(view({ localLlmConcurrency: 1 }), {
+      'GET /api/llm-queue': () => ({ body: busySnapshot }),
+    })
+    show({ lang: 'zh-CN' })
+    expect(await screen.findByText('本地队列：1 运行中 · 2 排队中')).toBeInTheDocument()
+    expect(screen.getByLabelText('本地模型并发上限')).toBeInTheDocument()
   })
 })

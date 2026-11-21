@@ -1,6 +1,9 @@
 import type { Config, LlmApi } from './config.js'
 import { createAnthropicLLM } from './llm-anthropic.js'
+import type { LlmPriority } from './llm-queue.js'
 import { createResponsesLLM } from './llm-responses.js'
+
+export type { LlmPriority }
 
 export type ChatMsg = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -29,6 +32,8 @@ export type ChatOptions = {
   signal?: AbortSignal
   /** 'none'：工具照常带上（历史里有工具调用时有的服务商要求如此），但这一次只许回文字 */
   toolChoice?: 'none'
+  /** 本地模型排队优先级（云端接口忽略） */
+  priority?: LlmPriority
 }
 
 export interface LLM {

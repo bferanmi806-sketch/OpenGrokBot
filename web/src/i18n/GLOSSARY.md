@@ -25,6 +25,7 @@
 | thread | 对话 | 不说「线程」「会话」 |
 | thread (Slack) | 话题串 | Slack 频道里的 thread；OpenSuperBot 自己的 thread 仍叫「对话」 |
 | AI models | AI 模型 | 设置里管服务商和 key 的那一块 |
+| local model concurrency | 本地模型并发上限 | 仅对本机与局域网模型端点生效的并发限制，交互对话与审批会在步骤间优先插队；对应实时状态叫「本地队列」 |
 | (model) connection | 连接 | 一家服务商 + 一个 key + 默认模型；没选过的同事用「默认连接」 |
 | connector | 连接器 | Gmail、Outlook、Notion、Slack 这些外部应用的连接；总弹窗分「应用」和「MCP 服务」两栏 |
 | MCP server | MCP 服务 | 通过 MCP 协议接入的工具服务（本机命令 stdio 或远程 HTTP）；不说「MCP 服务器」 |

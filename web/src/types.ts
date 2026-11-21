@@ -487,6 +487,7 @@ export type SettingsView = {
     quietHoursEnabled?: boolean
     quietHoursStart?: string
     quietHoursEnd?: string
+    localLlmConcurrency?: number
   }
   sources: Record<string, 'env' | 'saved' | 'default'>
   apiKey: { set: boolean; masked: string; source: 'env' | 'file' | 'none' }
@@ -828,4 +829,18 @@ export type ResolveRuleProposalResponse = {
   ok: true
   proposal: RuleProposalView
   memoryUpdated: boolean
+}
+
+export type LlmPriority = 'interactive' | 'background' | 'routine' | 'low'
+
+export type LlmQueueEndpointView = {
+  key: string
+  active: number
+  queued: number
+  byPriority: Record<LlmPriority, number>
+}
+
+export type LlmQueueSnapshot = {
+  concurrency: number
+  endpoints: LlmQueueEndpointView[]
 }

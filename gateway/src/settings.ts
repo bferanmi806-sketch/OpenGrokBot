@@ -4,6 +4,7 @@ import { restrictToOwner } from './auth.js'
 import type { ComputerChoice } from './backend.js'
 import { loadConfig, type Config } from './config.js'
 import type { Db } from './db.js'
+import { DEFAULT_LOCAL_LLM_CONCURRENCY, parseLocalLlmConcurrency } from './llm-queue.js'
 import { providerById } from './providers.js'
 
 /**
@@ -28,6 +29,7 @@ export type Settings = {
   quietHoursEnabled: boolean
   quietHoursStart: string
   quietHoursEnd: string
+  localLlmConcurrency: number
 }
 export type SettingKey = keyof Settings
 export type SettingSource = 'env' | 'saved' | 'default'
@@ -46,6 +48,7 @@ export const SETTING_DEFAULTS: Settings = {
   quietHoursEnabled: false,
   quietHoursStart: '22:00',
   quietHoursEnd: '08:00',
+  localLlmConcurrency: DEFAULT_LOCAL_LLM_CONCURRENCY,
 }
 
 /** 能锁住某项设置的环境变量；没列的项只能在界面上改 */
@@ -55,6 +58,7 @@ const ENV: Partial<Record<SettingKey, string>> = {
   vision: 'OPENSUPERBOT_VISION',
   computers: 'OPENSUPERBOT_COMPUTERS',
   browserMirror: 'OPENSUPERBOT_BROWSER_MIRROR',
+  localLlmConcurrency: 'OPENSUPERBOT_LOCAL_LLM_CONCURRENCY',
 }
 const API_KEY_ENV = 'OPENSUPERBOT_API_KEY'
 
@@ -93,6 +97,7 @@ const PARSE: { [K in SettingKey]: (v: unknown) => Settings[K] | undefined } = {
   quietHoursEnabled: (v) => typeof v === 'boolean' ? v : undefined,
   quietHoursStart: hhMm,
   quietHoursEnd: hhMm,
+  localLlmConcurrency: (v) => parseLocalLlmConcurrency(v),
 }
 const isKey = (k: string): k is SettingKey => Object.hasOwn(PARSE, k)
 
@@ -185,7 +190,16 @@ export function resolveSettings(
 
 /** 把生效的设置叠到启动配置上（返回新对象，原配置不动） */
 export function applySettings(config: Config, s: Settings, apiKey: string): Config {
-  return { ...config, baseURL: s.baseURL, model: s.model, vision: s.vision, computers: s.computers, browserMirror: s.browserMirror, apiKey }
+  return {
+    ...config,
+    baseURL: s.baseURL,
+    model: s.model,
+    vision: s.vision,
+    computers: s.computers,
+    browserMirror: s.browserMirror,
+    localLlmConcurrency: s.localLlmConcurrency,
+    apiKey,
+  }
 }
 
 /** 此刻生效的配置：启动配置 + 库里的设置 + key 文件，环境变量照样优先。每次都现读，改了马上看得到。 */
