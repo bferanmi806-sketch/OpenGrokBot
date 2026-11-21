@@ -7,6 +7,50 @@ names.
 
 ## [Unreleased]
 
+### Added
+
+- **Credential Vault (schema v18).** Local-only credential manager storing secret values in `<data>/vault-secrets.json`
+  (`0600`, never in SQLite, containers, or model prompts) with strict HTTPS domain allowlists, built-in TOTP (2FA)
+  generation, `${vault:<slug>.<field>}` MCP secret resolution, zero-default per-teammate grants, `vault_fill` with
+  taint/approval gating, and automatic output redaction (`VaultDialog`).
+- **Unified Today workspace (`Feed`, `Ideas`, `Tracking & Goals`, `Spaces`, schema v19–v23).**
+  - **Continuous Custom Web Feed:** Ambient background web monitoring via safe read-only `web_search` / `web_fetch`
+    (not cron jobs), with 7-day title/URL deduplication, a ~15 items/day cap, and clickable source links on every card.
+  - **Auto-organized Ideas, To-dos & Goals:** Operator conversation context is automatically distilled into Ideas,
+    checkable To-dos (`todos`), and multi-step Goals/milestones (`context-distill.ts`, `POST /api/feed/distill`,
+    `PATCH`/`DELETE /api/todos/:id`) with fuzzy deduplication, taint preservation, and one-click links back to source
+    threads; Needs You approvals/questions/logins, standalone tracking routines, auto To-dos, and Goals live together in
+    **Tracking & Goals**.
+  - **Declarative Live Spaces:** Zero-JS structured boards (`metric`, `table`, `kanban`, `timeline`, `chart`, `markdown`,
+    `actions`) with per-teammate `viewer`/`editor` grants and live `SpaceChip` updates.
+- **Native Polery Docs connector (`polery`).** First-party OAuth 2.1 (RFC 8414 discovery, DCR `/oauth/register`, PKCE
+  S256, RFC 8707 `resource` binding, local `0600` token vault with refresh rotation) + Streamable HTTP MCP (`/mcp`)
+  directly inside **Connectors → Apps** — no Composio API key required. Exposes 4 read-only tools
+  (`polery_list_documents`, `polery_search_documents`, `polery_read_document`, `polery_get_proposal`) and 2
+  approval-gated write tools (`polery_create_document`, `polery_propose_edits`).
+- **Context budget, checkpoint compaction, output spill, loop guard & FTS5 history search (schema v24–v25).** Automatic
+  context window inference and in-turn tool-result pruning (`context-budget.ts`), per-`(thread_id, bot_id)` thread
+  checkpoints (`compaction.ts`), workspace spill with V8 slice detachment for oversized tool outputs (`spill.ts`),
+  repeat-call loop guard (`loop-guard.ts`), and `search_history` backed by SQLite FTS5 trigram indexing with strict
+  per-bot thread isolation and approval-field redaction (`history-search.ts`).
+- **Gateway & Web performance/reliability guardrails.** Bounded parallel read-tool execution pool (`tool-batch.ts`),
+  on-demand MCP tool loading for large servers, optimistic file stale guard on `write_file`, prompt section budgets with
+  deterministic routine ordering, empty-reply in-place retry, jittered LLM retry backoff with tool-argument JSON
+  validation and route-scoped native replay, latest-only scheduler catch-up with sleep/wake detection and delivery
+  floor, and a recent-thread LRU cache (`web/src/thread-cache.ts`) for instant conversation switching.
+
+### Security
+
+- **Host DNS-rebinding & `Sec-Fetch-Site` guard.** Protected gateway routes now validate the `Host` header against
+  local/configured hosts and reject cross-site `Sec-Fetch-Site` requests (`auth.ts`), alongside clearer sandbox failure
+  attribution (`sandbox.ts`).
+
+### Fixed
+
+- **Today workbench UI & dark-mode button contrast.** Removed the brand dot left of `OpenSuperBot`, added spaced icon
+  tabs to Today, aligned subbar right-edge actions, and fixed `.vault-small-btn.primary` text contrast in dark mode
+  (`color: var(--accent-fg)`).
+
 ## [0.8.0] - 2026-11-21
 
 Inline-editable approval cards across all 9 write variants; a zero-vector-DB shared team entity Wiki (SQLite FTS5 +

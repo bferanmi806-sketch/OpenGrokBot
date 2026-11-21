@@ -2,6 +2,7 @@ import Database from 'better-sqlite3'
 import { describe, expect, it } from 'vitest'
 import { runTurn, type AgentEvents } from '../src/agent.js'
 import {
+  SCHEMA_VERSION,
   ensureDmThread,
   ensureGroupThread,
   insertMessage,
@@ -102,9 +103,9 @@ describe('SQLite FTS5 history search', () => {
     expect(found.hits[0]!.snippet).not.toContain('canRemember')
   })
 
-  it('backfills existing pre-v15 messages on migration', () => {
+  it('backfills existing pre-FTS5 messages on migration', () => {
     const raw = new Database(':memory:')
-    // Open at v14-like schema by running openDb on an already populated DB via migrate
+    // Open at the version right before the messages_fts migration and verify migrate() backfills existing rows
     raw.exec(`
       CREATE TABLE messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,7 +115,7 @@ describe('SQLite FTS5 history search', () => {
       CREATE TABLE thread_members (thread_id TEXT NOT NULL, bot_id TEXT NOT NULL, joined_at INTEGER NOT NULL, PRIMARY KEY (thread_id, bot_id));
       INSERT INTO messages (thread_id, sender, kind, content, created_at) VALUES ('dm:researcher', 'user', 'text', 'legacy note before fts5', 1000);
     `)
-    raw.pragma('user_version = 14')
+    raw.pragma(`user_version = ${SCHEMA_VERSION - 1}`)
     migrate(raw)
     const res = searchBotHistory(raw, { botId: 'researcher', currentThreadId: 'dm:researcher', query: 'legacy note' })
     expect(res.hits).toHaveLength(1)
