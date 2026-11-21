@@ -278,6 +278,7 @@ export async function runTurn(
     const canBackgroundTasks = Boolean(deps.onDelegateBackgroundTask || deps.onListBackgroundTasks)
     const isBackgroundTask = deps.isBackgroundTask === true
     const isPipelineStep = deps.isPipelineStep === true
+    const silentStop = isBackgroundTask || isPipelineStep
     const allowDispatchPlan =
       Boolean(deps.onCreateDispatchPlan)
       && deps.origin === 'operator'
@@ -373,7 +374,7 @@ export async function runTurn(
     const priority = deps.priority ?? defaultPriority(deps.origin)
     const startedAt = Date.now()
     for (let step = 0; ; step++) {
-      if (signal?.aborted) return stopped(notify, isBackgroundTask)
+      if (signal?.aborted) return stopped(notify, silentStop)
       const limit = step >= maxSteps ? stepLimit(maxSteps)
         : turnMs > 0 && Date.now() - startedAt >= turnMs ? timeLimit(turnMs) : null
       if (limit) return await closeOut(deps, messages, tools, limit, priority, say, notify)
@@ -399,12 +400,12 @@ export async function runTurn(
         brief?.shown()
       }
       if (turn.usage) deps.onUsage?.(turn.usage)
-      if (signal?.aborted) return stopped(notify, isBackgroundTask)
+      if (signal?.aborted) return stopped(notify, silentStop)
       if (turn.toolCalls.length > 0) {
         messages.push(turn.raw)
         let latestImage: string | undefined
         for (const call of turn.toolCalls) {
-          if (signal?.aborted) return stopped(notify, isBackgroundTask)
+          if (signal?.aborted) return stopped(notify, silentStop)
           const outcome = await execToolCall(ctx, call, events, activity, () => {
             taintedByOutsideData = true
             ctx.turnTainted = true
@@ -433,7 +434,7 @@ export async function runTurn(
       return 'replied'
     }
   } catch (err) {
-    if (signal?.aborted) return stopped(notify, deps.isBackgroundTask)
+    if (signal?.aborted) return stopped(notify, deps.isBackgroundTask || deps.isPipelineStep)
     notify({ notice: 'error', params: { name: bot.name, detail: err instanceof Error ? err.message : String(err) } })
     return 'error'
   } finally {
@@ -491,11 +492,11 @@ async function closeOut(
     })
     const turn = await deps.llm.chat(messages, tools, { signal: deps.signal, toolChoice: 'none', priority })
     if (turn.usage) deps.onUsage?.(turn.usage)
-    if (deps.signal?.aborted) return stopped(notify, deps.isBackgroundTask)
+    if (deps.signal?.aborted) return stopped(notify, deps.isBackgroundTask || deps.isPipelineStep)
     const text = turn.content?.trim()
     notify({ notice: 'paused', params: limit, ...(text ? { lead: text } : {}) })
   } catch {
-    if (deps.signal?.aborted) return stopped(notify, deps.isBackgroundTask)
+    if (deps.signal?.aborted) return stopped(notify, deps.isBackgroundTask || deps.isPipelineStep)
     notify({ notice: 'paused', params: limit })
   }
   return 'limit'
