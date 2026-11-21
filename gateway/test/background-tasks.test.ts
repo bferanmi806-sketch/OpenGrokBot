@@ -89,8 +89,8 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1500): Promise<void
 describe('schema v16, background action trigger & hub event', () => {
   it('migrates fresh DB to v16 with background_tasks table, indexes, action trigger & hub event', () => {
     const db = openDb(':memory:')
-    expect(SCHEMA_VERSION).toBe(16)
-    expect(schemaVersion(db)).toBe(16)
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(16)
+    expect(schemaVersion(db)).toBe(SCHEMA_VERSION)
 
     const tables = (
       db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]
@@ -185,8 +185,8 @@ describe('schema v16, background action trigger & hub event', () => {
 
     const migrated: Array<[number, number]> = []
     const upgraded = openDb(dbPath, { onMigrate: (from, to) => migrated.push([from, to]) })
-    expect(migrated).toEqual([[15, 16]])
-    expect(schemaVersion(upgraded)).toBe(16)
+    expect(migrated).toEqual([[15, SCHEMA_VERSION]])
+    expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION)
     expect(listMessages(upgraded, threadId).map((m) => m.content)).toEqual(['v15 message'])
 
     const indexes = (
