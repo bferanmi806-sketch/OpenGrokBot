@@ -77,6 +77,7 @@ import {
   type ImageNote, type UploadRow,
 } from './uploads.js'
 import { mountWiki } from './wiki/api.js'
+import { runWikiToolCall } from './wiki/tools.js'
 import type { WorkflowRecording } from './workflow-recorder.js'
 import { deleteWorkflowTrace, listWorkflowTraces, parseWorkflowTrace, readWorkflowTrace, saveWorkflowTrace, type WorkflowTrace } from './workflows.js'
 import {
@@ -647,6 +648,21 @@ export function createApp(deps: AppDeps): GatewayApp {
             watch: opts.watch,
             signal: toolSignal ?? signal,
             events: turnEvents,
+            now: now().getTime(),
+          }),
+        onWikiTool: ({ name, args, turnTainted }) =>
+          runWikiToolCall({
+            db,
+            dataDir,
+            hub,
+            botId: bot.id,
+            threadId,
+            trigger,
+            origin: opts.origin,
+            turnTainted,
+            watch: opts.watch,
+            name,
+            args,
             now: now().getTime(),
           }),
         ...(uploads ? { attachments: (rows: MessageRow[]) => briefAttachments(bot, vision, rows) } : {}),

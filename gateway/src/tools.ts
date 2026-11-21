@@ -1,6 +1,7 @@
 import { APPROVAL_KINDS } from './approvals.js'
 import { CONNECTOR_READ_TOOL_NAMES } from './connectors/tools.js'
 import type { ToolDef } from './llm.js'
+import { WIKI_READ_TOOL_NAMES, WIKI_TOOLS } from './wiki/tools.js'
 
 export const MESSAGE_USER_TOOL: ToolDef = {
   type: 'function',
@@ -340,6 +341,7 @@ export const WATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
   'message_user', 'hold_for_approval', 'ask_operator', 'read_skill', 'read_file',
   'browser_goto', 'browser_extract', 'browser_scroll', 'browser_back', 'browser_screenshot', 'ask_for_login',
   ...CONNECTOR_READ_TOOL_NAMES,
+  ...WIKI_READ_TOOL_NAMES,
 ])
 
 const RELAY_TOOL: ToolDef = {
@@ -372,6 +374,7 @@ export function buildTools(opts: {
   hasComputer: boolean
   canRelay?: boolean
   hasSkills?: boolean
+  hasWiki?: boolean
   watch?: boolean
   /** false = 这一回合不是操作者开的头：改常设安排的工具不列出来（执行时另有一道门） */
   operatorTurn?: boolean
@@ -407,6 +410,7 @@ export function buildTools(opts: {
   const tools = [
     MESSAGE_USER_TOOL,
     ...WORKFLOW_TOOLS,
+    ...(opts.hasWiki ? WIKI_TOOLS : []),
     ...(opts.hasSkills ? [SKILL_TOOL] : []),
     ...(opts.canRelay ? [RELAY_TOOL] : []),
     ...(opts.hasComputer ? computerTools : []),

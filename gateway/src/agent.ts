@@ -23,6 +23,7 @@ import {
 import { validateReportPayload } from './report.js'
 import { normalizeMode, type RoutineMode } from './routines.js'
 import { buildTools, OPERATOR_ONLY_TOOL_NAMES, WATCH_TOOL_NAMES } from './tools.js'
+import { WIKI_READ_TOOL_NAMES, WIKI_TOOL_NAMES } from './wiki/tools.js'
 
 export type AgentEvents = {
   onMessage: (m: MessageRow) => void
@@ -130,6 +131,14 @@ export type AgentDeps = {
     events: AgentEvents
     signal?: AbortSignal
   }) => Promise<{ text: string; ok: boolean; tainted?: boolean }>
+  /** 共享团队知识库工具（wiki_search / wiki_read / wiki_upsert） */
+  onWikiTool?: (input: {
+    name: string
+    args: Record<string, unknown>
+    turnTainted: boolean
+  }) =>
+    | Promise<{ text: string; ok: boolean; tainted?: boolean; summary: string }>
+    | { text: string; ok: boolean; tainted?: boolean; summary: string }
 }
 
 /**
@@ -146,7 +155,7 @@ export type AttachmentBrief = {
 }
 
 /** 工具执行时要的回合级信息 */
-type TurnContext = AgentDeps & { ruleBlock: RuleBlock | null }
+type TurnContext = AgentDeps & { ruleBlock: RuleBlock | null; turnTainted: boolean }
 
 /** 真实的浏览器活（开页、读、点、再读、填）十几步就用完了；40 步够干完一件事，又挡得住死循环 */
 export const DEFAULT_MAX_STEPS = 40
@@ -189,6 +198,7 @@ export async function runTurn(
   const activity = createActivity(deps, events)
   try {
     const canRelay = Boolean(deps.onMessageBot)
+    const hasWiki = Boolean(deps.onWikiTool)
     const rows = orderHistory(listMessages(db, threadId, HISTORY_LIMIT), opts.pendingIds, opts.hiddenIds)
     // 模型眼前还摆着 webhook 载荷或本回合读过外部连接器内容时，就算是操作者开的头也不认规则：外部文字可能正是在诱导它
     const hasWebhookHistory = rows.some((m) => m.kind === 'webhook')
@@ -197,7 +207,11 @@ export async function runTurn(
       deps.origin !== 'operator'
         ? (deps.origin ?? 'unknown')
         : (hasWebhookHistory || taintedByOutsideData) ? 'outside-data' : null
-    const ctx: TurnContext = { ...deps, ruleBlock: computeRuleBlock() }
+    const ctx: TurnContext = {
+      ...deps,
+      ruleBlock: computeRuleBlock(),
+      turnTainted: hasWebhookHistory || taintedByOutsideData,
+    }
     const attached = rows.filter((m) => m.kind === 'attachment')
     // 查不出来（盘坏了、没有上传目录）不拦回合：模型仍然知道有这么个文件，只是拿不到
     const brief = attached.length ? await deps.attachments?.(attached).catch(() => undefined) : undefined
@@ -206,7 +220,7 @@ export async function runTurn(
       {
         role: 'system',
         content: buildSystemPrompt(bot, soul, {
-          hasComputer, computer: deps.computer, memory: deps.memory, group: deps.group, canRelay, manual: deps.manual, routines: deps.routines,
+          hasComputer, hasWiki, computer: deps.computer, memory: deps.memory, group: deps.group, canRelay, manual: deps.manual, routines: deps.routines,
           connectors: deps.connectors, mcpServers: deps.mcpServers, skills: deps.onReadSkill ? deps.skills : undefined, language: deps.language,
         }),
       },
@@ -219,7 +233,7 @@ export async function runTurn(
     const messages = withTimeNote(history, timeNote(now, timeZone))
     const hasSkills = Boolean(deps.skills?.length && deps.onReadSkill)
     const tools = buildTools({
-      hasComputer, canRelay, hasSkills, watch: deps.watch === true, shell: deps.computer?.shell, kind: deps.computer?.kind,
+      hasComputer, hasWiki, canRelay, hasSkills, watch: deps.watch === true, shell: deps.computer?.shell, kind: deps.computer?.kind,
       operatorTurn: deps.origin === 'operator', connectorTools: deps.connectorTools, mcpTools: deps.mcpTools, mcpReadToolNames: deps.mcpReadToolNames,
     })
     const maxSteps = deps.maxSteps && deps.maxSteps > 0 ? Math.floor(deps.maxSteps) : DEFAULT_MAX_STEPS
@@ -248,6 +262,7 @@ export async function runTurn(
           if (signal?.aborted) return stopped(notify)
           const outcome = await execToolCall(ctx, call, events, activity, () => {
             taintedByOutsideData = true
+            ctx.turnTainted = true
             ctx.ruleBlock = computeRuleBlock()
           })
           messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.text })
@@ -395,6 +410,11 @@ const COMPUTER_TOOL_NAMES = new Set([
 /** 请人接管不是「电脑上的一步」，它有自己的卡片 */
 const ACTIVITY_TOOL_NAMES = new Set([...COMPUTER_TOOL_NAMES].filter((name) => name !== 'ask_for_login'))
 
+/** 会把外部网页标题、正文或画面带回模型视野的浏览器工具：用过即记为 outside-data */
+const BROWSER_OUTSIDE_DATA_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'browser_goto', 'browser_extract', 'browser_click', 'browser_back', 'browser_screenshot',
+])
+
 const WORKFLOW_TOOL_NAMES = new Set([
   'hold_for_approval', 'ask_operator', 'save_memory', 'forget_memory', 'create_routine', 'stop_routine', 'message_bot',
 ])
@@ -411,8 +431,8 @@ async function execToolCall(
 ): Promise<ToolOutcome> {
   const args = (call.args ?? {}) as Record<string, unknown>
   const started = Date.now()
-  const log = (ok: boolean) =>
-    deps.onAction?.({ tool: call.name, summary: summarize(call.name, args), ok, ms: Date.now() - started })
+  const log = (ok: boolean, summaryOverride?: string) =>
+    deps.onAction?.({ tool: call.name, summary: summaryOverride || summarize(call.name, args), ok, ms: Date.now() - started })
   const failed = (err: unknown): ToolOutcome => {
     log(false)
     // 工具失败必须回喂模型（让它换招/如实汇报），而不是炸掉整个回合
@@ -484,8 +504,34 @@ async function execToolCall(
       return failed(err)
     }
   }
+  if (WIKI_TOOL_NAMES.has(call.name)) {
+    if (deps.watch && !WIKI_READ_TOOL_NAMES.has(call.name)) {
+      log(false)
+      return {
+        text: `${call.name} is not available in a watch routine: this run only looks. `
+          + 'If something should be done, hold it for approval and your operator decides.',
+      }
+    }
+    if (!deps.onWikiTool) {
+      log(false)
+      return { text: 'Team wiki is not available on this gateway.' }
+    }
+    const step = activity.start(call.name, summarize(call.name, args))
+    try {
+      const res = await deps.onWikiTool({ name: call.name, args, turnTainted: deps.turnTainted })
+      if (res.tainted) onOutsideDataRead?.()
+      if (res.summary) step.summary = res.summary
+      activity.finish(step, res.ok, Date.now() - started)
+      log(res.ok, res.summary)
+      return { text: res.text }
+    } catch (err) {
+      activity.finish(step, false, Date.now() - started)
+      return failed(err)
+    }
+  }
   if (!COMPUTER_TOOL_NAMES.has(call.name)) return { text: `Unknown tool: ${call.name}` }
   if (!deps.getComputer) return { text: 'You have no computer attached right now — this tool is unavailable.' }
+  if (BROWSER_OUTSIDE_DATA_TOOL_NAMES.has(call.name)) onOutsideDataRead?.()
   const step = ACTIVITY_TOOL_NAMES.has(call.name) ? activity.start(call.name, summarize(call.name, args)) : null
   try {
     const outcome = await execComputerTool(deps, call.name, args, events)
@@ -624,6 +670,24 @@ function summarize(tool: string, args: Record<string, unknown>): string {
       return `channel ${pick('channelId')}${pick('threadTs') ? ` (${pick('threadTs')})` : ''}`
     case 'slack_send_message':
       return `to ${pick('channelId')}`
+    case 'wiki_search': {
+      const qs = Array.isArray(args.queries)
+        ? args.queries.filter((q): q is string => typeof q === 'string' && q.trim().length > 0).map((q) => q.trim())
+        : typeof args.queries === 'string' && args.queries.trim()
+          ? [args.queries.trim()]
+          : []
+      const kind = pick('kind')
+      const qText = qs.slice(0, 3).join(' | ').slice(0, 100)
+      return [kind, qText].filter(Boolean).join(': ') || 'wiki'
+    }
+    case 'wiki_read':
+      return pick('id') || 'page'
+    case 'wiki_upsert': {
+      const kind = pick('kind')
+      const slug = pick('slug')
+      const title = pick('title')
+      return kind && slug ? `${kind}/${slug}` : [kind, title].filter(Boolean).join(': ').slice(0, 120) || 'page'
+    }
     default:
       return isMcpToolName(tool) ? summarizeMcpArgs(args) : ''
   }

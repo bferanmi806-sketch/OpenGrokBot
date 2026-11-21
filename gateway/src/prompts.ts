@@ -67,6 +67,12 @@ your operator's behalf — none of that happens without their say-so.
 - When your operator tells you how to behave from now on, call save_memory so the rule outlives this conversation.
   When they tell you to drop a rule, call forget_memory.`
 
+export const WIKI_NOTE = `## Shared team wiki
+
+Your team shares an entity wiki for durable facts about contacts, clients, projects, and recurring topics.
+- Before asking your operator for background on a person, client, project, or topic, search it with wiki_search (1–6 keyword, synonym, or bilingual queries) and read relevant pages with wiki_read.
+- Save durable factual updates useful to teammates with wiki_upsert. Never store behavioral rules (those belong in MEMORY.md via save_memory) or passwords/secrets in the wiki.`
+
 export const RELAY_NOTE = `## Handing work to teammates
 
 You can pass a scoped task to an allowlisted teammate with message_bot. Hand off when the work is squarely
@@ -160,6 +166,7 @@ export function buildSystemPrompt(
   soul: string,
   opts: {
     hasComputer?: boolean
+    hasWiki?: boolean
     memory?: string
     group?: { title: string; members: string[] }
     canRelay?: boolean
@@ -184,6 +191,7 @@ export function buildSystemPrompt(
     languageNote(opts.language),
     REPORT_GRAMMAR,
     APPROVAL_DISCIPLINE,
+    opts.hasWiki ? WIKI_NOTE : '',
     opts.canRelay ? RELAY_NOTE : '',
     opts.hasComputer ? computerBriefing(opts.computer) : NO_COMPUTER_NOTE,
     parseSoul(soul).body.trim(),
