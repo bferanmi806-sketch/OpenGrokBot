@@ -7,8 +7,57 @@ names.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-21
+
+Inline-editable approval cards across all 9 write variants; a zero-vector-DB shared team entity Wiki (SQLite FTS5 +
+CJK/English RRF search + `<data>/wiki/` mirror); Quiet Hours, Morning Digests, `prepare` routines and human-gated
+Controlled Dreaming (`RuleProposalChip`); a local LLM priority semaphore queue; non-blocking Meta / AlterEgo
+background tasks with per-bot browser lease coordination; and group room `team.md` charters with DAG dependency
+dispatch pipelines — plus Light/Dark themes and one-click default AI model switching.
+
 ### Added
 
+- **Inline editable approval cards.** Edit drafts and arguments directly inside any pending approval card before
+  approving — covering all 7 connector write tools (`mail_send`, `mail_reply`, `slack_send_message`,
+  `notion_create_page`, `notion_append`, `calendar_create_event`, `calendar_update_event`), MCP write tools (auto-built
+  schema form + raw JSON mode), and prompt holds (`hold_for_approval`). Server-side validation recomputes frozen
+  execution payloads and targets (`POST /api/approvals/:id` with `edit`) while keeping `edited` badges in audit logs.
+- **Shared team entity Wiki (`Team Wiki`, schema v14).** Zero-vector-DB knowledge base for `contact`, `client`,
+  `project`, and `topic` pages powered by SQLite FTS5 with custom CJK/English tokenization, multi-query Reciprocal
+  Rank Fusion (RRF) × recency decay (`wiki_search`, `wiki_read`, `wiki_upsert`), atomic `<data>/wiki/<kind>/<slug>.md`
+  Markdown mirrors, full revision history, an interactive `WikiDialog` browser/editor, and cross-agent `outside-data`
+  taint tracking with explicit operator *Review & verify*.
+- **Quiet Hours, Morning Digest, `prepare` routines & Controlled Dreaming (schema v15).**
+  - Opt-in timezone-aware Quiet Hours (`Settings → Quiet Hours`, default `22:00`–`08:00`) buffer non-urgent scheduled
+    `watch` and `prepare` outputs in SQLite and flush one consolidated `QuietDigestChip` per teammate when Quiet Hours
+    end (or immediately on **Deliver now** / disabling Quiet Hours), while urgent alerts (`urgent: true`), approvals,
+    questions, and manual runs always break through immediately.
+  - New `prepare` routine mode sits between `watch` and `act`: read-only tools plus `wiki_upsert` and workspace
+    `write_file` (still refusing shell, browser mutations, teammate relays, and external connector/MCP writes), silent
+    on `"Nothing to prepare."`.
+  - Controlled Dreaming (`RuleProposalChip`): teammates never mutate `MEMORY.md` autonomously; repeated operator
+    discards (≥ 2 in 14 days for the same target/action) and explicit `propose_memory_rule` calls (max 1/turn, with
+    server-derived amber `External source` badge when tainted) post editable confirmation cards (`Save to MEMORY.md` /
+    `Dismiss`).
+- **Local LLM priority semaphore queue.** Automatically protects local/self-hosted endpoints (`localhost`, `127.0.0.1`,
+  `[::1]`, `host.docker.internal`, `*.local`, RFC-1918 LAN & IPv6 ULA/link-local) with a configurable per-endpoint
+  concurrency limit (`Settings → Local model concurrency` / `OPENSUPERBOT_LOCAL_LLM_CONCURRENCY`, default `1`, `0..8`)
+  and 4 priority tiers (`P0 interactive` > `P1 background` > `P2 routine` > `P3 low`) that preempt between LLM steps
+  while bypassing public cloud APIs with zero overhead (`GET /api/llm-queue`).
+- **Meta / AlterEgo non-blocking background tasks (schema v16).** Forefront chat stays immediately responsive while a
+  teammate runs a long multi-step job on its secondary background lane (`delegate_background_task`,
+  `list_background_tasks`, `steer_background_task`, `cancel_background_task`, live `BackgroundTaskChip`, DM header
+  pill, and `ComputerPanel` controls). Includes mid-flight steering injection, a per-bot browser lease mutex preventing
+  foreground/background page collisions (and returning HTTP `409 browser_in_use` for workflow record/replay),
+  non-recursive `origin: 'background'` approval isolation, and foreground → background `outside-data` taint
+  propagation.
+- **Group room `team.md` charter & DAG dispatch pipelines (schema v17).** Operator-owned shared collaboration charter
+  per group thread (`GET`/`PUT /api/threads/:threadId/team`, stored outside bot workspaces at
+  `<data>/groups/<safe>/team.md` and edited via `TeamCharterDialog`) injected into every group speaker and pipeline
+  step. Chief can propose structured multi-step DAG pipelines (`create_dispatch_plan` → `DispatchPlanChip` starting in
+  `draft`); once the operator clicks **Start pipeline**, independent waves run in parallel, downstream steps receive
+  SHA-256 fenced upstream outputs with monotonic taint propagation, and approval/question holds cleanly pause and
+  auto-resume downstream dependents (even across restarts).
 - **One-click "Set as default" for AI model connections.** Any connection in **AI models** can now be marked as the
   default (`POST /api/connections/:id/default`): every teammate still following the default switches to it from its
   next turn, while teammates that explicitly picked another connection or model stay unchanged. The active default
@@ -16,6 +65,12 @@ names.
 - **Light theme & appearance switcher.** Added a light theme alongside Dark and Follow system modes in **Settings →
   Appearance** and a one-click toggle in the sidebar header, persisted to both `localStorage` (with pre-paint theme
   bootstrap to avoid flash) and gateway settings (`theme`).
+
+### Security
+
+- **Cross-boundary `outside-data` taint propagation.** Hardened taint tracking across `browser_*`, connector/MCP reads,
+  A2A `message_bot` / `bot_ref`, group speaker → Chief rounds, foreground → background delegation & steering, and DAG
+  pipeline edges (with SHA-256 content-hashed `│ `-prefixed upstream output fences).
 
 ### Fixed
 
@@ -701,7 +756,8 @@ A self-hosted Grok Bot alternative assembled from OpenClaw: three preconfigured 
 Ticker) with strict boundaries, agent-to-agent handoffs, any model provider, a one-command setup that never
 overwrites an existing OpenClaw config, a Docker/VPS path and an honest comparison with Grok Bot.
 
-[Unreleased]: https://github.com/wolfqing/OpenSuperBot/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/wolfqing/OpenSuperBot/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/wolfqing/OpenSuperBot/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/wolfqing/OpenSuperBot/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/wolfqing/OpenSuperBot/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/wolfqing/OpenSuperBot/compare/v0.5.0...v0.6.0
