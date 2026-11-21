@@ -1,11 +1,15 @@
 import type { FailReason } from './supervisor.js'
 
 /**
- * 网关还没起来时窗口里显示的两页：「正在启动」和「出错了」。都是 data: URL，不经网关、不带脚本以外的东西。
- * 错误页上的两个按钮是链接：`osb:retry`、`osb:logs`，主进程在 will-navigate 里接住，不用 preload。
+ * 网关还没起来时窗口里显示的两页（「正在启动」和「出错了」）以及 macOS 菜单栏的「关于」小窗。
+ * 都是 data: URL，不经网关、不带脚本以外的东西；错误页的 `osb:` 链接与关于页的 https 链接都由主进程 secureContents 接住。
  * 「复制诊断信息」只在页面里选中文字再复制（data: 页不是安全上下文，用不了 navigator.clipboard）。
  */
 export type PageLang = 'en' | 'zh-CN'
+
+export const AUTHOR_URL = 'https://github.com/wolfqing'
+export const REPO_URL = 'https://github.com/wolfqing/OpenSuperBot'
+export const CONTRIBUTORS_URL = 'https://github.com/wolfqing/OpenSuperBot/graphs/contributors'
 
 const TEXT = {
   en: {
@@ -21,6 +25,14 @@ const TEXT = {
     copied: 'Copied',
     logs: 'Open the log folder',
     lastLines: 'Last lines of the log',
+    aboutTitle: 'About OpenSuperBot',
+    version: (v: string) => `Version ${v}`,
+    creditsLead: 'Created and maintained by ',
+    creditsMiddle: '. Thanks to all the ',
+    contributors: 'open-source contributors',
+    creditsTail: ' for their code, feedback, and ideas.',
+    repo: 'GitHub',
+    license: 'MIT License',
   },
   'zh-CN': {
     starting: '正在启动 OpenSuperBot…',
@@ -35,6 +47,14 @@ const TEXT = {
     copied: '已复制',
     logs: '打开日志所在文件夹',
     lastLines: '日志最后几行',
+    aboutTitle: '关于 OpenSuperBot',
+    version: (v: string) => `版本 ${v}`,
+    creditsLead: '由 ',
+    creditsMiddle: ' 发起并维护，感谢每一位提交代码、反馈问题和分享想法的',
+    contributors: '开源贡献者',
+    creditsTail: '。',
+    repo: 'GitHub 仓库',
+    license: 'MIT 开源协议',
   },
 } as const
 
@@ -95,6 +115,52 @@ document.getElementById('copy').addEventListener('click', function () {
 });
 </script>`
   return page(lang, t.title, body, script)
+}
+
+const ABOUT_STYLE = `
+:root { color-scheme: dark light; --bg: #0b0c0f; --text: #f0f2f5; --dim: #9aa1ae; --faint: #6f7785; --border: rgba(255, 255, 255, 0.11); --link: #58a6ff; }
+@media (prefers-color-scheme: light) { :root { --bg: #f6f7f9; --text: #14161a; --dim: #5c6270; --faint: #7d8594; --border: #dfe2e8; --link: #0969da; } }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+  padding: 36px 28px 24px; background: var(--bg); color: var(--text);
+  font: 13px/1.6 -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC', sans-serif;
+  -webkit-font-smoothing: antialiased; user-select: none; }
+.drag { position: fixed; top: 0; left: 0; right: 0; height: 36px; -webkit-app-region: drag; }
+.icon { width: 64px; height: 64px; margin-bottom: 12px; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.32)); }
+h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 2px; }
+.ver { margin: 0 0 16px; font-size: 12px; color: var(--faint); }
+.credits { margin: 0 0 18px; color: var(--dim); max-width: 316px; user-select: text; }
+.meta { width: 100%; padding-top: 14px; border-top: 1px solid var(--border); font-size: 12px; color: var(--faint); }
+a { color: var(--link); text-decoration: none; -webkit-app-region: no-drag; }
+a:hover { text-decoration: underline; }
+`
+
+const APP_ICON_SVG = `<svg class="icon" viewBox="0 0 100 100" aria-hidden="true">`
+  + `<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#282e3c"/><stop offset="100%" stop-color="#181c26"/></linearGradient></defs>`
+  + `<rect width="100" height="100" rx="22.5" fill="url(#bg)"/>`
+  + `<ellipse cx="50" cy="52.4" rx="26.4" ry="24" fill="#4d9fff"/>`
+  + `<ellipse cx="41.6" cy="47.6" rx="6.6" ry="9" fill="#ffffff"/>`
+  + `<ellipse cx="58.4" cy="47.6" rx="6.6" ry="9" fill="#ffffff"/>`
+  + `<ellipse cx="42.8" cy="49.4" rx="3" ry="4.2" fill="#141820"/>`
+  + `<ellipse cx="59.6" cy="49.4" rx="3" ry="4.2" fill="#141820"/>`
+  + `</svg>`
+
+export function aboutPage(lang: PageLang, version: string): string {
+  const t = TEXT[lang]
+  const body = `${APP_ICON_SVG}`
+    + `<h1>OpenSuperBot</h1>`
+    + `<p class="ver">${esc(t.version(version))}</p>`
+    + `<p class="credits">${esc(t.creditsLead)}`
+    + `<a href="${AUTHOR_URL}" target="_blank" rel="noreferrer">wolfqing</a>`
+    + `${esc(t.creditsMiddle)}`
+    + `<a href="${CONTRIBUTORS_URL}" target="_blank" rel="noreferrer">${esc(t.contributors)}</a>`
+    + `${esc(t.creditsTail)}</p>`
+    + `<div class="meta"><a href="${REPO_URL}" target="_blank" rel="noreferrer">${esc(t.repo)}</a>`
+    + ` <span aria-hidden="true">·</span> ${esc(t.license)}</div>`
+  return `<!doctype html><html lang="${lang}"><head><meta charset="utf-8">`
+    + `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">`
+    + `<title>${esc(t.aboutTitle)}</title><style>${ABOUT_STYLE}</style></head>`
+    + `<body><div class="drag" aria-hidden="true"></div>${body}</body></html>`
 }
 
 /** 给 loadURL 用 */

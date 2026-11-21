@@ -86,10 +86,11 @@ describe('connectors store & keys', () => {
     expect(getApproval(db, row.id)!.execution_detail).toHaveLength(2000)
   })
 
-  it('exposes the 6 catalog apps in 3 groups', () => {
+  it('exposes the 7 catalog apps in 3 groups including native Polery Docs', () => {
     expect(CATALOG.map((c) => c.app)).toEqual([
-      'gmail', 'outlook', 'google_calendar', 'outlook_calendar', 'notion', 'slack',
+      'gmail', 'outlook', 'google_calendar', 'outlook_calendar', 'polery', 'notion', 'slack',
     ])
+    expect(catalogByApp('polery')?.native).toBe(true)
     expect(catalogByApp('gmail')?.toolkitSlug).toBe('gmail')
     expect(catalogByApp('google_calendar')?.toolkitSlug).toBe('googlecalendar')
     expect(catalogByApp('unknown')).toBeUndefined()

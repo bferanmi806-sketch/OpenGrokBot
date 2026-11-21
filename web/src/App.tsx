@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiError, SignedOut, answerQuestion, checkSession, connectEvents, createBot, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
-  fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchUiPrefs, forgetMemoryRule, removeUpload, resolveApproval, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers,
+  fetchFeed, fetchGoals, fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchSpaces, fetchUiPrefs, fetchVault, forgetMemoryRule, removeUpload, resolveApproval, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers, setBotSpaceRole, setBotVaultItems,
   setComputerShell, setComputerWindow, stopThread, updateRoutine, uploadFile,
 } from './api'
 import { BotModelChip, BotModelPicker, botModel, botSeesImages } from './components/BotModelPicker'
@@ -9,6 +9,7 @@ import { ConfirmDialog, useEscape } from './components/ConfirmDialog'
 import { ConnectorsDialog } from './components/ConnectorsDialog'
 import { DemoBanner } from './components/DemoBanner'
 import { ComputerPanel } from './components/ComputerPanel'
+import { FeedView, type TodayTab } from './components/FeedView'
 import { SidebarIcon, XIcon } from './components/Icons'
 import { ModelsDialog } from './components/ModelsDialog'
 import { NewBotForm } from './components/NewBotForm'
@@ -16,13 +17,14 @@ import { SettingsDialog } from './components/SettingsDialog'
 import { SetupWizard, type LanguageSetting } from './components/SetupWizard'
 import { Sidebar } from './components/Sidebar'
 import { Thread } from './components/Thread'
+import { VaultDialog } from './components/VaultDialog'
 import { desktopApi } from './desktop'
 import { I18nProvider, browserLanguages, pickLang, useT, type Lang } from './i18n'
 import { errorText } from './i18n/describe'
 import { applyHello, applyStatus, clearDone } from './presence'
 import { applyTheme, hasStoredTheme, readStoredTheme, resolveTheme, systemTheme, writeStoredTheme } from './theme'
 import type {
-  BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, SetupInfo, ThemeSetting,
+  BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, FeedSnapshot, GoalsSnapshot, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, SetupInfo, SpaceRole, SpacesSnapshot, ThemeSetting, VaultSnapshot,
 } from './types'
 
 const EMPTY_CONNECTORS: ConnectorsSnapshot = {
@@ -136,9 +138,21 @@ function Workspace({
   const [connectors, setConnectors] = useState<ConnectorsSnapshot | null>(null)
   /** MCP 服务快照；老网关没有这块就一直是 null */
   const [mcpServers, setMcpServers] = useState<McpServersSnapshot | null>(null)
-  /** 开着的是哪个窗口：「AI 模型」总表、「连接器」总表，或给某位同事选模型 */
+  /** 凭证库快照；老网关没有这块就一直是 null */
+  const [vault, setVault] = useState<VaultSnapshot | null>(null)
+  /** 今日动态与灵感箱快照；老网关没有这块就一直是 null */
+  const [feed, setFeed] = useState<FeedSnapshot | null>(null)
+  /** 长期目标与里程碑快照；作为「今日」顶栏二级标签展示 */
+  const [goals, setGoals] = useState<GoalsSnapshot | null>(null)
+  /** 声明式空间快照；作为「今日」顶栏第四个二级标签展示 */
+  const [spaces, setSpaces] = useState<SpacesSnapshot | null>(null)
+  const [selectedSpaceId, setSelectedSpaceId] = useState<string | null>(null)
+  const [activeView, setActiveView] = useState<'thread' | 'feed'>('thread')
+  const [todayTab, setTodayTab] = useState<TodayTab>('briefings')
+  /** 开着的是哪个窗口：「AI 模型」总表、「连接器」总表、「凭证库」总表，或给某位同事选模型 */
   const [modelsOpen, setModelsOpen] = useState(false)
   const [connectorsOpen, setConnectorsOpen] = useState(false)
+  const [vaultOpen, setVaultOpen] = useState(false)
   const [pickerFor, setPickerFor] = useState<string | null>(null)
   /** 首次启动向导：网关说要（needsSetup）才出；走完之前一直开着，哪怕中途已经存好了 key */
   const [setup, setSetup] = useState<SetupInfo | null>(null)
@@ -149,13 +163,43 @@ function Workspace({
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; confirmLabel: string; run: () => void } | null>(null)
   useEscape(hiring ? () => setHiring(false) : undefined)
 
-  // #thread=<id>：打开就是那条对话。桌面版点系统通知、别人发来的链接都走这个
+  // #thread=<id>、#today（兼容 #feed）、#ideas、#goals、#spaces、#space=<id>：打开对应对话或今日工作台的指定二级标签
   useEffect(() => {
     const apply = () => {
+      if (window.location.hash === '#today' || window.location.hash === '#feed') {
+        setActiveView('feed')
+        setTodayTab('briefings')
+        return
+      }
+      if (window.location.hash === '#ideas') {
+        setActiveView('feed')
+        setTodayTab('ideas')
+        return
+      }
+      if (window.location.hash === '#goals' || window.location.hash === '#tracking') {
+        setActiveView('feed')
+        setTodayTab('goals')
+        return
+      }
+      if (window.location.hash === '#spaces') {
+        setActiveView('feed')
+        setTodayTab('spaces')
+        return
+      }
+      const sp = /^#space=(.+)$/.exec(window.location.hash)
+      if (sp) {
+        try {
+          setSelectedSpaceId(decodeURIComponent(sp[1]!))
+          setActiveView('feed')
+          setTodayTab('spaces')
+        } catch { /* 坏掉的百分号编码不炸页面 */ }
+        return
+      }
       const m = /^#thread=(.+)$/.exec(window.location.hash)
       if (!m) return
       try {
         setSelectedId(decodeURIComponent(m[1]!))
+        setActiveView('thread')
       } catch { /* 坏掉的百分号编码不炸页面 */ }
     }
     apply()
@@ -269,16 +313,52 @@ function Workspace({
     }
   }, [])
 
+  /** 凭证库快照；老网关没有这个路由就返回 null，界面上不显示这一块 */
+  const loadVault = useCallback(async () => {
+    try {
+      setVault(await fetchVault())
+    } catch (err) {
+      if (err instanceof SignedOut) throw err
+    }
+  }, [])
+
+  /** 今日动态与灵感箱快照；老网关没有这个路由就返回 null */
+  const loadFeed = useCallback(async () => {
+    try {
+      setFeed(await fetchFeed())
+    } catch (err) {
+      if (err instanceof SignedOut) throw err
+    }
+  }, [])
+
+  /** 长期目标与里程碑快照；老网关没有这个路由就返回 null */
+  const loadGoals = useCallback(async () => {
+    try {
+      setGoals(await fetchGoals())
+    } catch (err) {
+      if (err instanceof SignedOut) throw err
+    }
+  }, [])
+
+  /** 声明式空间快照；老网关没有这个路由就返回 null */
+  const loadSpaces = useCallback(async () => {
+    try {
+      setSpaces(await fetchSpaces())
+    } catch (err) {
+      if (err instanceof SignedOut) throw err
+    }
+  }, [])
+
   /** 首次加载和每次重连都走这里：断线期间错过的消息、审批数、名册一次补齐。 */
   const resync = useCallback(async () => {
     try {
-      await Promise.all([refreshConversations(), loadRoster(), loadLlms(), loadConnectors(), loadMcpServers()])
+      await Promise.all([refreshConversations(), loadRoster(), loadLlms(), loadConnectors(), loadMcpServers(), loadVault(), loadFeed(), loadGoals(), loadSpaces()])
       const current = threadIdRef.current
       if (current) await loadMessages(current)
     } catch (err) {
       guard(err)
     }
-  }, [guard, loadConnectors, loadLlms, loadMcpServers, loadMessages, loadRoster, refreshConversations])
+  }, [guard, loadConnectors, loadFeed, loadGoals, loadLlms, loadMcpServers, loadMessages, loadRoster, loadSpaces, loadVault, refreshConversations])
 
   useEffect(() => {
     checkSession()
@@ -345,6 +425,25 @@ function Workspace({
         if (panelFor.current) void loadPanel(panelFor.current)
         return
       }
+      if (e.type === 'vault_changed') {
+        void loadVault().catch(guard)
+        if (panelFor.current) void loadPanel(panelFor.current)
+        return
+      }
+      if (e.type === 'feed_changed') {
+        void loadFeed().catch(guard)
+        return
+      }
+      if (e.type === 'goals_changed') {
+        void loadGoals().catch(guard)
+        if (panelFor.current) void loadPanel(panelFor.current)
+        return
+      }
+      if (e.type === 'spaces_changed') {
+        void loadSpaces().catch(guard)
+        if (panelFor.current) void loadPanel(panelFor.current)
+        return
+      }
       if (e.type !== 'message') return // 更新的网关发来不认识的事件，不归这里管
       if (e.message.sender !== 'user' && e.message.kind !== 'activity') postedRef.current.add(e.message.sender)
       // 就地更新的旧消息（activity 卡片收尾、审批 chip 翻转）不该顶掉更新的那条预览；没变就不换数组引用
@@ -355,9 +454,10 @@ function Workspace({
         next[idx] = { ...cs[idx]!, last_message: e.message }
         return next
       })
-      // 审批、问题来了或定了，侧栏的「等你」计数要跟着变
-      if (['approval_request', 'approval_resolved', 'question'].includes(e.message.kind)) {
+      // 审批、问题、登录请求或用户开口回应，侧栏计数与今日动态 Needs You 同步刷新
+      if (['approval_request', 'approval_resolved', 'question', 'login_request'].includes(e.message.kind) || e.message.sender === 'user') {
         void refreshConversations().catch(guard)
+        void loadFeed().catch(guard)
       }
       // 面板开着时，记忆规则变动、放行规则落地或例行任务改动都实时刷新
       if (panelFor.current && ['memory_updated', 'approval_resolved', 'activity'].includes(e.message.kind)) {
@@ -375,7 +475,7 @@ function Workspace({
         })
       }
     }, { onSignedOut: signOut })
-  }, [signedOut, resync, refreshConversations, loadConnectors, loadMcpServers, loadPanel, guard, signOut])
+  }, [signedOut, resync, refreshConversations, loadConnectors, loadMcpServers, loadVault, loadFeed, loadGoals, loadSpaces, loadPanel, guard, signOut])
 
   const waiting = conversations.reduce((sum, c) => sum + (c.pending ?? 0), 0)
   useEffect(() => {
@@ -491,6 +591,20 @@ function Workspace({
       return { servers, botGrants: { ...prev.botGrants, [botId]: nextIds } }
     })
   })
+  const onToggleVaultItem = (itemId: string, granted: boolean) => panelAction(async (botId) => {
+    const current = panel?.botId === botId && panel.info?.vaultItems
+      ? panel.info.vaultItems.filter((v) => v.granted).map((v) => v.id)
+      : (vault?.botGrants[botId] ?? [])
+    const nextIds = granted
+      ? (current.includes(itemId) ? current : [...current, itemId])
+      : current.filter((id) => id !== itemId)
+    const res = await setBotVaultItems(botId, nextIds)
+    setVault(res.snapshot)
+  })
+  const onSetSpaceRole = (spaceId: string, role: SpaceRole | null) => panelAction(async (botId) => {
+    const res = await setBotSpaceRole(botId, spaceId, role)
+    setSpaces(res.snapshot)
+  })
 
   const hire = async (name: string, role: string) => {
     try {
@@ -499,7 +613,7 @@ function Workspace({
       setHireError(undefined)
       await refreshConversations()
       setSelectedId(`dm:${bot.id}`)
-      await Promise.all([loadRoster(), loadLlms(), loadConnectors(), loadMcpServers()])
+      await Promise.all([loadRoster(), loadLlms(), loadConnectors(), loadMcpServers(), loadVault()])
     } catch (err) {
       if (err instanceof SignedOut) setSignedOut(true)
       else setHireError(err instanceof ApiError ? errorText(t, err) : err instanceof Error ? err.message : String(err))
@@ -529,11 +643,54 @@ function Workspace({
   }
   const selectConversation = useCallback((id: string) => {
     setSelectedId(id)
-    // 清掉旧的 #thread=，否则桌面端下次再点同一条通知时 hash 没变，hashchange 就不会触发
-    if (window.location.hash.startsWith('#thread=')) {
+    setActiveView('thread')
+    // 清掉旧的 #thread= / #today / #feed / #ideas / #goals / #spaces / #space=，避免通知再次点击同一路径时不触发 hashchange
+    if (
+      window.location.hash.startsWith('#thread=')
+      || window.location.hash.startsWith('#space=')
+      || ['#feed', '#today', '#ideas', '#goals', '#tracking', '#spaces'].includes(window.location.hash)
+    ) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search)
     }
   }, [])
+  const openFeed = useCallback(() => {
+    setActiveView('feed')
+    setTodayTab('briefings')
+    void loadFeed().catch(guard)
+    void loadGoals().catch(guard)
+    void loadSpaces().catch(guard)
+  }, [guard, loadFeed, loadGoals, loadSpaces])
+  const changeTodayTab = useCallback((next: TodayTab) => {
+    setTodayTab(next)
+    const nextHash =
+      next === 'spaces'
+        ? (selectedSpaceId ? `#space=${encodeURIComponent(selectedSpaceId)}` : '#spaces')
+        : next === 'goals'
+          ? '#goals'
+          : next === 'ideas'
+            ? '#ideas'
+            : '#today'
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${nextHash}`)
+    }
+    if (next === 'spaces') void loadSpaces().catch(guard)
+    else if (next === 'goals') {
+      void loadGoals().catch(guard)
+      void loadFeed().catch(guard)
+    } else void loadFeed().catch(guard)
+  }, [guard, loadFeed, loadGoals, loadSpaces, selectedSpaceId])
+  const selectSpace = useCallback((spaceId: string | null) => {
+    setSelectedSpaceId(spaceId)
+    const nextHash = spaceId ? `#space=${encodeURIComponent(spaceId)}` : '#spaces'
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${nextHash}`)
+    }
+  }, [])
+  const openBotComputer = useCallback((botId: string) => {
+    selectConversation(`dm:${botId}`)
+    showPanel({ botId, info: panel?.botId === botId ? panel.info : null })
+    void loadPanel(botId)
+  }, [loadPanel, panel, selectConversation, showPanel])
   const toggleTheme = useCallback(() => {
     const next: ThemeSetting = resolvedTheme === 'dark' ? 'light' : 'dark'
     onTheme(next)
@@ -582,7 +739,7 @@ function Workspace({
     <div className="app">
       <Sidebar
         conversations={conversations}
-        selectedId={selected?.id ?? null}
+        selectedId={activeView === 'thread' ? (selected?.id ?? null) : null}
         statuses={statuses}
         onSelect={selectConversation}
         onNewBot={() => { setHireError(undefined); setHiring(true) }}
@@ -590,11 +747,49 @@ function Workspace({
         onClose={() => setSidebarOpen(false)}
         resolvedTheme={resolvedTheme}
         onToggleTheme={toggleTheme}
+        {...(feed ? {
+          onFeed: openFeed,
+          feedSelected: activeView === 'feed',
+          feedPending: feed.needsYou.length,
+          feedUnread: feed.unreadCount,
+        } : {})}
         {...(llms ? { onModels: () => setModelsOpen(true) } : {})}
         {...(hasConnectors ? { onConnectors: () => setConnectorsOpen(true), connectorsAttention } : {})}
+        {...(vault ? { onVault: () => setVaultOpen(true) } : {})}
         {...(setup ? { onSettings: () => setSettingsOpen(true) } : {})}
       />
-      {selected ? (
+      {activeView === 'feed' && feed ? (
+        <FeedView
+          state={feed}
+          roster={roster}
+          tab={todayTab}
+          onTabChange={changeTodayTab}
+          goals={goals}
+          onGoalsChange={setGoals}
+          onRefreshGoals={loadGoals}
+          spaces={spaces}
+          onSpacesChange={setSpaces}
+          selectedSpaceId={selectedSpaceId}
+          onSelectSpace={selectSpace}
+          onChange={setFeed}
+          onOpenThread={selectConversation}
+          onOpenComputer={openBotComputer}
+          onDecide={(approvalId, decision, remember, items, edit) => (
+            resolveApproval(approvalId, decision, remember, items, edit).then(() => {
+              void loadFeed().catch(guard)
+            }).catch((err: unknown) => {
+              if (err instanceof SignedOut) { setSignedOut(true); return }
+              if (edit !== undefined) throw err
+              guard(err)
+            })
+          )}
+          onAnswer={(messageId, choices) => answerQuestion(messageId, choices).then(() => {
+            void loadFeed().catch(guard)
+          }).catch((err) => { guard(err); throw err })}
+          onToggleSidebar={() => setSidebarOpen((o) => !o)}
+          onSignedOut={signOut}
+        />
+      ) : selected ? (
         <Thread
           conversation={selected}
           messages={messages}
@@ -646,7 +841,7 @@ function Workspace({
           {t('app.noTeammates')}
         </main>
       )}
-      {panel && selected?.kind === 'dm' && selected.members[0] === panel.botId ? (
+      {activeView === 'thread' && panel && selected?.kind === 'dm' && selected.members[0] === panel.botId ? (
         <ComputerPanel
           info={panel.info}
           botName={selected?.title ?? ''}
@@ -658,9 +853,11 @@ function Workspace({
           onShell={onShell}
           onToggleConnector={onToggleConnector}
           onToggleMcpServer={onToggleMcpServer}
+          onToggleVaultItem={onToggleVaultItem}
+          onSetSpaceRole={onSetSpaceRole}
         />
       ) : null}
-      {settingsOpen && !modelsOpen && !connectorsOpen ? (
+      {settingsOpen && !modelsOpen && !connectorsOpen && !vaultOpen ? (
         <SettingsDialog
           llms={llms}
           providers={providers}
@@ -697,7 +894,19 @@ function Workspace({
           onClose={() => setConnectorsOpen(false)}
         />
       ) : null}
-      {llms && pickerFor && !modelsOpen && !connectorsOpen ? (
+      {vault && vaultOpen ? (
+        <VaultDialog
+          state={vault}
+          roster={roster}
+          onChange={(next) => {
+            setVault(next)
+            if (panelFor.current) void loadPanel(panelFor.current)
+          }}
+          onSignedOut={signOut}
+          onClose={() => setVaultOpen(false)}
+        />
+      ) : null}
+      {llms && pickerFor && !modelsOpen && !connectorsOpen && !vaultOpen ? (
         <BotModelPicker
           botId={pickerFor}
           botName={roster[pickerFor]?.name ?? pickerFor}

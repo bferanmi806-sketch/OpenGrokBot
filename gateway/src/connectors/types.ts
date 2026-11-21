@@ -1,7 +1,7 @@
-export const APP_KEYS = ['gmail', 'outlook', 'google_calendar', 'outlook_calendar', 'notion', 'slack'] as const
+export const APP_KEYS = ['gmail', 'outlook', 'google_calendar', 'outlook_calendar', 'polery', 'notion', 'slack'] as const
 export type AppKey = (typeof APP_KEYS)[number]
 export type AppGroupId = 'mail_calendar' | 'productivity' | 'messaging'
-export type ConnectorDomain = 'mail' | 'calendar' | 'notion' | 'slack'
+export type ConnectorDomain = 'mail' | 'calendar' | 'polery' | 'notion' | 'slack'
 export type ConnectorStatus = 'pending' | 'active' | 'expired' | 'failed'
 
 export type CatalogApp = {
@@ -11,6 +11,8 @@ export type CatalogApp = {
   domain: ConnectorDomain
   toolkitSlug: string
   authScheme: 'OAUTH2'
+  /** true = 原生直连 OAuth 2.1（无需第三方 Composio API Key） */
+  native?: boolean
 }
 
 export type ConnectorAccountRow = {
@@ -75,6 +77,8 @@ export type ConnectorWriteToolName =
   | 'mail_archive'
   | 'calendar_create_event'
   | 'calendar_update_event'
+  | 'polery_create_document'
+  | 'polery_propose_edits'
   | 'notion_create_page'
   | 'notion_append'
   | 'slack_send_message'
@@ -139,6 +143,14 @@ export interface ConnectorDriver {
     status: ConnectorStatus
     accountLabel: string
   }>
+  completeOAuth?(input: {
+    app: AppKey
+    remoteId: string
+    code?: string
+    error?: string
+    errorDescription?: string
+    callbackUrl: string
+  }): Promise<{ status: ConnectorStatus; accountLabel: string; error?: string }>
   revokeAccount(input: { remoteId: string }): Promise<void>
   // Mail
   listMail(account: ConnectorAccountRow, opts: {
@@ -175,6 +187,12 @@ export interface ConnectorDriver {
   // Slack
   listSlackChannels(account: ConnectorAccountRow, opts: { limit?: number; cursor?: string }): Promise<{ channels: SlackChannelItem[]; nextCursor?: string }>
   readSlackMessages(account: ConnectorAccountRow, opts: { channelId: string; threadTs?: string; limit?: number }): Promise<{ messages: SlackMessageItem[] }>
+  // Polery Docs (native Remote MCP)
+  callPoleryTool?(account: ConnectorAccountRow, toolName: string, args: Record<string, unknown>): Promise<{
+    text: string
+    structured?: Record<string, unknown>
+    isError: boolean
+  }>
   // Gated Writes (single attempt, never auto-retried on timeout)
   executeWrite(frozen: FrozenExecution): Promise<WriteExecutionResult>
 }

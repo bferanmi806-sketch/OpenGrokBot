@@ -267,6 +267,63 @@ describe('ConnectorsDialog', () => {
     expect(within(slackAccount).queryByText(/Finish signing in inside the browser tab/)).toBeNull()
   })
 
+  it('allows connecting native Polery Docs directly without a Composio API key while keeping third-party apps disabled', async () => {
+    const nativeState: ConnectorsSnapshot = {
+      key: { set: false, masked: '', source: 'none', locked: false },
+      catalog: [
+        { app: 'gmail', name: 'Gmail', group: 'mail_calendar', domain: 'mail', toolkitSlug: 'gmail', authScheme: 'OAUTH2' },
+        { app: 'polery', name: 'Polery Docs', group: 'productivity', domain: 'polery', toolkitSlug: 'polery', authScheme: 'OAUTH2', native: true },
+      ],
+      accounts: [],
+      botGrants: { 'inbox-keeper': [], researcher: [] },
+    }
+    const pendingState: ConnectorsSnapshot = {
+      ...nativeState,
+      accounts: [
+        { id: 'ca-polery01', app: 'polery', accountLabel: 'docs.polery.com', status: 'pending', lastError: '', createdAt: 4, updatedAt: 4 },
+      ],
+      botGrants: { 'inbox-keeper': [], researcher: ['ca-polery01'] },
+    }
+    const calls = mockFetch({
+      'POST /api/connectors/connect': () => ({
+        status: 201,
+        body: {
+          connectorId: 'ca-polery01',
+          redirectUrl: 'https://docs.polery.com/oauth/authorize?client_id=abc',
+          callbackUrl: 'http://127.0.0.1:4319/oauth/connector/polery-nonce',
+          state: pendingState,
+        },
+      }),
+    })
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const onChange = vi.fn()
+
+    render(<ConnectorsDialog state={nativeState} roster={roster} onChange={onChange} onClose={() => {}} />)
+
+    const gmailCard = screen.getByText('Gmail').closest('.connector-card') as HTMLElement
+    expect(within(gmailCard).getByRole('button', { name: 'Connect' })).toBeDisabled()
+
+    const poleryCard = screen.getByText('Polery Docs').closest('.connector-card') as HTMLElement
+    expect(within(poleryCard).getByText('Native')).toBeInTheDocument()
+    expect(within(poleryCard).getByText(/no Composio key needed/)).toBeInTheDocument()
+    const poleryConnectBtn = within(poleryCard).getByRole('button', { name: 'Connect' })
+    expect(poleryConnectBtn).toBeEnabled()
+
+    await userEvent.click(poleryConnectBtn)
+    await userEvent.click(within(poleryCard).getByRole('checkbox', { name: 'Scout' }))
+    const authBtn = within(poleryCard).getByRole('button', { name: 'Authorize in browser' })
+    expect(authBtn).toBeEnabled()
+    await userEvent.click(authBtn)
+
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(pendingState))
+    expect(calls[0]).toEqual({
+      method: 'POST',
+      path: '/api/connectors/connect',
+      body: { app: 'polery', botIds: ['researcher'] },
+    })
+    expect(openSpy).toHaveBeenCalledWith('https://docs.polery.com/oauth/authorize?client_id=abc', '_blank', 'noopener')
+  })
+
   it('closes on Escape key', () => {
     const onClose = vi.fn()
     render(<ConnectorsDialog state={snapshot} roster={roster} onChange={() => {}} onClose={onClose} />)

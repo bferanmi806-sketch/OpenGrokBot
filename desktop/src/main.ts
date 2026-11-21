@@ -8,7 +8,7 @@ import { diagnosticsText } from './diagnostics.js'
 import { registerDesktopApi } from './ipc.js'
 import { openLog } from './logfile.js'
 import { loginItem } from './loginitem.js'
-import { dataUrl, errorPage, pageLang, startingPage } from './pages.js'
+import { aboutPage, dataUrl, errorPage, pageLang, startingPage } from './pages.js'
 import { appLayout, resources } from './paths.js'
 import { DEFAULT_PORT, choosePort, portInUse, probePort, readState, writeState } from './port.js'
 import { SAFE_WEB_PREFERENCES, downloadPath, permissionAllowed, secureContents } from './security.js'
@@ -43,6 +43,7 @@ function run() {
   const res = resources({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() })
   const log = openLog(layout.logFile)
   let win: BrowserWindow | null = null
+  let aboutWin: BrowserWindow | null = null
   let port = ENV_PORT ?? readState(layout.root).port ?? DEFAULT_PORT
   /** 起不来是因为端口刚被抢：自动换端口重来，最多这么多次，再不行就出错误页 */
   let portRetries = 0
@@ -258,6 +259,29 @@ function run() {
     if (showing === 'gateway') void win?.loadURL(`${base(port)}/#thread=${encodeURIComponent(threadId)}`)
   }
 
+  /** 菜单栏的「关于 OpenSuperBot」：带可点击 GitHub 主页署名与开源贡献者致谢 */
+  function showAbout() {
+    if (aboutWin && !aboutWin.isDestroyed()) {
+      aboutWin.show()
+      aboutWin.focus()
+      return
+    }
+    aboutWin = new BrowserWindow({
+      width: 380, height: 320, resizable: false, minimizable: false, maximizable: false, fullscreenable: false,
+      title: texts(lang()).about, backgroundColor: '#0b0c0f',
+      ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const } : {}),
+      webPreferences: { ...SAFE_WEB_PREFERENCES },
+    })
+    aboutWin.webContents.on('before-input-event', (e, input) => {
+      if (input.type === 'keyDown' && input.key === 'Escape') {
+        e.preventDefault()
+        aboutWin?.close()
+      }
+    })
+    aboutWin.on('closed', () => { aboutWin = null })
+    void aboutWin.loadURL(dataUrl(aboutPage(lang(), app.getVersion())))
+  }
+
   /**
    * 托盘和菜单里的「退出」：有同事在干活或有开着的例行任务，先说清楚退出后它们不会跑，再问。
    * 只有这两个入口问——关机、注销、信号、Dock 菜单里的退出在 before-quit 里分不出是谁发起的，一律不问，免得挡住关机。
@@ -430,7 +454,7 @@ function run() {
     const t = texts(lang())
     const template: MenuItemConstructorOptions[] = [
       { label: app.name, submenu: [
-        { role: 'about' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' },
+        { label: t.about, click: showAbout }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' },
         { label: t.quit, accelerator: 'Command+Q', click: () => void userQuit() },
       ] },
       { role: 'editMenu' },

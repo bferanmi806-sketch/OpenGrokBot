@@ -1471,6 +1471,10 @@ export function applyApprovalEdit(approval: ApprovalRow, rawEdit: unknown): Appl
     return { ok: false, error: 'Invalid stored execution payload.' }
   }
 
+  if (parsed.kind === 'vault_fill') {
+    return { ok: false, error: 'Vault approvals cannot be edited.' }
+  }
+
   if (parsed.kind === 'mcp') {
     if (
       typeof parsed.serverId !== 'string' ||

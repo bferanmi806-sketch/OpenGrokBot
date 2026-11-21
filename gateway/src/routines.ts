@@ -16,12 +16,22 @@ export type RoutineRow = {
   webhook_key: string | null
   /** act = 平常的回合；watch = 只看不动：只给只读工具，没事就不出声 */
   mode: RoutineMode
+  /** thread = 仅落入对话；feed / both = 报告同时投影到今日 Feed */
+  surface?: RoutineSurface
+  /** 可选关联的目标 id（goals.id）；目标暂停/完成后定时触发会自动跳过 */
+  goal_id?: string | null
 }
 
 export type RoutineMode = 'act' | 'watch'
+export type RoutineSurface = 'thread' | 'feed' | 'both'
 
 export function normalizeMode(value: unknown): RoutineMode {
   return value === 'watch' ? 'watch' : 'act'
+}
+
+export function normalizeSurface(value: unknown, mode: RoutineMode = 'act'): RoutineSurface {
+  if (value === 'thread' || value === 'feed' || value === 'both') return value
+  return mode === 'watch' ? 'both' : 'thread'
 }
 
 export function isValidCron(expr: string): boolean {
@@ -63,14 +73,49 @@ export function describeRoutine(r: { cron: string; webhook_key?: string | null }
 
 export function createRoutine(
   db: Db,
-  input: { botId: string; name: string; cron: string; instructions: string; webhook?: boolean; mode?: RoutineMode },
+  input: {
+    botId: string
+    name: string
+    cron: string
+    instructions: string
+    webhook?: boolean
+    mode?: RoutineMode
+    surface?: RoutineSurface
+    goalId?: string | null
+  },
 ): RoutineRow {
   const key = input.webhook ? randomBytes(18).toString('base64url') : null
+  const mode = input.mode ?? 'act'
+  const surface = normalizeSurface(input.surface, mode)
+  const goalId = input.goalId ?? null
   const info = db.prepare(
-    `INSERT INTO routines (bot_id, name, cron, instructions, enabled, created_at, webhook_key, mode)
-     VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
-  ).run(input.botId, input.name, input.cron, input.instructions, Date.now(), key, input.mode ?? 'act')
+    `INSERT INTO routines (bot_id, name, cron, instructions, enabled, created_at, webhook_key, mode, surface, goal_id)
+     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+  ).run(input.botId, input.name, input.cron, input.instructions, Date.now(), key, mode, surface, goalId)
   return db.prepare('SELECT * FROM routines WHERE id = ?').get(Number(info.lastInsertRowid)) as RoutineRow
+}
+
+export function setRoutineGoal(db: Db, id: number, goalId: string | null): RoutineRow | null {
+  db.prepare('UPDATE routines SET goal_id = ? WHERE id = ?').run(goalId, id)
+  return getRoutine(db, id)
+}
+
+export function listGoalRoutines(db: Db, goalId: string): RoutineRow[] {
+  return db.prepare('SELECT * FROM routines WHERE goal_id = ? ORDER BY enabled DESC, id DESC').all(goalId) as RoutineRow[]
+}
+
+export function clearGoalFromRoutines(db: Db, goalId: string): number {
+  return db.prepare('UPDATE routines SET goal_id = NULL WHERE goal_id = ?').run(goalId).changes
+}
+
+/** 暂停挂在某目标下的全部活跃例行任务，返回被暂停的 routine id 列表（供 scheduler 移除） */
+export function pauseGoalRoutines(db: Db, goalId: string): number[] {
+  const active = db
+    .prepare('SELECT id FROM routines WHERE goal_id = ? AND enabled = 1')
+    .all(goalId) as { id: number }[]
+  if (!active.length) return []
+  db.prepare('UPDATE routines SET enabled = 0 WHERE goal_id = ? AND enabled = 1').run(goalId)
+  return active.map((r) => r.id)
 }
 
 /** webhook 的入口：id 对得上、密钥逐字节相等（恒定时间比较）才算数；不区分「没这条」和「密钥错」 */

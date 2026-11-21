@@ -163,4 +163,99 @@ describe('Sidebar', () => {
     )
     expect(screen.getByRole('button', { name: 'Switch to dark theme' })).toBeInTheDocument()
   })
+
+  it('renders a Vault footer button when onVault is provided', async () => {
+    const onVault = vi.fn()
+    render(
+      <Sidebar
+        conversations={[conversation()]}
+        selectedId={null}
+        statuses={{}}
+        onSelect={() => {}}
+        onNewBot={() => {}}
+        onVault={onVault}
+      />,
+    )
+    const btn = screen.getByRole('button', { name: 'Vault' })
+    expect(btn).toBeInTheDocument()
+    await userEvent.click(btn)
+    expect(onVault).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders the top Today (Feed) nav item with pending/unread badge when onFeed is provided', async () => {
+    const onFeed = vi.fn()
+    const { rerender } = render(
+      <Sidebar
+        conversations={[conversation()]}
+        selectedId={null}
+        statuses={{}}
+        onSelect={() => {}}
+        onNewBot={() => {}}
+        onFeed={onFeed}
+        feedPending={3}
+        feedUnread={5}
+      />,
+    )
+    const btn = screen.getByRole('button', { name: /Today/ })
+    expect(btn).toBeInTheDocument()
+    expect(screen.getByLabelText('3 waiting on you')).toHaveTextContent('3')
+    await userEvent.click(btn)
+    expect(onFeed).toHaveBeenCalledTimes(1)
+
+    rerender(
+      <Sidebar
+        conversations={[conversation()]}
+        selectedId={null}
+        statuses={{}}
+        onSelect={() => {}}
+        onNewBot={() => {}}
+        onFeed={onFeed}
+        feedPending={0}
+        feedUnread={4}
+      />,
+    )
+    expect(screen.getByLabelText('4 unread updates')).toHaveTextContent('4')
+  })
+
+  it('previews goal_updated messages in DM rows while keeping Today as the single top nav entry', () => {
+    const withGoal = conversation({
+      last_message: {
+        id: 10, thread_id: 'dm:researcher', sender: 'researcher', kind: 'goal_updated', content: '', created_at: 10,
+        payload: { goalId: 'goal-12345678', goalTitle: 'Ship v3', kind: 'milestone', summary: 'Done', diff: '✓ [x] Docs' },
+      },
+    })
+    render(
+      <Sidebar
+        conversations={[withGoal]}
+        selectedId={null}
+        statuses={{}}
+        onSelect={() => {}}
+        onNewBot={() => {}}
+        onFeed={() => {}}
+      />,
+    )
+    expect(screen.getByText('🎯 Ship v3')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Today/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Goals$/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Spaces$/ })).not.toBeInTheDocument()
+  })
+
+  it('renders OpenSuperBot brand label without a leading dot mark', () => {
+    const { container } = render(
+      <Sidebar conversations={[conversation()]} selectedId={null} statuses={{}} onSelect={() => {}} onNewBot={() => {}} />,
+    )
+    expect(screen.getByText('OpenSuperBot')).toBeInTheDocument()
+    expect(container.querySelector('.sidebar-brand-mark')).toBeNull()
+  })
+
+  it('previews space_updated messages in DM rows', () => {
+    const withSpace = conversation({
+      last_message: {
+        id: 11, thread_id: 'dm:researcher', sender: 'researcher', kind: 'space_updated', content: '', created_at: 11,
+        payload: { spaceId: 'space-12345678', spaceTitle: 'Pricing Board', kind: 'item', summary: 'Added row', diff: '+ Acme' },
+      },
+    })
+    render(<Sidebar conversations={[withSpace]} selectedId={null} statuses={{}} onSelect={() => {}} onNewBot={() => {}} />)
+    expect(screen.getByText('📊 Pricing Board')).toBeInTheDocument()
+  })
 })

@@ -246,6 +246,25 @@ export type ApprovalResolvedPayload = {
   edited?: boolean
 }
 export type MemoryPayload = { rule: string; diff: string; total: number; removed?: boolean; by?: 'operator' }
+export type GoalUpdateKind = 'note' | 'milestone' | 'definition' | 'status'
+export type GoalUpdatedPayload = {
+  goalId: string
+  goalTitle: string
+  kind: GoalUpdateKind
+  summary: string
+  diff: string
+  tainted?: boolean
+  by?: 'operator' | 'bot'
+}
+export type SpaceUpdatedPayload = {
+  spaceId: string
+  spaceTitle: string
+  kind: 'space' | 'schema' | 'item'
+  summary: string
+  diff: string
+  tainted?: boolean
+  by?: 'operator' | 'bot'
+}
 export type RoutineMode = 'act' | 'watch'
 export type RoutinePayload = {
   routineId: number
@@ -351,6 +370,10 @@ export type ComputerInfo = {
   connectors?: ComputerConnectorItem[]
   /** 已配置的 MCP 服务，以及这位同事有没有获得访问授权 */
   mcpServers?: BotMcpServerItem[]
+  /** 凭证库条目，以及这位同事有没有获得访问授权 */
+  vaultItems?: BotVaultItem[]
+  /** 声明式空间列表，以及这位同事当前的角色（null / viewer / editor） */
+  spaces?: BotSpaceItem[]
 }
 
 export type ComputerView = ComputerInfo
@@ -364,6 +387,8 @@ export type MessageKind =
   | 'approval_request'
   | 'approval_resolved'
   | 'memory_updated'
+  | 'goal_updated'
+  | 'space_updated'
   | 'routine_created'
   | 'bot_ref'
   | 'login_request'
@@ -384,6 +409,8 @@ export type Message = {
     | ApprovalPayload
     | ApprovalResolvedPayload
     | MemoryPayload
+    | GoalUpdatedPayload
+    | SpaceUpdatedPayload
     | RoutinePayload
     | BotRefPayload
     | LoginPayload
@@ -431,6 +458,10 @@ export type GatewayEvent =
   | { type: 'setup.browser'; browser: BrowserStatus }
   | { type: 'connectors_changed' }
   | { type: 'mcp_changed' }
+  | { type: 'vault_changed' }
+  | { type: 'feed_changed' }
+  | { type: 'goals_changed' }
+  | { type: 'spaces_changed' }
 
 export type ServerEvent = GatewayEvent
 
@@ -544,9 +575,9 @@ export type CheckResult =
   | { ok: true; models: string[]; modelListed: boolean | null }
   | { ok: false; code: CheckCode; status?: number; detail?: string; step?: 'models' | 'chat'; models?: string[] }
 
-export type AppKey = 'gmail' | 'outlook' | 'google_calendar' | 'outlook_calendar' | 'notion' | 'slack'
+export type AppKey = 'gmail' | 'outlook' | 'google_calendar' | 'outlook_calendar' | 'polery' | 'notion' | 'slack'
 export type AppGroupId = 'mail_calendar' | 'productivity' | 'messaging'
-export type ConnectorDomain = 'mail' | 'calendar' | 'notion' | 'slack'
+export type ConnectorDomain = 'mail' | 'calendar' | 'polery' | 'notion' | 'slack'
 export type ConnectorStatus = 'pending' | 'active' | 'expired' | 'failed'
 
 export type CatalogApp = {
@@ -556,6 +587,7 @@ export type CatalogApp = {
   domain: ConnectorDomain
   toolkitSlug: string
   authScheme: 'OAUTH2'
+  native?: boolean
 }
 
 export type ConnectorAccountView = {
@@ -685,4 +717,404 @@ export type ImportMcpServersInput = {
 export type ImportMcpServersResult = {
   imported: McpServerView[]
   errors: { name: string; error: string }[]
+}
+
+export type VaultItemKind = 'login' | 'api_secret' | 'personal_info'
+export type VaultFieldKind = 'text' | 'secret' | 'totp'
+export type VaultApprovalMode = 'always' | 'on_taint'
+
+export type VaultFieldMeta = {
+  key: string
+  kind: VaultFieldKind
+  label?: string
+}
+
+export type VaultMaskedField = VaultFieldMeta & {
+  set: boolean
+  preview: string
+}
+
+export type VaultItemView = {
+  id: string
+  slug: string
+  name: string
+  kind: VaultItemKind
+  allowedDomains: string[]
+  fields: VaultMaskedField[]
+  approvalMode: VaultApprovalMode
+  notes: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type BotVaultItem = {
+  id: string
+  slug: string
+  name: string
+  kind: VaultItemKind
+  allowedDomains: string[]
+  fieldKeys: string[]
+  approvalMode: VaultApprovalMode
+  granted: boolean
+}
+
+export type VaultSnapshot = {
+  items: VaultItemView[]
+  botGrants: Record<string, string[]>
+}
+
+export type CreateVaultItemInput = {
+  name: string
+  slug?: string
+  kind: VaultItemKind
+  allowedDomains: string[]
+  fields: VaultFieldMeta[]
+  values?: Record<string, string>
+  approvalMode: VaultApprovalMode
+  notes?: string
+  botIds?: string[]
+}
+
+export type UpdateVaultItemPatch = {
+  name?: string
+  kind?: VaultItemKind
+  allowedDomains?: string[]
+  fields?: VaultFieldMeta[]
+  values?: Record<string, string | null>
+  approvalMode?: VaultApprovalMode
+  notes?: string
+  botIds?: string[]
+}
+
+export type FeedItemKind = 'briefing' | 'signal' | 'proposal'
+export type FeedItemStatus = 'unread' | 'read' | 'archived'
+export type IdeaStatus = 'inbox' | 'incubating' | 'ready' | 'promoted' | 'archived'
+
+export type FeedSourceLink = {
+  title: string
+  url: string
+}
+
+export type FeedItem = {
+  id: string
+  kind: FeedItemKind
+  botId: string
+  botName: string
+  botEmoji: string
+  threadId: string
+  sourceMessageId: number | null
+  topicId?: string | null
+  title: string
+  summary: string
+  body: {
+    report?: ReportPayload
+    suggestedAction?: string
+    suggestedBotId?: string
+    sources?: FeedSourceLink[]
+  }
+  tags: string[]
+  tainted: boolean
+  sourceLabel: string
+  status: FeedItemStatus
+  createdAt: number
+  updatedAt: number
+}
+
+export type FeedTopic = {
+  id: string
+  title: string
+  prompt: string
+  botId: string
+  botName: string
+  botEmoji: string
+  cron: string
+  human: string
+  enabled: boolean
+  running: boolean
+  lastRunAt: number | null
+  lastError: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type NeedsYouItem =
+  | {
+      kind: 'approval'
+      id: string
+      approvalId: number
+      botId: string
+      botName: string
+      botEmoji: string
+      threadId: string
+      threadTitle: string
+      createdAt: number
+      payload: ApprovalPayload
+    }
+  | {
+      kind: 'question'
+      id: string
+      messageId: number
+      botId: string
+      botName: string
+      botEmoji: string
+      threadId: string
+      threadTitle: string
+      createdAt: number
+      payload: QuestionPayload
+    }
+  | {
+      kind: 'login'
+      id: string
+      messageId: number
+      botId: string
+      botName: string
+      botEmoji: string
+      threadId: string
+      threadTitle: string
+      createdAt: number
+      payload: LoginPayload
+    }
+
+export type TodoStatus = 'open' | 'done' | 'dismissed'
+
+export type TodoItem = {
+  id: string
+  title: string
+  detail: string
+  status: TodoStatus
+  ownerBotId: string | null
+  sourceThreadId: string | null
+  origin: 'auto' | 'operator'
+  tainted: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export type IdeaItem = {
+  id: string
+  title: string
+  notes: string
+  origin: 'operator' | 'proposal' | 'conversation'
+  sourceFeedId: string | null
+  sourceThreadId?: string | null
+  tainted: boolean
+  status: IdeaStatus
+  assignedBotId: string | null
+  incubationThreadId: string | null
+  incubationSummary: string
+  promotedGoalId: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export type FeedSnapshot = {
+  needsYou: NeedsYouItem[]
+  items: FeedItem[]
+  ideas: IdeaItem[]
+  todos?: TodoItem[]
+  topics?: FeedTopic[]
+  unreadCount: number
+  dailyCustomCount?: number
+  dailyCustomCap?: number
+}
+
+export type GoalStatus = 'active' | 'paused' | 'done' | 'archived'
+export type MilestoneStatus = 'open' | 'done'
+
+export type GoalMilestone = {
+  id: string
+  goalId: string
+  title: string
+  status: MilestoneStatus
+  ownerBotId: string | null
+  dueDate: string | null
+  sortOrder: number
+  createdAt: number
+  updatedAt: number
+}
+
+export type GoalUpdateItem = {
+  id: number
+  goalId: string
+  authorKind: 'operator' | 'bot'
+  botId: string | null
+  kind: GoalUpdateKind
+  summary: string
+  diff: string
+  tainted: boolean
+  threadId: string | null
+  createdAt: number
+}
+
+export type GoalRoutineSummary = {
+  id: number
+  botId: string
+  name: string
+  cron: string
+  human: string
+  mode: RoutineMode
+  surface: 'thread' | 'feed' | 'both'
+  enabled: boolean
+  lastRunAt: number | null
+  goalId: string | null
+}
+
+export type GoalActionSummary = {
+  id: number
+  botId: string
+  threadId: string
+  trigger: string
+  tool: string
+  summary: string
+  ok: boolean | null
+  ms: number | null
+  createdAt: number
+}
+
+export type GoalView = {
+  id: string
+  title: string
+  description: string
+  successCriteria: string
+  status: GoalStatus
+  ownerBotId: string
+  memberBotIds: string[]
+  targetDate: string | null
+  sourceIdeaId: string | null
+  sourceThreadId?: string | null
+  origin?: 'operator' | 'auto'
+  createdAt: number
+  updatedAt: number
+  milestones: GoalMilestone[]
+  doneMilestones: number
+  totalMilestones: number
+  recentUpdates: GoalUpdateItem[]
+  routines: GoalRoutineSummary[]
+  recentActions: GoalActionSummary[]
+  spaces?: Array<{ id: string; title: string; icon: string }>
+}
+
+export type GoalsSnapshot = {
+  goals: GoalView[]
+  activeCount: number
+  unlinkedRoutines: GoalRoutineSummary[]
+}
+
+export type CreateGoalInput = {
+  title: string
+  description?: string
+  successCriteria?: string
+  ownerBotId?: string
+  memberBotIds?: string[]
+  targetDate?: string | null
+  sourceIdeaId?: string | null
+  milestones?: Array<string | { title: string; ownerBotId?: string | null; dueDate?: string | null }>
+}
+
+export type UpdateGoalPatch = {
+  title?: string
+  description?: string
+  successCriteria?: string
+  status?: GoalStatus
+  ownerBotId?: string
+  memberBotIds?: string[]
+  targetDate?: string | null
+  pauseRoutines?: boolean
+}
+
+export type SpaceRole = 'viewer' | 'editor'
+export type SpaceTemplateId = 'tracker' | 'kanban' | 'dashboard' | 'blank'
+
+export type MetricCardDef = {
+  label: string
+  value?: string
+  unit?: string
+  trend?: string
+  blockId?: string
+  agg?: 'count' | 'sum' | 'avg'
+  itemField?: string
+  filterStatus?: string
+}
+
+export type TableColumnKind = 'text' | 'number' | 'badge' | 'url' | 'date'
+export type TableColumnDef = { key: string; label: string; kind: TableColumnKind }
+export type KanbanColumnDef = { key: string; label: string }
+export type SpaceActionDef = { id: string; label: string; botId: string; prompt: string; confirm?: boolean }
+
+export type SpaceBlock =
+  | { id: string; type: 'metrics'; title: string; cards: MetricCardDef[] }
+  | { id: string; type: 'table'; title: string; columns: TableColumnDef[] }
+  | { id: string; type: 'kanban'; title: string; columns: KanbanColumnDef[] }
+  | { id: string; type: 'checklist'; title: string }
+  | { id: string; type: 'timeline'; title: string }
+  | { id: string; type: 'chart'; title: string; mode: 'bar' | 'horizontal'; labelField: string; valueField: string; unit?: string; sourceBlockId?: string }
+  | { id: string; type: 'markdown'; title: string; content: string }
+  | { id: string; type: 'action_bar'; title: string; actions: SpaceActionDef[] }
+
+export type SpaceSchema = { blocks: SpaceBlock[] }
+export type SpaceItemPrimitive = string | number | boolean | null
+export type SpaceItemData = Record<string, SpaceItemPrimitive>
+
+export type SpaceItem = {
+  id: string
+  spaceId: string
+  blockId: string
+  title: string
+  status: string
+  data: SpaceItemData
+  sortOrder: number
+  tainted: boolean
+  updatedBy: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type SpaceGrant = { botId: string; role: SpaceRole }
+
+export type SpaceView = {
+  id: string
+  slug: string
+  title: string
+  description: string
+  icon: string
+  kind: 'declarative'
+  goalId: string | null
+  goalTitle: string | null
+  schema: SpaceSchema
+  items: SpaceItem[]
+  grants: SpaceGrant[]
+  createdAt: number
+  updatedAt: number
+}
+
+export type BotSpaceItem = {
+  id: string
+  slug: string
+  title: string
+  icon: string
+  role: SpaceRole | null
+}
+
+export type SpacesSnapshot = {
+  spaces: SpaceView[]
+  templates: Array<{ id: SpaceTemplateId; icon: string }>
+}
+
+export type CreateSpaceInput = {
+  title: string
+  description?: string
+  icon?: string
+  template?: SpaceTemplateId
+  goalId?: string | null
+  schema?: SpaceSchema
+  grants?: SpaceGrant[]
+}
+
+export type UpdateSpacePatch = {
+  title?: string
+  description?: string
+  icon?: string
+  goalId?: string | null
+  schema?: SpaceSchema
+  grants?: SpaceGrant[]
 }

@@ -189,7 +189,10 @@ export function mountConnectors(app: Hono, deps: ConnectorsApiDeps): void {
   const allowedOrigins = deps.allowedOrigins ?? []
   const pendings = createPendingOAuthStore({ now: clock })
 
-  const isConfigured = (): boolean => driver.configured() || composioKeyView(env, dataDir).set
+  const isConfigured = (app?: AppKey): boolean => {
+    if (app && catalogByApp(app)?.native) return true
+    return driver.configured() || composioKeyView(env, dataDir).set
+  }
 
   const snapshot = (): ConnectorsSnapshot => ({
     key: composioKeyView(env, dataDir),
@@ -287,7 +290,7 @@ export function mountConnectors(app: Hono, deps: ConnectorsApiDeps): void {
     if (body.botIds !== undefined && (!Array.isArray(body.botIds) || !body.botIds.every((id) => typeof id === 'string'))) {
       return c.json({ error: 'botIds must be an array of strings', code: 'invalid_bots' }, 400)
     }
-    if (!isConfigured()) {
+    if (!isConfigured(body.app)) {
       return c.json({ error: 'Composio API key is not configured', code: 'unconfigured' }, 400)
     }
 
@@ -315,7 +318,7 @@ export function mountConnectors(app: Hono, deps: ConnectorsApiDeps): void {
     const at = clock()
     const row = createConnectorAccount(db, {
       app: body.app,
-      driver: driver.id,
+      driver: catalogByApp(body.app)?.native ? body.app : driver.id,
       remoteId: started.remoteId,
       authConfigId: started.authConfigId,
       status: 'pending',
@@ -344,7 +347,7 @@ export function mountConnectors(app: Hono, deps: ConnectorsApiDeps): void {
     if (!current) {
       return c.json({ error: 'unknown connector', code: 'not_found' }, 404)
     }
-    if (!isConfigured()) {
+    if (!isConfigured(current.app)) {
       return c.json({ error: 'Composio API key is not configured', code: 'unconfigured' }, 400)
     }
 
@@ -388,7 +391,7 @@ export function mountConnectors(app: Hono, deps: ConnectorsApiDeps): void {
     if (!row) {
       return c.json({ error: 'unknown connector', code: 'not_found' }, 404)
     }
-    if (!isConfigured()) {
+    if (!isConfigured(row.app)) {
       return c.json({ error: 'Composio API key is not configured', code: 'unconfigured' }, 400)
     }
 
@@ -474,9 +477,24 @@ export function mountConnectors(app: Hono, deps: ConnectorsApiDeps): void {
       })
     }
 
-    let inspected: { status: ConnectorStatus; accountLabel: string }
+    let inspected: { status: ConnectorStatus; accountLabel: string; error?: string }
     try {
-      inspected = await driver.inspectAccount({ app: pending.app, remoteId: pending.candidateRemoteId })
+      const code = c.req.query('code') || undefined
+      const oauthErr = c.req.query('error') || undefined
+      const oauthErrDesc = c.req.query('error_description') || undefined
+      if (catalogByApp(pending.app)?.native && driver.completeOAuth) {
+        const callbackUrl = `${requestOrigin(c, allowedOrigins)}/oauth/connector/${c.req.param('nonce') ?? ''}`
+        inspected = await driver.completeOAuth({
+          app: pending.app,
+          remoteId: pending.candidateRemoteId,
+          ...(code ? { code } : {}),
+          ...(oauthErr ? { error: oauthErr } : {}),
+          ...(oauthErrDesc ? { errorDescription: oauthErrDesc } : {}),
+          callbackUrl,
+        })
+      } else {
+        inspected = await driver.inspectAccount({ app: pending.app, remoteId: pending.candidateRemoteId })
+      }
     } catch (err) {
       if (!pending.previousRemoteId) {
         markConnectorStatus(

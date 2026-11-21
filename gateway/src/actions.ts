@@ -18,19 +18,30 @@ export type ActionEntry = {
   ok: boolean | null
   ms: number | null
   created_at: number
+  goal_id?: string | null
 }
 
 const MAX_SUMMARY = 200
 
 export function recordAction(
   db: Db,
-  a: { botId: string; threadId: string; trigger: ActionTrigger; tool: string; summary: string; ok?: boolean | null; ms?: number | null; at: number },
+  a: {
+    botId: string
+    threadId: string
+    trigger: ActionTrigger
+    tool: string
+    summary: string
+    ok?: boolean | null
+    ms?: number | null
+    at: number
+    goalId?: string | null
+  },
 ): void {
   db.prepare(
-    `INSERT INTO actions (bot_id, thread_id, trigger, tool, summary, ok, ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO actions (bot_id, thread_id, trigger, tool, summary, ok, ms, created_at, goal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     a.botId, a.threadId, a.trigger, a.tool, a.summary.replace(/\s+/g, ' ').trim().slice(0, MAX_SUMMARY),
-    a.ok === undefined || a.ok === null ? null : a.ok ? 1 : 0, a.ms ?? null, a.at,
+    a.ok === undefined || a.ok === null ? null : a.ok ? 1 : 0, a.ms ?? null, a.at, a.goalId ?? null,
   )
 }
 
@@ -38,6 +49,12 @@ export function recordAction(
 export function listActions(db: Db, botId: string, limit = 30): ActionEntry[] {
   const rows = db.prepare('SELECT * FROM actions WHERE bot_id = ? ORDER BY id DESC LIMIT ?')
     .all(botId, Math.max(1, Math.min(limit, 500))) as (Omit<ActionEntry, 'ok'> & { ok: number | null })[]
+  return rows.map((r) => ({ ...r, ok: r.ok === null ? null : r.ok === 1 }))
+}
+
+export function listGoalActions(db: Db, goalId: string, limit = 20): ActionEntry[] {
+  const rows = db.prepare('SELECT * FROM actions WHERE goal_id = ? ORDER BY id DESC LIMIT ?')
+    .all(goalId, Math.max(1, Math.min(limit, 100))) as (Omit<ActionEntry, 'ok'> & { ok: number | null })[]
   return rows.map((r) => ({ ...r, ok: r.ok === null ? null : r.ok === 1 }))
 }
 

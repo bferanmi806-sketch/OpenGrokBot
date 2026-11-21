@@ -86,6 +86,13 @@ describe('SettingsDialog', () => {
     expect(screen.getByText('4748')).toBeInTheDocument()
     expect(screen.getByText('Printed in the terminal that runs the gateway')).toBeInTheDocument()
     expect(screen.getByText('Node 24.14.0 · darwin/arm64')).toBeInTheDocument()
+    const author = screen.getByRole('link', { name: 'wolfqing' })
+    expect(author).toHaveAttribute('href', 'https://github.com/wolfqing')
+    expect(author).toHaveAttribute('target', '_blank')
+    const contributors = screen.getByRole('link', { name: 'open-source contributors' })
+    expect(contributors).toHaveAttribute('href', 'https://github.com/wolfqing/OpenSuperBot/graphs/contributors')
+    const repo = screen.getByRole('link', { name: 'GitHub' })
+    expect(repo).toHaveAttribute('href', 'https://github.com/wolfqing/OpenSuperBot')
     await user.click(screen.getByRole('button', { name: 'Manage AI models…' }))
     expect(p.onModels).toHaveBeenCalled()
     await user.click(screen.getByRole('button', { name: 'Run the setup again' }))
@@ -154,6 +161,15 @@ describe('SettingsDialog', () => {
     expect(await screen.findByText('同事现在用的是：这台电脑。')).toBeInTheDocument()
     expect(screen.getByRole('dialog', { name: '设置' })).toBeInTheDocument()
     expect(screen.getByText('源码版（没有版本号）')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'wolfqing' })).toHaveAttribute('href', 'https://github.com/wolfqing')
+    expect(screen.getByRole('link', { name: '开源贡献者' })).toHaveAttribute(
+      'href',
+      'https://github.com/wolfqing/OpenSuperBot/graphs/contributors',
+    )
+    expect(screen.getByRole('link', { name: 'GitHub 仓库' })).toHaveAttribute(
+      'href',
+      'https://github.com/wolfqing/OpenSuperBot',
+    )
   })
 
   it('shows the desktop app version when opened in the app, and nothing extra in a browser', async () => {

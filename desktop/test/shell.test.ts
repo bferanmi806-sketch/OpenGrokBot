@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { diagnosticsText, redact } from '../src/diagnostics.js'
 import { openLog } from '../src/logfile.js'
-import { dataUrl, errorPage, pageLang, startingPage } from '../src/pages.js'
+import { AUTHOR_URL, CONTRIBUTORS_URL, REPO_URL, aboutPage, dataUrl, errorPage, pageLang, startingPage } from '../src/pages.js'
 import { appLayout, resources } from '../src/paths.js'
 
 describe('where the app keeps its files', () => {
@@ -79,6 +79,26 @@ describe('the pages shown before the UI is up', () => {
     expect(html).not.toContain('<script>alert(1)')
     expect(html).toContain("default-src 'none'")
     expect(dataUrl('<p>x</p>')).toBe('data:text/html;charset=utf-8,%3Cp%3Ex%3C%2Fp%3E')
+  })
+
+  it('the about page links wolfqing, contributors and the repository, escapes the version, and speaks Chinese or English', () => {
+    const zh = aboutPage('zh-CN', '0.7.0')
+    expect(zh).toContain('关于 OpenSuperBot')
+    expect(zh).toContain('版本 0.7.0')
+    expect(zh).toContain(`href="${AUTHOR_URL}"`)
+    expect(zh).toContain('>wolfqing</a>')
+    expect(zh).toContain(`href="${CONTRIBUTORS_URL}"`)
+    expect(zh).toContain('开源贡献者')
+    expect(zh).toContain(`href="${REPO_URL}"`)
+    expect(zh).toContain('MIT 开源协议')
+    expect(zh).toContain("default-src 'none'")
+    expect(zh).not.toContain('<script')
+
+    const en = aboutPage('en', '0.7.0<script>')
+    expect(en).toContain('About OpenSuperBot')
+    expect(en).toContain('Version 0.7.0&lt;script&gt;')
+    expect(en).toContain('open-source contributors')
+    expect(en).toContain('MIT License')
   })
 })
 

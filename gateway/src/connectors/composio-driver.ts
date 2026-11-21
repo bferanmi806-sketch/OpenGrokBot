@@ -999,6 +999,8 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
           if (team && user) return `${team} (${user})`
           return team || user || fallback
         }
+        default:
+          return fallback
       }
     } catch {
       return fallback
@@ -2023,6 +2025,9 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
           const ts = isRecord(res.data) && typeof res.data.ts === 'string' ? ` (${res.data.ts})` : ''
           return { status: 'succeeded', summary: `Posted Slack message to ${channelId}${ts}` }
         }
+
+        default:
+          return { status: 'failed', error: `Unsupported connector write tool: ${tool}` }
       }
     },
   }

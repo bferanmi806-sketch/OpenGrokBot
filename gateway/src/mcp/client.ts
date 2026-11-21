@@ -1,5 +1,7 @@
 import type { Db } from '../db.js'
 import type { Hub } from '../hub.js'
+import { resolveVaultRefsInRecord } from '../vault/tools.js'
+import type { VaultSecretStore } from '../vault/types.js'
 import { createHttpSession } from './http-transport.js'
 import type { McpSecretVault } from './secrets.js'
 import {
@@ -24,6 +26,7 @@ export type { McpManager } from './types.js'
 export type McpManagerDeps = {
   db: Db
   secrets: McpSecretVault
+  vaultSecrets?: VaultSecretStore
   hub?: Hub
   hostEnv?: Record<string, string | undefined>
   fetchImpl?: typeof fetch
@@ -97,12 +100,13 @@ function redactStructuredValue(
 }
 
 export function createMcpManager(deps: McpManagerDeps): McpManager {
-  const { db, secrets, hub } = deps
+  const { db, secrets, vaultSecrets, hub } = deps
   const now = deps.now ?? (() => Date.now())
 
   const sessions = new Map<string, McpSession>()
   const inflightConnects = new Map<string, Promise<McpSession>>()
   const serverGenerations = new Map<string, number>()
+  const serverVaultRefs = new Map<string, string[]>()
   const activeRefreshes = new Map<string, Promise<void>>()
   const queuedRefreshes = new Set<string>()
   let globalEpoch = 0
@@ -116,13 +120,22 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
   const isCurrent = (serverId: string, opEpoch: number, opGen: number): boolean =>
     globalEpoch === opEpoch && getGen(serverId) === opGen
 
+  const redactForServer = (serverId: string, text: string): string => {
+    let out = secrets.redactText(serverId, text)
+    const vaultIds = serverVaultRefs.get(serverId)
+    if (vaultSecrets && vaultIds && vaultIds.length > 0) {
+      out = vaultSecrets.redactText(vaultIds, out)
+    }
+    return out
+  }
+
   const toRedactedCallError = (
     serverId: string,
     err: unknown,
     fallbackCode: McpCallError['code'] = 'connect_failed',
   ): McpCallError => {
     const rawMsg = err instanceof Error ? err.message : String(err)
-    const cleanMsg = secrets.redactText(serverId, rawMsg)
+    const cleanMsg = redactForServer(serverId, rawMsg)
     if (err instanceof McpCallError) {
       return new McpCallError(err.code, cleanMsg, err.dispatched)
     }
@@ -130,7 +143,7 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
   }
 
   const redactCallResult = (serverId: string, result: McpCallResult): McpCallResult => {
-    const redact = (text: string): string => secrets.redactText(serverId, text)
+    const redact = (text: string): string => redactForServer(serverId, text)
     const content = Array.isArray(result.content)
       ? result.content.map((block) => {
           if (!isRecord(block)) return block
@@ -225,7 +238,22 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
     const startEpoch = globalEpoch
     const startGen = getGen(serverId)
     const serverSecrets = secrets.get(serverId)
-    const redact = (text: string): string => secrets.redactText(serverId, text)
+    let resolvedHeaders = serverSecrets.headers
+    let resolvedEnv = serverSecrets.env
+    if (vaultSecrets) {
+      try {
+        const h = resolveVaultRefsInRecord(db, vaultSecrets, serverSecrets.headers)
+        const e = resolveVaultRefsInRecord(db, vaultSecrets, serverSecrets.env)
+        resolvedHeaders = h.resolved
+        resolvedEnv = e.resolved
+        const refIds = [...new Set([...h.referencedItemIds, ...e.referencedItemIds])]
+        if (refIds.length > 0) serverVaultRefs.set(serverId, refIds)
+        else serverVaultRefs.delete(serverId)
+      } catch (err) {
+        return Promise.reject(toRedactedCallError(serverId, err, 'connect_failed'))
+      }
+    }
+    const redact = (text: string): string => redactForServer(serverId, text)
     const onToolsChanged = (): void => {
       scheduleToolsChangedRefresh(serverId)
     }
@@ -237,7 +265,7 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
           server.transport === 'http'
             ? await createHttpSession({
                 url: server.url,
-                headers: serverSecrets.headers,
+                headers: resolvedHeaders,
                 fetchImpl: deps.fetchImpl,
                 redact,
                 onToolsChanged,
@@ -249,7 +277,7 @@ export function createMcpManager(deps: McpManagerDeps): McpManager {
                 args: server.args,
                 cwd: server.cwd,
                 hostEnv: deps.hostEnv ?? process.env,
-                serverEnv: serverSecrets.env,
+                serverEnv: resolvedEnv,
                 redact,
                 onToolsChanged,
                 handshakeTimeoutMs: deps.handshakeTimeoutMs,

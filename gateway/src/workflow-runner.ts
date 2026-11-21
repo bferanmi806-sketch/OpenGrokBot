@@ -38,6 +38,21 @@ export type WorkflowFailureCode =
   | 'action_failed'
   | 'url_mismatch'
   | 'popup_opened'
+  | 'vault_denied'
+  | 'vault_domain_mismatch'
+
+export class WorkflowVaultError extends Error {
+  constructor(readonly code: 'vault_denied' | 'vault_domain_mismatch', message: string) {
+    super(message)
+  }
+}
+
+export type WorkflowVaultResolver = (ref: {
+  itemId: string
+  field: string
+  pageUrl: string
+  target: WorkflowElementLike
+}) => Promise<string>
 
 export type WorkflowRunResult =
   | { status: 'completed'; stepsCompleted: number }
@@ -290,6 +305,7 @@ async function executeStep(
   pageGuard: WorkflowPageGuard,
   bindings: WorkflowBindings,
   signal?: AbortSignal,
+  resolveVault?: WorkflowVaultResolver,
 ): Promise<void> {
   if (signal?.aborted) throw new RunnerError('cancelled')
   let expectedUrlDeadline: number | undefined
@@ -318,18 +334,40 @@ async function executeStep(
           break
         case 'fill': {
           if (!target.fill) throw new RunnerError('unsupported_browser')
-          const key = step.value.kind === 'placeholder' ? step.value.key
-            : step.value.kind === 'redacted' ? `step:${index + 1}` : null
-          const text = step.value.kind === 'literal' ? step.value.text : key === null ? '' : bindings.get(key)
+          let text: string | undefined
+          if (step.value.kind === 'vault') {
+            if (!resolveVault) throw new RunnerError('vault_denied')
+            text = await resolveVault({
+              itemId: step.value.itemId,
+              field: step.value.field,
+              pageUrl: page.url(),
+              target,
+            })
+          } else {
+            const key = step.value.kind === 'placeholder' ? step.value.key
+              : step.value.kind === 'redacted' ? `step:${index + 1}` : null
+            text = step.value.kind === 'literal' ? step.value.text : key === null ? '' : bindings.get(key)
+          }
           if (text === undefined) throw new RunnerError('action_failed')
           await target.fill(text, { timeout: ACTION_TIMEOUT_MS })
           break
         }
         case 'select': {
           if (!target.selectOption) throw new RunnerError('unsupported_browser')
-          const key = step.value.kind === 'placeholder' ? step.value.key
-            : step.value.kind === 'redacted' ? `step:${index + 1}` : null
-          const value = step.value.kind === 'literal' ? step.value.text : key === null ? '' : bindings.get(key)
+          let value: string | undefined
+          if (step.value.kind === 'vault') {
+            if (!resolveVault) throw new RunnerError('vault_denied')
+            value = await resolveVault({
+              itemId: step.value.itemId,
+              field: step.value.field,
+              pageUrl: page.url(),
+              target,
+            })
+          } else {
+            const key = step.value.kind === 'placeholder' ? step.value.key
+              : step.value.kind === 'redacted' ? `step:${index + 1}` : null
+            value = step.value.kind === 'literal' ? step.value.text : key === null ? '' : bindings.get(key)
+          }
           if (value === undefined) throw new RunnerError('action_failed')
           await target.selectOption(value, { timeout: ACTION_TIMEOUT_MS })
           break
@@ -355,6 +393,7 @@ async function executeStep(
   } catch (error) {
     // All runner errors preserve their typed failure; browser exceptions become action failures.
     if (error instanceof RunnerError) throw error
+    if (error instanceof WorkflowVaultError) throw new RunnerError(error.code)
     if (signal?.aborted) throw new RunnerError('cancelled')
     throw new RunnerError('action_failed')
   }
@@ -365,6 +404,7 @@ export async function runWorkflow(trace: WorkflowTrace, options: {
   bindings: WorkflowBindings
   rulesAllowed: boolean
   authorize: (request: WorkflowApprovalRequest) => Promise<WorkflowApprovalDecision>
+  resolveVault?: WorkflowVaultResolver
   startIndex?: number
   approvedStepIndex?: number
   signal?: AbortSignal
@@ -400,7 +440,7 @@ export async function runWorkflow(trace: WorkflowTrace, options: {
         }
       }
       try {
-        await executeStep(step, index, pageGuard, options.bindings, options.signal)
+        await executeStep(step, index, pageGuard, options.bindings, options.signal, options.resolveVault)
         await reportStep(options.onStep, { index: index + 1, type: step.type, ok: true, durationMs: Date.now() - started })
         stepsCompleted++
       } catch (error) {

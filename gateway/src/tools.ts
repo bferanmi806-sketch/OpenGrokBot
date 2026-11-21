@@ -1,6 +1,18 @@
 import { APPROVAL_KINDS } from './approvals.js'
 import { CONNECTOR_READ_TOOL_NAMES } from './connectors/tools.js'
+import { PUBLISH_FEED_TOOL, PUBLISH_FEED_TOOL_NAME } from './feed/tools.js'
+import { MANAGE_GOAL_TOOL, MANAGE_GOAL_TOOL_NAME, UPDATE_GOAL_PROGRESS_TOOL } from './goals/tools.js'
 import type { ToolDef } from './llm.js'
+import {
+  MANAGE_SPACE_TOOL,
+  MANAGE_SPACE_TOOL_NAME,
+  SPACE_DELETE_ITEM_TOOL,
+  SPACE_READ_TOOL,
+  SPACE_READ_TOOL_NAME,
+  SPACE_UPSERT_ITEM_TOOL,
+} from './spaces/tools.js'
+import { VAULT_FILL_TOOL } from './vault/tools.js'
+import { WEB_FETCH_TOOL, WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL, WEB_SEARCH_TOOL_NAME } from './web-research.js'
 
 export const MESSAGE_USER_TOOL: ToolDef = {
   type: 'function',
@@ -294,6 +306,15 @@ const WORKFLOW_TOOLS: ToolDef[] = [
             enum: ['act', 'watch'],
             description: '"watch" for keeping an eye on something: each run gets read-only tools and stays silent unless something needs your operator. Default "act".',
           },
+          surface: {
+            type: 'string',
+            enum: ['thread', 'feed', 'both'],
+            description: 'Where reports land: "thread" (default for act), "feed" or "both" (default for watch, also surfaces in Today Feed).',
+          },
+          goal_id: {
+            type: 'string',
+            description: 'Optional active goal id (e.g. "goal-a1b2c3d4") this routine belongs to.',
+          },
           instructions: { type: 'string', description: 'What to do each time it fires, written to yourself.' },
         },
         required: ['name', 'instructions'],
@@ -337,7 +358,8 @@ const SKILL_TOOL: ToolDef = {
  * 能改东西的（shell、写文件、点击、输入、按键）、能把话传出去的（转交）、能改规矩的都不给。
  */
 export const WATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'message_user', 'hold_for_approval', 'ask_operator', 'read_skill', 'read_file',
+  'message_user', PUBLISH_FEED_TOOL_NAME, SPACE_READ_TOOL_NAME, 'hold_for_approval', 'ask_operator', 'read_skill', 'read_file',
+  WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME,
   'browser_goto', 'browser_extract', 'browser_scroll', 'browser_back', 'browser_screenshot', 'ask_for_login',
   ...CONNECTOR_READ_TOOL_NAMES,
 ])
@@ -365,7 +387,7 @@ const RELAY_TOOL: ToolDef = {
  * 或删掉一条规矩，注入的指令就能在这一回合结束后还留下来。
  */
 export const OPERATOR_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'save_memory', 'forget_memory', 'create_routine', 'stop_routine',
+  'save_memory', 'forget_memory', 'create_routine', 'stop_routine', MANAGE_GOAL_TOOL_NAME, MANAGE_SPACE_TOOL_NAME,
 ])
 
 export function buildTools(opts: {
@@ -384,6 +406,22 @@ export function buildTools(opts: {
   /** 这位同事已获授权的 MCP 工具与其中只读工具的名字集合 */
   mcpTools?: ToolDef[]
   mcpReadToolNames?: ReadonlySet<string>
+  /** 这位同事已获授权至少一条凭证库条目（watch 回合永不暴露） */
+  hasVaultItems?: boolean
+  /** 网关挂载了今日动态（Feed）投递通道时暴露 publish_feed（watch 回合也可用） */
+  hasFeed?: boolean
+  /** 网关挂载了长期目标（Goals）状态机时在操作者回合暴露 manage_goal */
+  hasGoals?: boolean
+  /** 当前同事参与至少 1 个活跃目标时在非 watch 回合暴露 update_goal_progress */
+  hasActiveGoals?: boolean
+  /** 网关挂载了声明式空间（Spaces）时在操作者回合暴露 manage_space */
+  hasSpaces?: boolean
+  /** 当前同事拥有至少 1 个空间（viewer/editor）时暴露 space_read（watch 可用） */
+  hasReadableSpaces?: boolean
+  /** 当前同事拥有至少 1 个可编辑空间（editor）时在非 watch 回合暴露写条目工具 */
+  hasEditableSpaces?: boolean
+  /** 网关挂载了安全只读公网搜索与抓取（web_search / web_fetch，watch 也可用） */
+  hasWebResearch?: boolean
 }): ToolDef[] {
   const computerTools = COMPUTER_TOOLS
     .filter((t) => opts.shell !== false || t.function.name !== 'shell')
@@ -406,10 +444,18 @@ export function buildTools(opts: {
       : t))
   const tools = [
     MESSAGE_USER_TOOL,
+    ...(opts.hasFeed ? [PUBLISH_FEED_TOOL] : []),
+    ...(opts.hasWebResearch ? [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] : []),
     ...WORKFLOW_TOOLS,
+    ...(opts.hasGoals ? [MANAGE_GOAL_TOOL] : []),
+    ...(opts.hasActiveGoals ? [UPDATE_GOAL_PROGRESS_TOOL] : []),
+    ...(opts.hasSpaces ? [MANAGE_SPACE_TOOL] : []),
+    ...(opts.hasReadableSpaces ? [SPACE_READ_TOOL] : []),
+    ...(opts.hasEditableSpaces ? [SPACE_UPSERT_ITEM_TOOL, SPACE_DELETE_ITEM_TOOL] : []),
     ...(opts.hasSkills ? [SKILL_TOOL] : []),
     ...(opts.canRelay ? [RELAY_TOOL] : []),
     ...(opts.hasComputer ? computerTools : []),
+    ...(opts.hasComputer && opts.hasVaultItems ? [VAULT_FILL_TOOL] : []),
     ...(opts.connectorTools ?? []),
     ...(opts.mcpTools ?? []),
   ].filter((t) => opts.operatorTurn !== false || !OPERATOR_ONLY_TOOL_NAMES.has(t.function.name))

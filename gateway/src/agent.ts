@@ -8,6 +8,13 @@ import {
 import { checkBrowserUrl } from './browser-page.js'
 import type { BotComputer, Shot } from './computer.js'
 import { CONNECTOR_READ_TOOL_NAMES, isConnectorTool } from './connectors/tools.js'
+import { MAX_FEED_ITEMS_PER_TURN, PUBLISH_FEED_TOOL_NAME } from './feed/tools.js'
+import {
+  MANAGE_GOAL_TOOL_NAME,
+  MAX_GOAL_PROGRESS_PER_TURN,
+  UPDATE_GOAL_PROGRESS_TOOL_NAME,
+  type GoalToolResult,
+} from './goals/tools.js'
 import { isMcpToolName } from './mcp/naming.js'
 import { limitText, noticeText, type BudgetHit, type Notice } from './notices.js'
 import { insertMessage, listMessages, updateMessagePayload, type BotRow, type Db, type MessageRow } from './db.js'
@@ -17,12 +24,25 @@ import {
   timeNote,
   withTimeNote,
   type PromptConnector,
+  type PromptGoal,
   type PromptMcpServer,
   type PromptRoutine,
+  type PromptSpace,
+  type PromptVaultItem,
 } from './prompts.js'
-import { validateReportPayload } from './report.js'
-import { normalizeMode, type RoutineMode } from './routines.js'
+import {
+  MANAGE_SPACE_TOOL_NAME,
+  MAX_SPACE_WRITES_PER_TURN,
+  SPACE_DELETE_ITEM_TOOL_NAME,
+  SPACE_READ_TOOL_NAME,
+  SPACE_UPSERT_ITEM_TOOL_NAME,
+  type SpaceToolResult,
+} from './spaces/tools.js'
+import { validateReportPayload, type ReportPayload } from './report.js'
+import { normalizeMode, normalizeSurface, type RoutineMode, type RoutineSurface } from './routines.js'
 import { buildTools, OPERATOR_ONLY_TOOL_NAMES, WATCH_TOOL_NAMES } from './tools.js'
+import { VAULT_FILL_TOOL_NAME } from './vault/tools.js'
+import { WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL_NAME } from './web-research.js'
 
 export type AgentEvents = {
   onMessage: (m: MessageRow) => void
@@ -74,8 +94,15 @@ export type AgentDeps = {
     | { removed: string; diff: string; total: number }
     | { removed: null; reason: 'none' | 'ambiguous'; candidates: string[] }
   >
-  onCreateRoutine?: (input: { name: string; cron: string; instructions: string; webhook: boolean; mode: RoutineMode }) =>
-    Promise<{ id: number; name: string; cron: string; human: string; webhook: boolean; mode: RoutineMode }>
+  onCreateRoutine?: (input: {
+    name: string
+    cron: string
+    instructions: string
+    webhook: boolean
+    mode: RoutineMode
+    surface?: RoutineSurface
+    goalId?: string
+  }) => Promise<{ id: number; name: string; cron: string; human: string; webhook: boolean; mode: RoutineMode }>
   onStopRoutine?: (id: number) => Promise<{ ok: boolean; name?: string; reason?: string }>
   hop?: number
   group?: { title: string; members: string[] }
@@ -97,7 +124,7 @@ export type AgentDeps = {
   /** watch routine 的回合：只有只读工具，不出 activity 卡片，没事就不说话 */
   watch?: boolean
   /** 每调一次工具记一笔（动作日志） */
-  onAction?: (action: { tool: string; summary: string; ok: boolean; ms: number }) => void
+  onAction?: (action: { tool: string; summary: string; ok: boolean; ms: number; goalId?: string }) => void
   /** 共享技能的名字和一句话说明；正文经 onReadSkill 取 */
   skills?: { name: string; description: string }[]
   onReadSkill?: (name: string) => Promise<string | null>
@@ -130,6 +157,31 @@ export type AgentDeps = {
     events: AgentEvents
     signal?: AbortSignal
   }) => Promise<{ text: string; ok: boolean; tainted?: boolean }>
+  /** 这位同事已获授权的凭证库条目元信息（零明文）与网关侧代填/脱敏钩子 */
+  vaultItems?: PromptVaultItem[]
+  onVaultFill?: (input: {
+    args: Record<string, unknown>
+    ruleBlock: RuleBlock | null
+    events: AgentEvents
+  }) => Promise<{ text: string; ok: boolean; held?: boolean; usedItemId?: string }>
+  redactVaultText?: (itemIds: readonly string[], text: string) => string
+  /** Feed 指挥台：publish_feed 投递、report 自动投影与灵感孵化文字回填 */
+  onPublishFeed?: (input: { args: Record<string, unknown>; ruleBlock: RuleBlock | null }) => { ok: boolean; text: string }
+  onReportDelivered?: (input: { message: MessageRow; payload: ReportPayload; ruleBlock: RuleBlock | null }) => void
+  onTurnTextReply?: (text: string) => void
+  /** 长期目标（Goals）：受预算约束的活跃目标清单，以及权限二分的网关执行钩子 */
+  goals?: PromptGoal[]
+  onManageGoal?: (input: { args: Record<string, unknown> }) => GoalToolResult
+  onUpdateGoalProgress?: (input: { args: Record<string, unknown>; ruleBlock: RuleBlock | null }) => GoalToolResult
+  /** 声明式活看板（Spaces）：按同事授权目录与读写执行钩子 */
+  spaces?: PromptSpace[]
+  onManageSpace?: (input: { args: Record<string, unknown> }) => SpaceToolResult
+  onSpaceRead?: (input: { args: Record<string, unknown> }) => { ok: boolean; text: string; spaceId?: string; goalId?: string | null; tainted?: boolean }
+  onSpaceUpsertItem?: (input: { args: Record<string, unknown>; ruleBlock: RuleBlock | null }) => SpaceToolResult
+  onSpaceDeleteItem?: (input: { args: Record<string, unknown>; ruleBlock: RuleBlock | null }) => SpaceToolResult
+  /** 安全只读公网搜索与抓取（始终标记本回合含外部数据 outside-data） */
+  onWebSearch?: (args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>
+  onWebFetch?: (args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>
 }
 
 /**
@@ -146,7 +198,13 @@ export type AttachmentBrief = {
 }
 
 /** 工具执行时要的回合级信息 */
-type TurnContext = AgentDeps & { ruleBlock: RuleBlock | null }
+type TurnContext = AgentDeps & {
+  ruleBlock: RuleBlock | null
+  usedVaultItemIds: Set<string>
+  feedPublishedCount: number
+  goalProgressCount: number
+  spaceWriteCount: number
+}
 
 /** 真实的浏览器活（开页、读、点、再读、填）十几步就用完了；40 步够干完一件事，又挡得住死循环 */
 export const DEFAULT_MAX_STEPS = 40
@@ -197,7 +255,14 @@ export async function runTurn(
       deps.origin !== 'operator'
         ? (deps.origin ?? 'unknown')
         : (hasWebhookHistory || taintedByOutsideData) ? 'outside-data' : null
-    const ctx: TurnContext = { ...deps, ruleBlock: computeRuleBlock() }
+    const ctx: TurnContext = {
+      ...deps,
+      ruleBlock: computeRuleBlock(),
+      usedVaultItemIds: new Set<string>(),
+      feedPublishedCount: 0,
+      goalProgressCount: 0,
+      spaceWriteCount: 0,
+    }
     const attached = rows.filter((m) => m.kind === 'attachment')
     // 查不出来（盘坏了、没有上传目录）不拦回合：模型仍然知道有这么个文件，只是拿不到
     const brief = attached.length ? await deps.attachments?.(attached).catch(() => undefined) : undefined
@@ -206,8 +271,8 @@ export async function runTurn(
       {
         role: 'system',
         content: buildSystemPrompt(bot, soul, {
-          hasComputer, computer: deps.computer, memory: deps.memory, group: deps.group, canRelay, manual: deps.manual, routines: deps.routines,
-          connectors: deps.connectors, mcpServers: deps.mcpServers, skills: deps.onReadSkill ? deps.skills : undefined, language: deps.language,
+          hasComputer, computer: deps.computer, memory: deps.memory, group: deps.group, canRelay, manual: deps.manual, routines: deps.routines, goals: deps.goals, spaces: deps.spaces,
+          connectors: deps.connectors, mcpServers: deps.mcpServers, vaultItems: deps.vaultItems, skills: deps.onReadSkill ? deps.skills : undefined, language: deps.language,
         }),
       },
       ...rows.map((m) => toChatMsg(m, bot.id, brief)),
@@ -221,6 +286,14 @@ export async function runTurn(
     const tools = buildTools({
       hasComputer, canRelay, hasSkills, watch: deps.watch === true, shell: deps.computer?.shell, kind: deps.computer?.kind,
       operatorTurn: deps.origin === 'operator', connectorTools: deps.connectorTools, mcpTools: deps.mcpTools, mcpReadToolNames: deps.mcpReadToolNames,
+      hasVaultItems: Boolean(deps.vaultItems?.length && deps.onVaultFill),
+      hasFeed: Boolean(deps.onPublishFeed),
+      hasGoals: Boolean(deps.onManageGoal),
+      hasActiveGoals: Boolean(deps.goals?.length && deps.onUpdateGoalProgress),
+      hasSpaces: Boolean(deps.onManageSpace),
+      hasReadableSpaces: Boolean(deps.spaces?.length && deps.onSpaceRead),
+      hasEditableSpaces: Boolean(deps.spaces?.some((s) => s.role === 'editor') && deps.onSpaceUpsertItem),
+      hasWebResearch: Boolean(deps.onWebSearch || deps.onWebFetch),
     })
     const maxSteps = deps.maxSteps && deps.maxSteps > 0 ? Math.floor(deps.maxSteps) : DEFAULT_MAX_STEPS
     const turnMs = deps.turnTimeoutMs ?? DEFAULT_TURN_MS
@@ -259,6 +332,7 @@ export async function runTurn(
       const text = turn.content?.trim()
       // watch 回合看完没发现什么：一句「Nothing new.」不值得落进线程，每半小时一条只会把真正的消息淹掉
       if (text && !(deps.watch && QUIET.test(text))) say(text)
+      if (text) deps.onTurnTextReply?.(text)
       return 'replied'
     }
   } catch (err) {
@@ -411,8 +485,8 @@ async function execToolCall(
 ): Promise<ToolOutcome> {
   const args = (call.args ?? {}) as Record<string, unknown>
   const started = Date.now()
-  const log = (ok: boolean) =>
-    deps.onAction?.({ tool: call.name, summary: summarize(call.name, args), ok, ms: Date.now() - started })
+  const log = (ok: boolean, goalId?: string) =>
+    deps.onAction?.({ tool: call.name, summary: summarize(call.name, args), ok, ms: Date.now() - started, ...(goalId ? { goalId } : {}) })
   const failed = (err: unknown): ToolOutcome => {
     log(false)
     // 工具失败必须回喂模型（让它换招/如实汇报），而不是炸掉整个回合
@@ -435,6 +509,128 @@ async function execToolCall(
     const text = execMessageUser(deps, args, events)
     log(text === 'Report delivered.')
     return { text }
+  }
+  if (call.name === PUBLISH_FEED_TOOL_NAME) {
+    if (!deps.onPublishFeed) {
+      log(false)
+      return { text: 'Today Feed is not available on this gateway.' }
+    }
+    if (deps.feedPublishedCount >= MAX_FEED_ITEMS_PER_TURN) {
+      log(false)
+      return { text: `You already published ${MAX_FEED_ITEMS_PER_TURN} feed cards in this turn; consolidate remaining updates.` }
+    }
+    const res = deps.onPublishFeed({ args, ruleBlock: deps.ruleBlock })
+    if (res.ok) deps.feedPublishedCount += 1
+    log(res.ok)
+    return { text: res.text }
+  }
+  if (call.name === MANAGE_GOAL_TOOL_NAME) {
+    if (!deps.onManageGoal) {
+      log(false)
+      return { text: 'Goals are not available on this gateway.' }
+    }
+    const res = deps.onManageGoal({ args })
+    if (res.chip) {
+      events.onMessage(insertMessage(deps.db, {
+        threadId: deps.threadId,
+        sender: deps.bot.id,
+        kind: 'goal_updated',
+        payload: res.chip,
+      }))
+    }
+    log(res.ok, res.goalId)
+    return { text: res.text }
+  }
+  if (call.name === UPDATE_GOAL_PROGRESS_TOOL_NAME) {
+    if (!deps.onUpdateGoalProgress) {
+      log(false)
+      return { text: 'Goals are not available on this gateway.' }
+    }
+    if (deps.goalProgressCount >= MAX_GOAL_PROGRESS_PER_TURN) {
+      log(false)
+      return { text: `You already logged ${MAX_GOAL_PROGRESS_PER_TURN} goal progress notes in this turn; consolidate remaining updates.` }
+    }
+    const res = deps.onUpdateGoalProgress({ args, ruleBlock: deps.ruleBlock })
+    if (res.ok) deps.goalProgressCount += 1
+    if (res.chip) {
+      events.onMessage(insertMessage(deps.db, {
+        threadId: deps.threadId,
+        sender: deps.bot.id,
+        kind: 'goal_updated',
+        payload: res.chip,
+      }))
+    }
+    log(res.ok, res.goalId)
+    return { text: res.text }
+  }
+  if (call.name === MANAGE_SPACE_TOOL_NAME) {
+    if (!deps.onManageSpace) {
+      log(false)
+      return { text: 'Spaces are not available on this gateway.' }
+    }
+    const res = deps.onManageSpace({ args })
+    if (res.chip) {
+      events.onMessage(insertMessage(deps.db, {
+        threadId: deps.threadId,
+        sender: deps.bot.id,
+        kind: 'space_updated',
+        payload: res.chip,
+      }))
+    }
+    log(res.ok, res.goalId ?? undefined)
+    return { text: res.text }
+  }
+  if (call.name === SPACE_READ_TOOL_NAME) {
+    if (!deps.onSpaceRead) {
+      log(false)
+      return { text: 'Spaces are not available on this gateway.' }
+    }
+    const res = deps.onSpaceRead({ args })
+    if (res.tainted) onOutsideDataRead?.()
+    log(res.ok, res.goalId ?? undefined)
+    return { text: res.text }
+  }
+  if (call.name === SPACE_UPSERT_ITEM_TOOL_NAME || call.name === SPACE_DELETE_ITEM_TOOL_NAME) {
+    const handler = call.name === SPACE_UPSERT_ITEM_TOOL_NAME ? deps.onSpaceUpsertItem : deps.onSpaceDeleteItem
+    if (!handler) {
+      log(false)
+      return { text: 'Spaces are not available on this gateway.' }
+    }
+    if (deps.spaceWriteCount >= MAX_SPACE_WRITES_PER_TURN) {
+      log(false)
+      return { text: `You already made ${MAX_SPACE_WRITES_PER_TURN} space writes in this turn; consolidate remaining changes.` }
+    }
+    const res = handler({ args, ruleBlock: deps.ruleBlock })
+    if (res.ok) deps.spaceWriteCount += 1
+    if (res.chip) {
+      events.onMessage(insertMessage(deps.db, {
+        threadId: deps.threadId,
+        sender: deps.bot.id,
+        kind: 'space_updated',
+        payload: res.chip,
+      }))
+    }
+    log(res.ok, res.goalId ?? undefined)
+    return { text: res.text }
+  }
+  if (call.name === WEB_SEARCH_TOOL_NAME || call.name === WEB_FETCH_TOOL_NAME) {
+    const handler = call.name === WEB_SEARCH_TOOL_NAME ? deps.onWebSearch : deps.onWebFetch
+    if (!handler) {
+      log(false)
+      return { text: 'Public web research is not available on this gateway.' }
+    }
+    const step = activity.start(call.name, summarize(call.name, args))
+    try {
+      const res = await handler(args)
+      // 任何来自公网的内容都属于不可信外部数据，强制污染本回合（禁自动放行规则）
+      onOutsideDataRead?.()
+      activity.finish(step, res.ok, Date.now() - started)
+      log(res.ok)
+      return { text: res.text }
+    } catch (err) {
+      activity.finish(step, false, Date.now() - started)
+      return failed(err)
+    }
   }
   if (call.name === 'read_skill') {
     try {
@@ -484,11 +680,31 @@ async function execToolCall(
       return failed(err)
     }
   }
+  if (call.name === VAULT_FILL_TOOL_NAME) {
+    if (!deps.onVaultFill) {
+      log(false)
+      return { text: 'Vault is not available on this gateway.' }
+    }
+    const step = activity.start(call.name, summarize(call.name, args))
+    try {
+      const res = await deps.onVaultFill({ args, ruleBlock: deps.ruleBlock, events })
+      if (res.usedItemId) deps.usedVaultItemIds.add(res.usedItemId)
+      activity.finish(step, res.ok, Date.now() - started)
+      log(res.ok)
+      return { text: res.text }
+    } catch (err) {
+      activity.finish(step, false, Date.now() - started)
+      return failed(err)
+    }
+  }
   if (!COMPUTER_TOOL_NAMES.has(call.name)) return { text: `Unknown tool: ${call.name}` }
   if (!deps.getComputer) return { text: 'You have no computer attached right now — this tool is unavailable.' }
   const step = ACTIVITY_TOOL_NAMES.has(call.name) ? activity.start(call.name, summarize(call.name, args)) : null
   try {
     const outcome = await execComputerTool(deps, call.name, args, events)
+    if (deps.redactVaultText && deps.usedVaultItemIds.size > 0 && outcome.text) {
+      outcome.text = deps.redactVaultText([...deps.usedVaultItemIds], outcome.text)
+    }
     if (step) activity.finish(step, true, Date.now() - started)
     log(true)
     return outcome
@@ -507,7 +723,13 @@ const STARTED_BY: Record<TurnOrigin, string> = {
 
 /** 告诉模型为什么这回合改不了，以及该怎么办：说给操作者听，由操作者来改 */
 function operatorOnlyRefusal(tool: string, origin: TurnOrigin | undefined): string {
-  const what = tool === 'save_memory' || tool === 'forget_memory' ? 'your standing rules' : 'your routines'
+  const what = tool === 'save_memory' || tool === 'forget_memory'
+    ? 'your standing rules'
+    : tool === MANAGE_GOAL_TOOL_NAME
+      ? 'your goals'
+      : tool === MANAGE_SPACE_TOOL_NAME
+        ? 'your spaces'
+        : 'your routines'
   return `${tool} only works in a turn your operator started. This turn was started by `
     + `${origin ? STARTED_BY[origin] : 'something other than your operator'}, and text from outside can steer it, `
     + `so ${what} stay as they are. If you think they should change, say so in your report or with ask_operator, `
@@ -562,9 +784,17 @@ function summarize(tool: string, args: Record<string, unknown>): string {
     case 'read_file':
     case 'write_file': return pick('path')
     case 'browser_goto': return withoutQuery(String(args.url ?? '').trim()).slice(0, 120)
+    case WEB_SEARCH_TOOL_NAME: return pick('query')
+    case WEB_FETCH_TOOL_NAME: return withoutQuery(String(args.url ?? '').trim()).slice(0, 120)
     case 'browser_extract': return typeof args.offset === 'number' && args.offset > 0 ? `page text from ${args.offset}` : 'page text'
     case 'browser_click':
     case 'browser_type': return pick('target')
+    case VAULT_FILL_TOOL_NAME: {
+      const ref = pick('item_id')
+      const field = pick('field')
+      const target = pick('target')
+      return `${ref}${field ? `.${field}` : ''}${target ? ` → ${target}` : ''}`.slice(0, 120)
+    }
     case 'browser_press': return pick('key')
     case 'browser_scroll': return pick('direction') || 'down'
     case 'browser_back': return 'previous page'
@@ -587,6 +817,31 @@ function summarize(tool: string, args: Record<string, unknown>): string {
       const closing = typeof payload?.closing === 'string' ? payload.closing : ''
       return closing.split('\n')[0]!.slice(0, 120) || `${payload?.lines?.length ?? 0} lines`
     }
+    case PUBLISH_FEED_TOOL_NAME: {
+      const kind = pick('kind') || 'briefing'
+      return `[${kind}] ${pick('title')}`.slice(0, 120)
+    }
+    case MANAGE_GOAL_TOOL_NAME: {
+      const action = pick('action') || 'update'
+      const detail = pick('title') || pick('milestone_title') || pick('goal_id')
+      return `[${action}] ${detail}`.trim().slice(0, 120)
+    }
+    case UPDATE_GOAL_PROGRESS_TOOL_NAME: {
+      const gid = pick('goal_id')
+      const note = pick('note')
+      return `${gid ? `${gid}: ` : ''}${note}`.slice(0, 120)
+    }
+    case MANAGE_SPACE_TOOL_NAME: {
+      const action = pick('action') || 'update'
+      const detail = pick('title') || pick('space_id')
+      return `[${action}] ${detail}`.trim().slice(0, 120)
+    }
+    case SPACE_READ_TOOL_NAME:
+      return `${pick('space_id')}${pick('block_id') ? `.${pick('block_id')}` : ''}`.slice(0, 120)
+    case SPACE_UPSERT_ITEM_TOOL_NAME:
+      return `${pick('space_id')}.${pick('block_id')}: ${pick('title')}`.slice(0, 120)
+    case SPACE_DELETE_ITEM_TOOL_NAME:
+      return `${pick('space_id')} - ${pick('item_id')}`.slice(0, 120)
     case 'mail_list':
       return [pick('folder') || 'inbox', args.unread === true ? 'unread' : '', pick('query')].filter(Boolean).join(' · ')
     case 'mail_read':
@@ -610,6 +865,18 @@ function summarize(tool: string, args: Record<string, unknown>): string {
       return `${pick('title')} (${pick('start')})`
     case 'calendar_update_event':
       return `event ${pick('eventId')}`
+    case 'polery_list_documents':
+      return 'documents'
+    case 'polery_search_documents':
+      return pick('query') || 'documents'
+    case 'polery_read_document':
+      return pick('document_id')
+    case 'polery_get_proposal':
+      return pick('proposal_id')
+    case 'polery_create_document':
+      return pick('title')
+    case 'polery_propose_edits':
+      return `${pick('document_id')} · ${pick('summary')}`.slice(0, 120)
     case 'notion_search':
       return pick('query') || 'pages'
     case 'notion_read_page':
@@ -629,11 +896,13 @@ function summarize(tool: string, args: Record<string, unknown>): string {
   }
 }
 
-function execMessageUser(deps: AgentDeps, args: Record<string, unknown>, events: AgentEvents): string {
+function execMessageUser(deps: TurnContext, args: Record<string, unknown>, events: AgentEvents): string {
   if (args.kind !== 'report') return 'Unsupported kind; only "report" exists today.'
   const payload = validateReportPayload(args.payload)
   if (!payload) return 'Invalid report payload: need lines[] of {system, result, count?} plus optional closing.'
-  events.onMessage(insertMessage(deps.db, { threadId: deps.threadId, sender: deps.bot.id, kind: 'report', payload }))
+  const message = insertMessage(deps.db, { threadId: deps.threadId, sender: deps.bot.id, kind: 'report', payload })
+  events.onMessage(message)
+  deps.onReportDelivered?.({ message, payload, ruleBlock: deps.ruleBlock })
   return 'Report delivered.'
 }
 
@@ -728,10 +997,14 @@ async function execWorkflowTool(
       const cron = String(args.cron ?? '').trim()
       const webhook = args.webhook === true
       const mode = normalizeMode(args.mode)
+      const surface = args.surface !== undefined ? normalizeSurface(args.surface, mode) : undefined
+      const goalId = typeof args.goal_id === 'string' && args.goal_id.trim() ? args.goal_id.trim() : undefined
       const instructions = String(args.instructions ?? '').trim()
       if (!routineName || !instructions) return 'create_routine needs "name" and "instructions".'
       if (!cron && !webhook) return 'create_routine needs a "cron" schedule, "webhook": true, or both.'
-      const routine = await deps.onCreateRoutine({ name: routineName, cron, instructions, webhook, mode })
+      const routine = await deps.onCreateRoutine({
+        name: routineName, cron, instructions, webhook, mode, ...(surface ? { surface } : {}), ...(goalId ? { goalId } : {}),
+      })
       // webhook 的密钥只在操作者的电脑面板里出现，不进线程、也就不进模型的上下文
       events.onMessage(insertMessage(deps.db, {
         threadId: deps.threadId, sender: deps.bot.id, kind: 'routine_created',
@@ -986,6 +1259,8 @@ function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): Chat
   if (m.kind === 'screenshot') return { role: 'assistant', content: '[screenshot posted to the thread]' }
   if (m.kind === 'approval_request') return { role: 'assistant', content: `[held for approval] ${approvalForModel(m.payload)}` }
   if (m.kind === 'memory_updated') return { role: 'assistant', content: `[memory updated] ${JSON.stringify(m.payload)}` }
+  if (m.kind === 'goal_updated') return { role: 'assistant', content: `[goal updated] ${JSON.stringify(m.payload)}` }
+  if (m.kind === 'space_updated') return { role: 'assistant', content: `[space updated] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'routine_created') return { role: 'assistant', content: `[routine created] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'bot_ref') return { role: 'user', content: `[message from teammate] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'login_request') return { role: 'assistant', content: `[asked for a sign-in] ${JSON.stringify(m.payload)}` }

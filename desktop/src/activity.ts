@@ -12,6 +12,7 @@ export type Summary = { working: number; waiting: number; routines: number }
 const TEXT = {
   en: {
     open: 'Open OpenSuperBot',
+    about: 'About OpenSuperBot',
     update: (version: string) => `Version ${version} is available — Download…`,
     quit: 'Quit OpenSuperBot',
     idle: 'No teammate is working',
@@ -34,6 +35,7 @@ const TEXT = {
   },
   'zh-CN': {
     open: '打开 OpenSuperBot',
+    about: '关于 OpenSuperBot',
     update: (version: string) => `有新版本 ${version} — 去下载…`,
     quit: '退出 OpenSuperBot',
     idle: '没有同事在干活',

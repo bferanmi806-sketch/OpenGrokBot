@@ -378,4 +378,56 @@ describe('MCP server access toggles', () => {
     expect(screen.getByText('MCP 服务')).toBeInTheDocument()
     expect(screen.getByText('3 个工具')).toBeInTheDocument()
   })
+
+  it('lists vault credentials and toggles per-teammate grants', async () => {
+    const onToggleVaultItem = vi.fn()
+    render(
+      <ComputerPanel
+        info={{
+          ...running,
+          vaultItems: [
+            {
+              id: 'vault-a1b2c3d4',
+              slug: 'zendesk',
+              name: 'Zendesk Support',
+              kind: 'login',
+              allowedDomains: ['app.zendesk.com'],
+              fieldKeys: ['username', 'password'],
+              approvalMode: 'on_taint',
+              granted: false,
+            },
+          ],
+        }}
+        botName="Scout"
+        onClose={() => {}}
+        onToggleVaultItem={onToggleVaultItem}
+      />,
+    )
+    expect(screen.getByText('Vault credentials')).toBeInTheDocument()
+    expect(screen.getByText('app.zendesk.com')).toBeInTheDocument()
+    const checkbox = screen.getByRole('checkbox', { name: 'Zendesk Support' })
+    expect(checkbox).not.toBeChecked()
+    await userEvent.click(checkbox)
+    expect(onToggleVaultItem).toHaveBeenCalledWith('vault-a1b2c3d4', true)
+  })
+
+  it('lists spaces and changes per-teammate space role', async () => {
+    const onSetSpaceRole = vi.fn()
+    render(
+      <ComputerPanel
+        info={{
+          ...running,
+          spaces: [
+            { id: 'space-11111111', slug: 'pricing', title: 'Pricing Board', icon: '📊', role: null },
+          ],
+        }}
+        botName="Scout"
+        onClose={() => {}}
+        onSetSpaceRole={onSetSpaceRole}
+      />,
+    )
+    expect(screen.getByText('Space access')).toBeInTheDocument()
+    await userEvent.selectOptions(screen.getByLabelText('Pricing Board'), 'editor')
+    expect(onSetSpaceRole).toHaveBeenCalledWith('space-11111111', 'editor')
+  })
 })

@@ -1,12 +1,12 @@
 import type {
-  ActivityPayload, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, BotStatus, Conversation, LoginPayload,
-  MemoryPayload, QuestionPayload, ReportPayload, ResolvedTheme, RoutinePayload, ScreenshotPayload, WebhookPayload,
+  ActivityPayload, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, BotStatus, Conversation, GoalUpdatedPayload, LoginPayload,
+  MemoryPayload, QuestionPayload, ReportPayload, ResolvedTheme, RoutinePayload, ScreenshotPayload, SpaceUpdatedPayload, WebhookPayload,
 } from '../types'
 import { useT, type MessageKey, type T } from '../i18n'
 import { isNotice, noticeText } from '../i18n/describe'
 import { BotAvatar, conversationSeed } from './BotAvatar'
 import { useEscape } from './ConfirmDialog'
-import { CpuSparkleIcon, MoonIcon, PlugIcon, PlusIcon, SettingsIcon, SunIcon } from './Icons'
+import { CpuSparkleIcon, InboxIcon, KeyIcon, MoonIcon, PlugIcon, PlusIcon, SettingsIcon, SunIcon } from './Icons'
 
 /**
  * 单聊就是那位同事的状态。群只说「有人在干活」：等你、卡住、刚干完说的是某一位同事，
@@ -58,6 +58,14 @@ function preview(c: Conversation, t: T): string {
       if (!p?.rule) return `🧠 ${t('sidebar.preview.memoryUpdated')}`
       return `🧠 ${p.removed ? t('sidebar.preview.forgot', { rule: p.rule }) : p.rule}`
     }
+    case 'goal_updated': {
+      const p = m.payload as GoalUpdatedPayload | null
+      return `🎯 ${p?.goalTitle || p?.summary || t('sidebar.preview.goalUpdated')}`
+    }
+    case 'space_updated': {
+      const p = m.payload as SpaceUpdatedPayload | null
+      return `📊 ${p?.spaceTitle || p?.summary || t('sidebar.preview.spaceUpdated')}`
+    }
     case 'attachment':
       return `📎 ${(m.payload as AttachmentPayload | null)?.name ?? t('sidebar.preview.file')}`
     case 'routine_created':
@@ -93,9 +101,14 @@ export function Sidebar({
   statuses,
   onSelect,
   onNewBot,
+  onFeed,
+  feedSelected,
+  feedPending,
+  feedUnread,
   onModels,
   onConnectors,
   connectorsAttention,
+  onVault,
   onSettings,
   resolvedTheme,
   onToggleTheme,
@@ -107,12 +120,19 @@ export function Sidebar({
   statuses: Record<string, BotStatus>
   onSelect: (id: string) => void
   onNewBot: () => void
+  /** 打开顶部唯一的「今日（Today）」一级入口（内含动态与待办 / 灵感 / 目标等二级标签） */
+  onFeed?: () => void
+  feedSelected?: boolean
+  feedPending?: number
+  feedUnread?: number
   /** 打开「AI 模型」；老网关没有这块就不传，按钮也不出现 */
   onModels?: () => void
   /** 打开「连接器」；老网关没有这块就不传，按钮也不出现 */
   onConnectors?: () => void
   /** 有连接器账号过期或异常需处理 */
   connectorsAttention?: boolean
+  /** 打开「凭证库」；老网关没有这块就不传，按钮也不出现 */
+  onVault?: () => void
   /** 打开设置页；老网关没有设置路由就不传 */
   onSettings?: () => void
   /** 当前生效的主题（深色 / 浅色）与快捷切换回调 */
@@ -167,7 +187,6 @@ export function Sidebar({
       <aside className={`sidebar${open ? ' open' : ''}`}>
         <div className="sidebar-title">
           <span className="sidebar-brand">
-            <span className="sidebar-brand-mark" aria-hidden="true" />
             <span>OpenSuperBot</span>
           </span>
           {onToggleTheme ? (
@@ -184,6 +203,23 @@ export function Sidebar({
         </div>
 
         <div className="sidebar-list">
+          {onFeed ? (
+            <div className="sidebar-nav">
+              <button
+                type="button"
+                className={`sidebar-nav-item${feedSelected ? ' selected' : ''}`}
+                onClick={() => { onFeed(); onClose?.() }}
+              >
+                <InboxIcon size={15} />
+                <span className="sidebar-nav-label">{t('sidebar.feed')}</span>
+                {(feedPending ?? 0) > 0 ? (
+                  <span className="sidebar-badge" aria-label={t('sidebar.waitingOnYou', { count: feedPending! })}>{feedPending}</span>
+                ) : (feedUnread ?? 0) > 0 ? (
+                  <span className="sidebar-unread-pill" aria-label={t('sidebar.feedUnread', { count: feedUnread! })}>{feedUnread}</span>
+                ) : null}
+              </button>
+            </div>
+          ) : null}
           <div className="sidebar-section">
             <div className="sidebar-section-head">
               <span className="sidebar-section-label">{t('sidebar.section.teammates')}</span>
@@ -210,7 +246,7 @@ export function Sidebar({
           ) : null}
         </div>
 
-        {onModels || onConnectors || onSettings ? (
+        {onModels || onConnectors || onVault || onSettings ? (
           <div className="sidebar-footer">
             {onModels ? (
               <button
@@ -238,6 +274,17 @@ export function Sidebar({
               </button>
             ) : null}
             {!onModels && !onConnectors ? <span className="spacer" /> : null}
+            {onVault ? (
+              <button
+                type="button"
+                className="sidebar-foot-icon sidebar-vault"
+                onClick={() => { onClose?.(); onVault() }}
+                aria-label={t('sidebar.vault')}
+                title={t('sidebar.vault')}
+              >
+                <KeyIcon size={15} />
+              </button>
+            ) : null}
             {onSettings ? (
               <button
                 type="button"

@@ -19,6 +19,64 @@ export type WorkflowElementLike = {
   check?(opts?: unknown): Promise<void>
   uncheck?(opts?: unknown): Promise<void>
   press?(key: string, opts?: unknown): Promise<void>
+  getAttribute?(name: string, opts?: unknown): Promise<string | null>
+  evaluate?<R>(fn: (el: unknown) => R, opts?: unknown): Promise<R>
+}
+
+export class VaultFillError extends Error {
+  constructor(
+    readonly code: 'origin_mismatch' | 'not_password_input' | 'unsupported_browser' | 'fill_failed',
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+export function normalizePageOrigin(rawUrl: string): string | null {
+  try {
+    const parsed = new URL(rawUrl)
+    const proto = parsed.protocol.toLowerCase()
+    if (proto !== 'http:' && proto !== 'https:') return null
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, '')
+    return `${proto}//${host}${parsed.port ? `:${parsed.port}` : ''}`
+  } catch {
+    return null
+  }
+}
+
+export async function assertPasswordInputElement(el: WorkflowElementLike): Promise<void> {
+  if (el.evaluate) {
+    const info = await el.evaluate((node) => {
+      const e = node as { tagName?: string; type?: string; getAttribute?: (k: string) => string | null }
+      const tag = String(e.tagName ?? '').toLowerCase()
+      const type = String(e.getAttribute?.('type') ?? e.type ?? '').toLowerCase()
+      const ac = String(e.getAttribute?.('autocomplete') ?? '').toLowerCase()
+      return { tag, type, ac }
+    })
+    const ok = info.tag === 'input' && (info.type === 'password' || info.ac.includes('password'))
+    if (!ok) {
+      throw new VaultFillError(
+        'not_password_input',
+        'Refused to fill a secret field into a non-password input element.',
+      )
+    }
+    return
+  }
+  if (el.getAttribute) {
+    const type = ((await el.getAttribute('type')) ?? '').toLowerCase()
+    const ac = ((await el.getAttribute('autocomplete')) ?? '').toLowerCase()
+    if (type !== 'password' && !ac.includes('password')) {
+      throw new VaultFillError(
+        'not_password_input',
+        'Refused to fill a secret field into a non-password input element.',
+      )
+    }
+    return
+  }
+  throw new VaultFillError(
+    'unsupported_browser',
+    'Refused to fill a secret field because the browser cannot verify the target input type.',
+  )
 }
 
 type Clickable = WorkflowLocatorLike & { first(): WorkflowElementLike & { click(opts?: unknown): Promise<void> } }
@@ -222,8 +280,14 @@ export function createBrowserSession(open: () => Promise<BrowserLike>): BrowserS
 }
 
 export type PageOperations = Pick<
-  BotComputer, 'goto' | 'extract' | 'links' | 'click' | 'type' | 'press' | 'scroll' | 'back' | 'screenshot'
+  BotComputer,
+  'goto' | 'currentUrl' | 'extract' | 'links' | 'click' | 'type' | 'fillSecret' | 'press' | 'scroll' | 'back' | 'screenshot'
 >
+
+function sanitizeSecretError(err: unknown, secret: string): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  return secret.length >= 2 ? raw.split(secret).join('[REDACTED]') : raw
+}
 
 /** BotComputer 里和浏览器有关的那些方法，全部建立在「给我当前页面」之上。 */
 export function pageOperations(page: () => Promise<PageLike>): PageOperations {
@@ -233,6 +297,9 @@ export function pageOperations(page: () => Promise<PageLike>): PageOperations {
       const p = await page()
       await p.goto(safe, { waitUntil: 'domcontentloaded', timeout: 45_000 })
       return { url: p.url(), title: await p.title() }
+    },
+    async currentUrl() {
+      return (await page()).url()
     },
     async extract(maxChars) {
       const text = (await (await page()).innerText('body')).replace(/\n{3,}/g, '\n\n').trim()
@@ -281,6 +348,77 @@ export function pageOperations(page: () => Promise<PageLike>): PageOperations {
         ? [bySelector, byLabel, byPlaceholder]
         : [byLabel, byPlaceholder, bySelector])
       if (submit) await (p.keyboard ?? missing('keyboard')).press('Enter')
+    },
+    async fillSecret(target, secretValue, opts) {
+      const p = await page()
+      const actualOrigin = normalizePageOrigin(p.url())
+      if (!actualOrigin || actualOrigin !== opts.expectedOrigin) {
+        throw new VaultFillError(
+          'origin_mismatch',
+          `Page origin changed to "${actualOrigin ?? '(unknown)'}" (expected "${opts.expectedOrigin}"); nothing was filled.`,
+        )
+      }
+
+      const tryFillElement = async (el: WorkflowElementLike | null | undefined, label: string): Promise<void> => {
+        if (!el || !el.fill) throw new Error(label)
+        if (el.waitFor) await el.waitFor({ state: 'visible', timeout: 3_000 })
+        if (opts.requirePasswordInput) await assertPasswordInputElement(el)
+        await el.fill(secretValue, { timeout: 3_000 })
+      }
+
+      const bySelector = async () => {
+        if (p.locator) {
+          await tryFillElement(p.locator(target).first(), `no selector matching ${target}`)
+          return
+        }
+        if (opts.requirePasswordInput) {
+          throw new VaultFillError(
+            'unsupported_browser',
+            'Refused to fill a secret field because the browser cannot inspect the target element.',
+          )
+        }
+        if (!p.fill) throw new Error('this browser cannot fill fields')
+        await p.fill(target, secretValue, { timeout: 3_000 })
+      }
+      const byLabel = async () => {
+        if (!p.getByLabel) throw new Error(`no field labelled ${target}`)
+        await tryFillElement(p.getByLabel(target).first(), `no field labelled ${target}`)
+      }
+      const byPlaceholder = async () => {
+        if (!p.getByPlaceholder) throw new Error(`no field with placeholder ${target}`)
+        await tryFillElement(p.getByPlaceholder(target).first(), `no field with placeholder ${target}`)
+      }
+
+      const attempts = looksLikeSelector(target)
+        ? [bySelector, byLabel, byPlaceholder]
+        : [byLabel, byPlaceholder, bySelector]
+
+      let firstErr: unknown
+      let filled = false
+      for (const attempt of attempts) {
+        try {
+          await attempt()
+          filled = true
+          break
+        } catch (err) {
+          // 明确命中了非密码输入框就立刻停止，不再退回别的选择器碰运气
+          if (err instanceof VaultFillError && err.code === 'not_password_input') throw err
+          firstErr ??= err
+        }
+      }
+      if (!filled) {
+        if (firstErr instanceof VaultFillError) throw firstErr
+        throw new VaultFillError('fill_failed', sanitizeSecretError(firstErr, secretValue))
+      }
+
+      if (opts.submit) {
+        try {
+          await (p.keyboard ?? missing('keyboard')).press('Enter')
+        } catch (err) {
+          throw new VaultFillError('fill_failed', sanitizeSecretError(err, secretValue))
+        }
+      }
+      return { origin: actualOrigin }
     },
     async press(key) {
       await ((await page()).keyboard ?? missing('keyboard')).press(key)

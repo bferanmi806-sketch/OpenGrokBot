@@ -223,3 +223,64 @@ export function MoonIcon(props: IconProps) {
     </Svg>
   )
 }
+
+export function KeyIcon(props: IconProps) {
+  return (
+    <Svg size={14} {...props}>
+      <circle cx="8" cy="15" r="4" />
+      <path d="M11 12l9-9" />
+      <path d="M16 7l3 3" />
+      <path d="M18.5 4.5l2 2" />
+    </Svg>
+  )
+}
+
+export function InboxIcon(props: IconProps) {
+  return (
+    <Svg size={15} {...props}>
+      <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    </Svg>
+  )
+}
+
+export function TargetIcon(props: IconProps) {
+  return (
+    <Svg size={15} {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="5" />
+      <circle cx="12" cy="12" r="1.5" />
+    </Svg>
+  )
+}
+
+export function LayoutGridIcon(props: IconProps) {
+  return (
+    <Svg size={15} {...props}>
+      <rect x="3" y="3" width="7" height="7" rx="1.5" />
+      <rect x="14" y="3" width="7" height="7" rx="1.5" />
+      <rect x="3" y="14" width="7" height="7" rx="1.5" />
+      <rect x="14" y="14" width="7" height="7" rx="1.5" />
+    </Svg>
+  )
+}
+
+export function NewspaperIcon(props: IconProps) {
+  return (
+    <Svg size={15} {...props}>
+      <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h11A1.5 1.5 0 0 1 18 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-13Z" />
+      <path d="M18 9h2a1 1 0 0 1 1 1v8a2 2 0 0 1-2 2h-1" />
+      <path d="M8 8.5h6M8 12.5h6M8 16h4" />
+    </Svg>
+  )
+}
+
+export function LightbulbIcon(props: IconProps) {
+  return (
+    <Svg size={15} {...props}>
+      <path d="M9 18h6" />
+      <path d="M10 21h4" />
+      <path d="M12 3a6.5 6.5 0 0 0-4 11.62c.66.52 1 1.24 1 2.04V17h6v-.34c0-.8.34-1.52 1-2.04A6.5 6.5 0 0 0 12 3Z" />
+    </Svg>
+  )
+}

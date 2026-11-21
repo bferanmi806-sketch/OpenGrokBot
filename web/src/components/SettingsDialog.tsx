@@ -306,6 +306,31 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
                   <dt>{t('settings.about.runtime')}</dt>
                   <dd>{`Node ${about.runtime.node} · ${about.runtime.platform}/${about.runtime.arch}`}</dd>
                 </dl>
+                <div className="settings-about-credits">
+                  <p>
+                    {t('settings.about.creditsLead')}
+                    <a className="setup-link" href="https://github.com/wolfqing" target="_blank" rel="noreferrer">
+                      wolfqing
+                    </a>
+                    {t('settings.about.creditsMiddle')}
+                    <a
+                      className="setup-link"
+                      href="https://github.com/wolfqing/OpenSuperBot/graphs/contributors"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {t('settings.about.contributors')}
+                    </a>
+                    {t('settings.about.creditsTail')}
+                  </p>
+                  <p className="settings-about-meta">
+                    <a className="setup-link" href="https://github.com/wolfqing/OpenSuperBot" target="_blank" rel="noreferrer">
+                      {t('settings.about.repo')}
+                    </a>
+                    <span aria-hidden="true"> · </span>
+                    <span>{t('settings.about.license')}</span>
+                  </p>
+                </div>
               </Section>
             ) : null}
             {errorFor('')}

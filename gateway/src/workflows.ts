@@ -16,6 +16,7 @@ export type WorkflowValue =
   | { kind: 'literal'; text: string }
   | { kind: 'placeholder'; key: string }
   | { kind: 'redacted'; reason: 'sensitive-input' }
+  | { kind: 'vault'; itemId: string; field: string }
 
 type WorkflowStepContext = { intent?: string; page?: string; frame?: string }
 export type WorkflowApproval = { kind: ApprovalKind; target: string; action?: string }
@@ -48,6 +49,7 @@ type WorkflowRow = { id: string; trace_json: string }
 const SAFE_ID = /^[a-zA-Z0-9._-]+$/
 const TRACE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const PLACEHOLDER_KEY = /^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/
+const VAULT_ITEM_ID = /^vault-[0-9a-f]{8}$/
 export const MAX_WORKFLOW_STEPS = 1_000
 const MAX_TITLE_LENGTH = 120
 const MAX_INTENT_LENGTH = 500
@@ -200,6 +202,13 @@ function parseWorkflowValue(value: unknown, target: WorkflowTarget): WorkflowVal
     const key = readString(value.key, 'placeholder key', 64)
     if (!PLACEHOLDER_KEY.test(key)) throw new TypeError('invalid workflow placeholder key')
     return { kind: 'placeholder', key }
+  }
+  if (value.kind === 'vault') {
+    const itemId = readString(value.itemId, 'vault item id', 32)
+    const field = readString(value.field, 'vault field', 64)
+    if (!VAULT_ITEM_ID.test(itemId)) throw new TypeError('invalid workflow vault item id')
+    if (!PLACEHOLDER_KEY.test(field)) throw new TypeError('invalid workflow vault field')
+    return { kind: 'vault', itemId, field }
   }
   if (value.kind === 'literal') {
     return redactLiteral(readString(value.text, 'value', MAX_VALUE_LENGTH, true), target)

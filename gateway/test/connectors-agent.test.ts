@@ -83,8 +83,8 @@ const sampleAccount = (patch: Partial<ConnectorAccountRow> & Pick<ConnectorAccou
 describe('connector tools & deferred execution gate', () => {
   it('exposes all 16 tools across domains, enforces zero-grant isolation, requires account enum when >=2 accounts share a domain, and filters writes in watch mode', () => {
     expect(buildConnectorTools([])).toEqual([])
-    expect(CONNECTOR_READ_TOOL_NAMES.size).toBe(7)
-    expect(CONNECTOR_WRITE_TOOL_NAMES.size).toBe(8)
+    expect(CONNECTOR_READ_TOOL_NAMES.size).toBe(11)
+    expect(CONNECTOR_WRITE_TOOL_NAMES.size).toBe(10)
 
     const g1 = sampleAccount({ id: 'ca-00000001', app: 'gmail', account_label: 'work@acme.com' })
     const g2 = sampleAccount({ id: 'ca-00000002', app: 'outlook', account_label: 'me@outlook.com' })

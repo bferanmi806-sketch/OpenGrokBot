@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
 import type {
-  ActivityPayload, ApprovalEditInput, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, Conversation, LoginPayload, MemoryPayload,
-  Message, QuestionPayload, ReportPayload, RoutinePayload, RuleDuration, ScreenshotPayload, WebhookPayload,
+  ActivityPayload, ApprovalEditInput, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, Conversation, GoalUpdatedPayload, LoginPayload, MemoryPayload,
+  Message, QuestionPayload, ReportPayload, RoutinePayload, RuleDuration, ScreenshotPayload, SpaceUpdatedPayload, WebhookPayload,
 } from '../types'
 import { ApiError } from '../api'
 import { ACCEPT, isImageType } from '../attachments'
@@ -14,6 +14,7 @@ import { BotAvatar, conversationSeed } from './BotAvatar'
 import { BotRefChip } from './BotRefChip'
 import { PendingFiles, usePendingFiles, type FilesIO } from './ComposerFiles'
 import { ConfirmDialog } from './ConfirmDialog'
+import { GoalChip } from './GoalChip'
 import { ArrowDownIcon, ArrowUpIcon, AtSignIcon, MonitorIcon, PaperclipIcon, SidebarIcon, StopSquareIcon } from './Icons'
 import { Lightbox, type LightboxImage } from './Lightbox'
 import { LoginChip } from './LoginChip'
@@ -23,6 +24,7 @@ import { QuestionChip } from './QuestionChip'
 import { ReportChip } from './ReportChip'
 import { RoutineChip } from './RoutineChip'
 import { ScreenshotChip } from './ScreenshotChip'
+import { SpaceChip } from './SpaceChip'
 import { WebhookChip } from './WebhookChip'
 
 /** 停顿超过这么久，下一条消息前再标一次时间；连珠炮式的往来只在开头标一次。 */
@@ -93,6 +95,8 @@ const ThreadMessageRow = memo(function ThreadMessageRow({
       case 'screenshot': return <ScreenshotChip payload={m.payload as ScreenshotPayload} onPreview={onPreview} />
       case 'approval_request': return <ApprovalChip payload={m.payload as ApprovalPayload} onDecide={onDecide} />
       case 'memory_updated': return <MemoryChip payload={m.payload as MemoryPayload} />
+      case 'goal_updated': return <GoalChip payload={m.payload as GoalUpdatedPayload} />
+      case 'space_updated': return <SpaceChip payload={m.payload as SpaceUpdatedPayload} />
       case 'routine_created': return <RoutineChip payload={m.payload as RoutinePayload} />
       case 'bot_ref': return <BotRefChip payload={m.payload as BotRefPayload} />
       case 'login_request':

@@ -10,6 +10,8 @@ export type MessageKind =
   | 'approval_request'
   | 'approval_resolved'
   | 'memory_updated'
+  | 'goal_updated'
+  | 'space_updated'
   | 'routine_created'
   | 'bot_ref'
   | 'login_request'
@@ -318,6 +320,217 @@ const MIGRATIONS: Migration[] = [
       );
       CREATE INDEX IF NOT EXISTS idx_bot_mcp_servers_server ON bot_mcp_servers(server_id);
     `)
+  },
+  // v14：独立凭证库元数据表与按同事零默认授权表（明文单独存 <data>/vault-secrets.json，绝不入库）
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS vault_items (
+        id TEXT PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        allowed_domains_json TEXT NOT NULL DEFAULT '[]',
+        fields_json TEXT NOT NULL DEFAULT '[]',
+        approval_mode TEXT NOT NULL DEFAULT 'on_taint',
+        notes TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_vault_items_kind ON vault_items(kind);
+      CREATE TABLE IF NOT EXISTS bot_vault_items (
+        bot_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (bot_id, item_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_bot_vault_items_item ON bot_vault_items(item_id);
+    `)
+  },
+  // v15：Feed 指挥台动态流与轻量灵感孵化器，以及 routine 输出目标面（thread / feed / both）
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS feed_items (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        source_message_id INTEGER,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        body_json TEXT NOT NULL DEFAULT '{}',
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        tainted INTEGER NOT NULL DEFAULT 0,
+        source_label TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'unread',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_feed_items_status_time ON feed_items(status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_feed_items_bot ON feed_items(bot_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS ideas (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        origin TEXT NOT NULL DEFAULT 'operator',
+        source_feed_id TEXT,
+        tainted INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'inbox',
+        assigned_bot_id TEXT,
+        incubation_thread_id TEXT,
+        incubation_summary TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ideas_status_time ON ideas(status, updated_at DESC);
+    `)
+    const have = new Set((db.pragma('table_info(routines)') as { name: string }[]).map((c) => c.name))
+    if (!have.has('surface')) db.exec(`ALTER TABLE routines ADD COLUMN surface TEXT NOT NULL DEFAULT 'thread';`)
+  },
+  // v16：长期目标与里程碑状态机（goals / goal_milestones / goal_updates），并与 routines / actions / ideas 轻量关联
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS goals (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        success_criteria TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'active',
+        owner_bot_id TEXT NOT NULL,
+        member_bots_json TEXT NOT NULL DEFAULT '[]',
+        target_date TEXT,
+        source_idea_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_goals_status_updated ON goals(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_goals_owner ON goals(owner_bot_id, status);
+
+      CREATE TABLE IF NOT EXISTS goal_milestones (
+        id TEXT PRIMARY KEY,
+        goal_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        owner_bot_id TEXT,
+        due_date TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_goal_milestones_goal ON goal_milestones(goal_id, sort_order, created_at);
+
+      CREATE TABLE IF NOT EXISTS goal_updates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        goal_id TEXT NOT NULL,
+        author_kind TEXT NOT NULL,
+        bot_id TEXT,
+        kind TEXT NOT NULL DEFAULT 'note',
+        summary TEXT NOT NULL,
+        diff TEXT NOT NULL DEFAULT '',
+        tainted INTEGER NOT NULL DEFAULT 0,
+        thread_id TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_goal_updates_goal ON goal_updates(goal_id, id DESC);
+    `)
+    const routineCols = new Set((db.pragma('table_info(routines)') as { name: string }[]).map((c) => c.name))
+    if (!routineCols.has('goal_id')) db.exec('ALTER TABLE routines ADD COLUMN goal_id TEXT;')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_routines_goal ON routines(goal_id);')
+
+    const actionCols = new Set((db.pragma('table_info(actions)') as { name: string }[]).map((c) => c.name))
+    if (!actionCols.has('goal_id')) db.exec('ALTER TABLE actions ADD COLUMN goal_id TEXT;')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_actions_goal ON actions(goal_id, id DESC);')
+
+    const ideaCols = new Set((db.pragma('table_info(ideas)') as { name: string }[]).map((c) => c.name))
+    if (!ideaCols.has('promoted_goal_id')) db.exec('ALTER TABLE ideas ADD COLUMN promoted_goal_id TEXT;')
+  },
+  // v17：声明式活看板 Spaces（spaces / space_items / space_bots，零任意 JS，按同事零默认授权）
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS spaces (
+        id TEXT PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        icon TEXT NOT NULL DEFAULT '📊',
+        kind TEXT NOT NULL DEFAULT 'declarative',
+        goal_id TEXT,
+        schema_json TEXT NOT NULL DEFAULT '{"blocks":[]}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_spaces_goal ON spaces(goal_id);
+      CREATE INDEX IF NOT EXISTS idx_spaces_updated ON spaces(updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS space_items (
+        id TEXT PRIMARY KEY,
+        space_id TEXT NOT NULL,
+        block_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT '',
+        data_json TEXT NOT NULL DEFAULT '{}',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        tainted INTEGER NOT NULL DEFAULT 0,
+        updated_by TEXT NOT NULL DEFAULT 'operator',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_space_items_space_block ON space_items(space_id, block_id, sort_order, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS space_bots (
+        space_id TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'editor',
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (space_id, bot_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_space_bots_bot ON space_bots(bot_id);
+    `)
+  },
+  // v18：自定义联网 Feed 主题（feed_topics）与 feed_items.topic_id 关联列
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS feed_topics (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        cron TEXT NOT NULL DEFAULT '0 9 * * *',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_run_at INTEGER,
+        last_error TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_feed_topics_enabled ON feed_topics(enabled, updated_at DESC);
+    `)
+    const feedCols = new Set((db.pragma('table_info(feed_items)') as { name: string }[]).map((c) => c.name))
+    if (!feedCols.has('topic_id')) db.exec('ALTER TABLE feed_items ADD COLUMN topic_id TEXT;')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_feed_items_topic ON feed_items(topic_id, created_at DESC);')
+  },
+  // v19：对话上下文自动整理的待办表（todos），以及 ideas / goals 的原对话来源与自动整理标记
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS todos (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'open',
+        owner_bot_id TEXT,
+        source_thread_id TEXT,
+        origin TEXT NOT NULL DEFAULT 'auto',
+        tainted INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_todos_status_updated ON todos(status, updated_at DESC);
+    `)
+    const ideaCols = new Set((db.pragma('table_info(ideas)') as { name: string }[]).map((c) => c.name))
+    if (!ideaCols.has('source_thread_id')) db.exec('ALTER TABLE ideas ADD COLUMN source_thread_id TEXT;')
+
+    const goalCols = new Set((db.pragma('table_info(goals)') as { name: string }[]).map((c) => c.name))
+    if (!goalCols.has('source_thread_id')) db.exec('ALTER TABLE goals ADD COLUMN source_thread_id TEXT;')
+    if (!goalCols.has('origin')) db.exec(`ALTER TABLE goals ADD COLUMN origin TEXT NOT NULL DEFAULT 'operator';`)
   },
 ]
 

@@ -61,7 +61,11 @@ DELETE /api/bots/{botId}/workflows/{workflowId}
 ## Replay a saved workflow
 
 Replay is operator-only and runs through the teammate's existing browser session. A workflow step with a placeholder
-uses its key in `bindings`; a redacted field uses the one-based step name `step:N`. Supply every required value in the
+uses its key in `bindings`; a redacted field uses the one-based step name `step:N`. A step using
+`{ "kind": "vault", "itemId": "vault-xxxxxxxx", "field": "password" }` needs no runtime entry in `bindings` — the
+gateway resolves the credential (or live TOTP 2FA code) just-in-time on that step after verifying the teammate's Vault
+grant, `allowedDomains` HTTPS match against the live page URL, and password-input element type for `secret` fields
+(failing cleanly with `vault_denied` or `vault_domain_mismatch` otherwise). Supply every remaining required value in the
 request body:
 
 ```http
@@ -148,6 +152,7 @@ type WorkflowValue =
   | { kind: 'literal'; text: string }
   | { kind: 'placeholder'; key: string }
   | { kind: 'redacted'; reason: 'sensitive-input' }
+  | { kind: 'vault'; itemId: string; field: string }
 ```
 
 `page`, `frame`, and `intent` are optional on every step so recorder metadata can grow while the trace remains v1.

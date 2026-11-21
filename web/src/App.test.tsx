@@ -35,6 +35,12 @@ function mockGateway(opts: {
   connectors?: unknown | (() => unknown)
   /** /api/mcp/servers 的回答；不给 = 老网关 */
   mcpServers?: unknown | (() => unknown)
+  /** /api/feed 的回答；不给 = 老网关 */
+  feed?: unknown
+  /** /api/goals 的回答；不给 = 老网关 */
+  goals?: unknown
+  /** /api/spaces 的回答；不给 = 老网关 */
+  spaces?: unknown
 } = {}) {
   const calls: string[] = []
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -66,6 +72,9 @@ function mockGateway(opts: {
     if (url === '/api/mcp/servers' && opts.mcpServers) {
       return json(typeof opts.mcpServers === 'function' ? opts.mcpServers() : opts.mcpServers)
     }
+    if (url === '/api/feed' && opts.feed) return json(opts.feed)
+    if (url === '/api/goals' && opts.goals) return json(opts.goals)
+    if (url === '/api/spaces' && opts.spaces) return json(opts.spaces)
     if (url.endsWith('/mcp') && init?.method === 'PUT') {
       const sent = JSON.parse(String(init.body)) as { serverIds: string[] }
       const botId = decodeURIComponent(url.split('/')[3] ?? '')
@@ -549,5 +558,84 @@ describe('App', () => {
     await act(async () => { socket.emit({ type: 'mcp_changed' }) })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Connectors' })).toBeInTheDocument())
     await waitFor(() => expect(calls.filter((u) => u === '/api/bots/researcher/computer').length).toBeGreaterThan(computerCallsBefore))
+  })
+
+  it('keeps Today as the sole top sidebar entry and routes #today, #goals, and #space=<id> to Today tabs', async () => {
+    window.history.replaceState(null, '', '#goals')
+    mockGateway({
+      feed: { needsYou: [], items: [], ideas: [], unreadCount: 0 },
+      goals: {
+        goals: [
+          {
+            id: 'goal-11111111',
+            title: 'Ship unified Today hub',
+            description: '',
+            successCriteria: 'One top entry in sidebar',
+            status: 'active',
+            ownerBotId: 'researcher',
+            memberBotIds: [],
+            targetDate: null,
+            sourceIdeaId: null,
+            createdAt: 1,
+            updatedAt: 1,
+            milestones: [],
+            doneMilestones: 0,
+            totalMilestones: 0,
+            recentUpdates: [],
+            routines: [],
+            recentActions: [],
+          },
+        ],
+        activeCount: 1,
+        unlinkedRoutines: [],
+      },
+      spaces: {
+        spaces: [
+          {
+            id: 'space-aaaaaaaa',
+            slug: 'launch_board',
+            title: 'Launch Board',
+            description: 'Zero-JS board',
+            icon: '📋',
+            kind: 'declarative',
+            goalId: 'goal-11111111',
+            goalTitle: 'Ship unified Today hub',
+            schema: { blocks: [{ id: 'notes', type: 'markdown', title: 'Notes', content: 'Space notes live here' }] },
+            items: [],
+            grants: [],
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+        templates: [{ id: 'kanban', icon: '📋' }],
+      },
+    })
+
+    render(<App />)
+    await ready()
+
+    // Only Today sits in the top sidebar nav; no separate Goals or Spaces sidebar button
+    expect(screen.getByRole('button', { name: /^Today$/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Goals$/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Spaces$/ })).not.toBeInTheDocument()
+
+    // #goals opens directly on the Tracking & Goals secondary tab inside Today (both Needs You and Goals live here)
+    expect(await screen.findByText('Ship unified Today hub')).toBeInTheDocument()
+    expect(screen.getByText(/Nothing is waiting on your decision right now\./)).toBeInTheDocument()
+
+    // #space=<id> opens directly on the Spaces secondary tab with that space active
+    await act(async () => {
+      window.location.hash = '#space=space-aaaaaaaa'
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    expect(await screen.findByText('Space notes live here')).toBeInTheDocument()
+
+    // Switching hash to #today lands on the default Feed tab with Custom Feed prompt composer
+    await act(async () => {
+      window.location.hash = '#today'
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    expect(await screen.findByText('Custom Feed')).toBeInTheDocument()
+    window.history.replaceState(null, '', window.location.pathname)
   })
 })

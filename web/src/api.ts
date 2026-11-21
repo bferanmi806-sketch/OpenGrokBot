@@ -1,18 +1,23 @@
 import { fileToBase64 } from './attachments'
 import type {
   AboutInfo, AppKey, ApprovalEditInput, AttachmentPayload, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
-  Conversation, CreateMcpServerInput, FieldError, GatewayEvent, ImportMcpServersInput, ImportMcpServersResult, McpServersSnapshot,
-  McpServerView, Message, ProviderPreset, RoutineAction, RuleDuration, ServerEvent, SettingsView, SetupInfo, UpdateMcpServerPatch,
+  Conversation, CreateGoalInput, CreateMcpServerInput, CreateSpaceInput, CreateVaultItemInput, FeedItemStatus, FeedSnapshot, FeedTopic, FieldError, GatewayEvent, GoalMilestone,
+  GoalsSnapshot, GoalUpdateItem, GoalView, IdeaItem, IdeaStatus, ImportMcpServersInput, ImportMcpServersResult, McpServersSnapshot,
+  McpServerView, Message, MilestoneStatus, ProviderPreset, RoutineAction, RuleDuration, ServerEvent, SettingsView, SetupInfo, SpaceGrant, SpaceItem,
+  SpaceItemData, SpaceRole, SpacesSnapshot, SpaceView, TodoItem, TodoStatus, UpdateGoalPatch, UpdateMcpServerPatch, UpdateSpacePatch, UpdateVaultItemPatch, VaultItemView, VaultSnapshot,
 } from './types'
 
 export type {
   ApprovalEditInput,
   CreateMcpServerInput,
+  CreateVaultItemInput,
   GatewayEvent,
   ImportMcpServersInput,
   ImportMcpServersResult,
   ServerEvent,
   UpdateMcpServerPatch,
+  UpdateVaultItemPatch,
+  VaultSnapshot,
 } from './types'
 
 /** 网关说「先登录」：界面换成锁屏说明，而不是一片空白。 */
@@ -296,6 +301,340 @@ export async function setMcpServerBots(id: string, botIds: string[]): Promise<vo
 
 export async function setBotMcpServers(botId: string, serverIds: string[]): Promise<void> {
   await send('PUT', `/api/bots/${encodeURIComponent(botId)}/mcp`, { serverIds }, { strict: true })
+}
+
+/** 凭证库与授权快照；老网关没有这个路由就是 null */
+export async function fetchVault(): Promise<VaultSnapshot | null> {
+  const res = await request('/api/vault')
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`GET /api/vault ${res.status}`)
+  return res.json() as Promise<VaultSnapshot>
+}
+
+export async function createVaultItem(input: CreateVaultItemInput): Promise<{ item: VaultItemView; snapshot: VaultSnapshot }> {
+  const res = await send('POST', '/api/vault', input, { strict: true })
+  return res.json() as Promise<{ item: VaultItemView; snapshot: VaultSnapshot }>
+}
+
+export async function updateVaultItem(
+  id: string,
+  patch: UpdateVaultItemPatch,
+): Promise<{ item: VaultItemView; snapshot: VaultSnapshot }> {
+  const res = await send('PATCH', `/api/vault/${encodeURIComponent(id)}`, patch, { strict: true })
+  return res.json() as Promise<{ item: VaultItemView; snapshot: VaultSnapshot }>
+}
+
+export async function deleteVaultItem(id: string): Promise<{ ok: boolean; snapshot: VaultSnapshot }> {
+  const res = await send('DELETE', `/api/vault/${encodeURIComponent(id)}`, undefined, { strict: true })
+  return res.json() as Promise<{ ok: boolean; snapshot: VaultSnapshot }>
+}
+
+export async function setBotVaultItems(
+  botId: string,
+  itemIds: string[],
+): Promise<{ botId: string; itemIds: string[]; snapshot: VaultSnapshot }> {
+  const res = await send('PUT', `/api/bots/${encodeURIComponent(botId)}/vault`, { itemIds }, { strict: true })
+  return res.json() as Promise<{ botId: string; itemIds: string[]; snapshot: VaultSnapshot }>
+}
+
+/** 今日动态与灵感箱快照；老网关没有这个路由就是 null */
+export async function fetchFeed(): Promise<FeedSnapshot | null> {
+  const res = await request('/api/feed')
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`GET /api/feed ${res.status}`)
+  return res.json() as Promise<FeedSnapshot>
+}
+
+export async function updateFeedItemStatus(id: string, status: FeedItemStatus): Promise<{ snapshot: FeedSnapshot }> {
+  const res = await send('PATCH', `/api/feed/${encodeURIComponent(id)}`, { status }, { strict: true })
+  return res.json() as Promise<{ snapshot: FeedSnapshot }>
+}
+
+export async function markAllFeedRead(): Promise<{ snapshot: FeedSnapshot }> {
+  const res = await send('POST', '/api/feed/read-all', {}, { strict: true })
+  return res.json() as Promise<{ snapshot: FeedSnapshot }>
+}
+
+export async function deleteFeedItem(id: string): Promise<{ snapshot: FeedSnapshot }> {
+  const res = await send('DELETE', `/api/feed/${encodeURIComponent(id)}`, undefined, { strict: true })
+  return res.json() as Promise<{ snapshot: FeedSnapshot }>
+}
+
+export async function followupFeedItem(
+  id: string,
+  opts: { botId?: string; note?: string } = {},
+): Promise<{ botId: string; threadId: string; snapshot: FeedSnapshot }> {
+  const res = await send('POST', `/api/feed/${encodeURIComponent(id)}/followup`, opts, { strict: true })
+  return res.json() as Promise<{ botId: string; threadId: string; snapshot: FeedSnapshot }>
+}
+
+export async function promoteFeedToIdea(id: string): Promise<{ idea: IdeaItem; snapshot: FeedSnapshot }> {
+  const res = await send('POST', `/api/feed/${encodeURIComponent(id)}/idea`, {}, { strict: true })
+  return res.json() as Promise<{ idea: IdeaItem; snapshot: FeedSnapshot }>
+}
+
+export async function createIdea(input: {
+  title: string
+  notes?: string
+  assignedBotId?: string | null
+}): Promise<{ idea: IdeaItem; snapshot: FeedSnapshot }> {
+  const res = await send('POST', '/api/ideas', input, { strict: true })
+  return res.json() as Promise<{ idea: IdeaItem; snapshot: FeedSnapshot }>
+}
+
+export async function updateIdea(
+  id: string,
+  patch: { title?: string; notes?: string; status?: IdeaStatus; assignedBotId?: string | null },
+): Promise<{ idea: IdeaItem; snapshot: FeedSnapshot }> {
+  const res = await send('PATCH', `/api/ideas/${encodeURIComponent(id)}`, patch, { strict: true })
+  return res.json() as Promise<{ idea: IdeaItem; snapshot: FeedSnapshot }>
+}
+
+export async function deleteIdea(id: string): Promise<{ snapshot: FeedSnapshot }> {
+  const res = await send('DELETE', `/api/ideas/${encodeURIComponent(id)}`, undefined, { strict: true })
+  return res.json() as Promise<{ snapshot: FeedSnapshot }>
+}
+
+export async function incubateIdea(
+  id: string,
+  opts: { botId?: string } = {},
+): Promise<{ idea: IdeaItem; botId: string; threadId: string; snapshot: FeedSnapshot }> {
+  const res = await send('POST', `/api/ideas/${encodeURIComponent(id)}/incubate`, opts, { strict: true })
+  return res.json() as Promise<{ idea: IdeaItem; botId: string; threadId: string; snapshot: FeedSnapshot }>
+}
+
+export async function dispatchIdea(
+  id: string,
+  opts: { botId?: string; instructions?: string } = {},
+): Promise<{ idea: IdeaItem; botId: string; threadId: string; snapshot: FeedSnapshot }> {
+  const res = await send('POST', `/api/ideas/${encodeURIComponent(id)}/dispatch`, opts, { strict: true })
+  return res.json() as Promise<{ idea: IdeaItem; botId: string; threadId: string; snapshot: FeedSnapshot }>
+}
+
+export async function createFeedTopic(input: {
+  title?: string
+  prompt: string
+  botId?: string
+  cron?: string
+  enabled?: boolean
+  runNow?: boolean
+}): Promise<{ topic: FeedTopic; running: boolean; snapshot: FeedSnapshot }> {
+  const res = await send('POST', '/api/feed/topics', input, { strict: true })
+  return res.json() as Promise<{ topic: FeedTopic; running: boolean; snapshot: FeedSnapshot }>
+}
+
+export async function updateFeedTopic(
+  id: string,
+  patch: { title?: string; prompt?: string; botId?: string; cron?: string; enabled?: boolean },
+): Promise<{ topic: FeedTopic; snapshot: FeedSnapshot }> {
+  const res = await send('PATCH', `/api/feed/topics/${encodeURIComponent(id)}`, patch, { strict: true })
+  return res.json() as Promise<{ topic: FeedTopic; snapshot: FeedSnapshot }>
+}
+
+export async function deleteFeedTopic(id: string): Promise<{ snapshot: FeedSnapshot }> {
+  const res = await send('DELETE', `/api/feed/topics/${encodeURIComponent(id)}`, undefined, { strict: true })
+  return res.json() as Promise<{ snapshot: FeedSnapshot }>
+}
+
+export async function runFeedTopic(id: string): Promise<{ started: boolean; topic: FeedTopic; snapshot: FeedSnapshot }> {
+  const res = await send('POST', `/api/feed/topics/${encodeURIComponent(id)}/run`, {}, { strict: true })
+  return res.json() as Promise<{ started: boolean; topic: FeedTopic; snapshot: FeedSnapshot }>
+}
+
+export async function runAllFeedTopics(): Promise<{ started: string[]; snapshot: FeedSnapshot }> {
+  const res = await send('POST', '/api/feed/topics/run-all', {}, { strict: true })
+  return res.json() as Promise<{ started: string[]; snapshot: FeedSnapshot }>
+}
+
+export async function updateTodo(
+  id: string,
+  patch: { status?: TodoStatus; title?: string; detail?: string },
+): Promise<{ todo: TodoItem; snapshot: FeedSnapshot }> {
+  const res = await send('PATCH', `/api/todos/${encodeURIComponent(id)}`, patch, { strict: true })
+  return res.json() as Promise<{ todo: TodoItem; snapshot: FeedSnapshot }>
+}
+
+export async function deleteTodo(id: string): Promise<{ snapshot: FeedSnapshot }> {
+  const res = await send('DELETE', `/api/todos/${encodeURIComponent(id)}`, undefined, { strict: true })
+  return res.json() as Promise<{ snapshot: FeedSnapshot }>
+}
+
+export async function distillFeedFromChats(): Promise<{
+  ideasAdded: number
+  todosAdded: number
+  todosCompleted: number
+  goalsAdded: number
+  goalsUpdated: number
+  snapshot: FeedSnapshot
+}> {
+  const res = await send('POST', '/api/feed/distill', {}, { strict: true })
+  return res.json() as Promise<{
+    ideasAdded: number
+    todosAdded: number
+    todosCompleted: number
+    goalsAdded: number
+    goalsUpdated: number
+    snapshot: FeedSnapshot
+  }>
+}
+
+/** 长期目标与里程碑快照；老网关没有这个路由就返回 null */
+export async function fetchGoals(): Promise<GoalsSnapshot | null> {
+  const res = await request('/api/goals')
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json() as Promise<GoalsSnapshot>
+}
+
+export async function createGoal(input: CreateGoalInput): Promise<{ goal: GoalView; snapshot: GoalsSnapshot }> {
+  const res = await send('POST', '/api/goals', input, { strict: true })
+  return res.json() as Promise<{ goal: GoalView; snapshot: GoalsSnapshot }>
+}
+
+export async function updateGoal(id: string, patch: UpdateGoalPatch): Promise<{ goal: GoalView; snapshot: GoalsSnapshot }> {
+  const res = await send('PATCH', `/api/goals/${encodeURIComponent(id)}`, patch, { strict: true })
+  return res.json() as Promise<{ goal: GoalView; snapshot: GoalsSnapshot }>
+}
+
+export async function deleteGoal(id: string): Promise<{ snapshot: GoalsSnapshot }> {
+  const res = await send('DELETE', `/api/goals/${encodeURIComponent(id)}`, undefined, { strict: true })
+  return res.json() as Promise<{ snapshot: GoalsSnapshot }>
+}
+
+export async function addGoalMilestone(
+  goalId: string,
+  input: { title: string; ownerBotId?: string | null; dueDate?: string | null },
+): Promise<{ milestone: GoalMilestone; goal: GoalView; snapshot: GoalsSnapshot }> {
+  const res = await send('POST', `/api/goals/${encodeURIComponent(goalId)}/milestones`, input, { strict: true })
+  return res.json() as Promise<{ milestone: GoalMilestone; goal: GoalView; snapshot: GoalsSnapshot }>
+}
+
+export async function updateGoalMilestone(
+  goalId: string,
+  milestoneId: string,
+  patch: { title?: string; status?: MilestoneStatus; ownerBotId?: string | null; dueDate?: string | null },
+): Promise<{ milestone: GoalMilestone; goal: GoalView; snapshot: GoalsSnapshot }> {
+  const res = await send(
+    'PATCH',
+    `/api/goals/${encodeURIComponent(goalId)}/milestones/${encodeURIComponent(milestoneId)}`,
+    patch,
+    { strict: true },
+  )
+  return res.json() as Promise<{ milestone: GoalMilestone; goal: GoalView; snapshot: GoalsSnapshot }>
+}
+
+export async function deleteGoalMilestone(
+  goalId: string,
+  milestoneId: string,
+): Promise<{ goal: GoalView; snapshot: GoalsSnapshot }> {
+  const res = await send(
+    'DELETE',
+    `/api/goals/${encodeURIComponent(goalId)}/milestones/${encodeURIComponent(milestoneId)}`,
+    undefined,
+    { strict: true },
+  )
+  return res.json() as Promise<{ goal: GoalView; snapshot: GoalsSnapshot }>
+}
+
+export async function addGoalUpdate(
+  goalId: string,
+  summary: string,
+): Promise<{ update: GoalUpdateItem; goal: GoalView; snapshot: GoalsSnapshot }> {
+  const res = await send('POST', `/api/goals/${encodeURIComponent(goalId)}/updates`, { summary }, { strict: true })
+  return res.json() as Promise<{ update: GoalUpdateItem; goal: GoalView; snapshot: GoalsSnapshot }>
+}
+
+export async function checkinGoal(
+  goalId: string,
+  opts: { botId?: string; note?: string } = {},
+): Promise<{ botId: string; threadId: string; snapshot: GoalsSnapshot }> {
+  const res = await send('POST', `/api/goals/${encodeURIComponent(goalId)}/checkin`, opts, { strict: true })
+  return res.json() as Promise<{ botId: string; threadId: string; snapshot: GoalsSnapshot }>
+}
+
+export async function setRoutineGoal(id: number, goalId: string | null): Promise<void> {
+  await send('PATCH', `/api/routines/${id}`, { goalId }, { strict: true })
+}
+
+/** 声明式空间快照；老网关没有这个路由就返回 null */
+export async function fetchSpaces(): Promise<SpacesSnapshot | null> {
+  const res = await request('/api/spaces')
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json() as Promise<SpacesSnapshot>
+}
+
+export async function createSpace(input: CreateSpaceInput): Promise<{ space: SpaceView; snapshot: SpacesSnapshot }> {
+  const res = await send('POST', '/api/spaces', input, { strict: true })
+  return res.json() as Promise<{ space: SpaceView; snapshot: SpacesSnapshot }>
+}
+
+export async function updateSpace(id: string, patch: UpdateSpacePatch): Promise<{ space: SpaceView; snapshot: SpacesSnapshot }> {
+  const res = await send('PATCH', `/api/spaces/${encodeURIComponent(id)}`, patch, { strict: true })
+  return res.json() as Promise<{ space: SpaceView; snapshot: SpacesSnapshot }>
+}
+
+export async function deleteSpace(id: string): Promise<{ snapshot: SpacesSnapshot }> {
+  const res = await send('DELETE', `/api/spaces/${encodeURIComponent(id)}`, undefined, { strict: true })
+  return res.json() as Promise<{ snapshot: SpacesSnapshot }>
+}
+
+export async function setSpaceGrants(id: string, grants: SpaceGrant[]): Promise<{ space: SpaceView; snapshot: SpacesSnapshot }> {
+  const res = await send('PUT', `/api/spaces/${encodeURIComponent(id)}/grants`, { grants }, { strict: true })
+  return res.json() as Promise<{ space: SpaceView; snapshot: SpacesSnapshot }>
+}
+
+export async function setBotSpaceRole(botId: string, spaceId: string, role: SpaceRole | null): Promise<{ snapshot: SpacesSnapshot }> {
+  const res = await send('PUT', `/api/bots/${encodeURIComponent(botId)}/spaces/${encodeURIComponent(spaceId)}`, { role }, { strict: true })
+  return res.json() as Promise<{ snapshot: SpacesSnapshot }>
+}
+
+export async function createSpaceItem(
+  spaceId: string,
+  input: { blockId: string; title: string; status?: string; data?: SpaceItemData },
+): Promise<{ item: SpaceItem; space: SpaceView; snapshot: SpacesSnapshot }> {
+  const res = await send('POST', `/api/spaces/${encodeURIComponent(spaceId)}/items`, input, { strict: true })
+  return res.json() as Promise<{ item: SpaceItem; space: SpaceView; snapshot: SpacesSnapshot }>
+}
+
+export async function updateSpaceItem(
+  spaceId: string,
+  itemId: string,
+  patch: { blockId?: string; title?: string; status?: string; data?: SpaceItemData; sortOrder?: number },
+): Promise<{ item: SpaceItem; space: SpaceView; snapshot: SpacesSnapshot }> {
+  const res = await send(
+    'PATCH',
+    `/api/spaces/${encodeURIComponent(spaceId)}/items/${encodeURIComponent(itemId)}`,
+    patch,
+    { strict: true },
+  )
+  return res.json() as Promise<{ item: SpaceItem; space: SpaceView; snapshot: SpacesSnapshot }>
+}
+
+export async function deleteSpaceItem(
+  spaceId: string,
+  itemId: string,
+): Promise<{ space: SpaceView; snapshot: SpacesSnapshot }> {
+  const res = await send(
+    'DELETE',
+    `/api/spaces/${encodeURIComponent(spaceId)}/items/${encodeURIComponent(itemId)}`,
+    undefined,
+    { strict: true },
+  )
+  return res.json() as Promise<{ space: SpaceView; snapshot: SpacesSnapshot }>
+}
+
+export async function triggerSpaceAction(
+  spaceId: string,
+  actionId: string,
+): Promise<{ botId: string; threadId: string }> {
+  const res = await send(
+    'POST',
+    `/api/spaces/${encodeURIComponent(spaceId)}/actions/${encodeURIComponent(actionId)}`,
+    {},
+    { strict: true },
+  )
+  return res.json() as Promise<{ botId: string; threadId: string }>
 }
 
 /** 首次启动要不要出向导；老网关没有这个路由（或出了错）就当不用，绝不因此挡住界面 */

@@ -457,16 +457,21 @@ export function ConnectorsDialog({
                   {apps.map((appItem) => {
                     const accounts = state.accounts.filter((a) => a.app === appItem.app)
                     const isConnecting = connectingApp === appItem.app
+                    const canUseApp = Boolean(appItem.native || state.key.set)
+                    const displayName = appItem.app === 'polery' ? t('connectors.app.polery') : appItem.name
                     return (
                       <div className="connector-card" key={appItem.app}>
                         <div className="connector-card-head">
-                          <span className="connector-app-name">{appItem.name}</span>
+                          <span className="connector-app-title">
+                            <span className="connector-app-name">{displayName}</span>
+                            {appItem.native ? <span className="connector-native-badge">{t('connectors.nativeBadge')}</span> : null}
+                          </span>
                           {!isConnecting ? (
                             <button
                               type="button"
                               className="connector-connect-btn"
-                              disabled={!state.key.set || busyId !== null}
-                              title={!state.key.set ? t('connectors.needKeyHint') : undefined}
+                              disabled={!canUseApp || busyId !== null}
+                              title={!canUseApp ? t('connectors.needKeyHint') : undefined}
                               onClick={() => openConnect(appItem.app)}
                             >
                               <PlusIcon size={12} />
@@ -476,13 +481,15 @@ export function ConnectorsDialog({
                         </div>
 
                         {accounts.length === 0 && !isConnecting ? (
-                          <div className="connector-empty">{t('connectors.emptyAccounts')}</div>
+                          <div className="connector-empty">
+                            {appItem.app === 'polery' ? t('connectors.poleryDesc') : t('connectors.emptyAccounts')}
+                          </div>
                         ) : null}
 
                         {accounts.length > 0 ? (
                           <div className="connector-accounts">
                             {accounts.map((acc) => {
-                              const label = acc.accountLabel || appItem.name
+                              const label = acc.accountLabel || displayName
                               const grantedBotIds = botOrder.filter((botId) => (state.botGrants[botId] ?? []).includes(acc.id))
                               const grantedNames = grantedBotIds.map((botId) => roster[botId]?.name ?? botId)
                               const isManaging = managingId === acc.id
@@ -537,7 +544,7 @@ export function ConnectorsDialog({
                                         <button
                                           type="button"
                                           className="primary"
-                                          disabled={!state.key.set || busyId !== null}
+                                          disabled={!canUseApp || busyId !== null}
                                           onClick={() => void doReconnect(acc)}
                                         >
                                           {t('connectors.reconnect')}
@@ -552,7 +559,7 @@ export function ConnectorsDialog({
                                       </button>
                                       <button
                                         type="button"
-                                        disabled={!state.key.set || busyId !== null}
+                                        disabled={!canUseApp || busyId !== null}
                                         onClick={() => void doRefresh(acc.id)}
                                       >
                                         {t('connectors.refresh')}
@@ -561,7 +568,7 @@ export function ConnectorsDialog({
                                         type="button"
                                         className="danger"
                                         disabled={busyId !== null}
-                                        onClick={() => setConfirmDisconnect({ account: acc, appName: appItem.name })}
+                                        onClick={() => setConfirmDisconnect({ account: acc, appName: displayName })}
                                       >
                                         {t('connectors.disconnect')}
                                       </button>
@@ -594,7 +601,7 @@ export function ConnectorsDialog({
                               <button
                                 type="button"
                                 className="primary"
-                                disabled={!state.key.set || busyId !== null}
+                                disabled={!canUseApp || busyId !== null}
                                 onClick={() => void doConnect(appItem.app)}
                               >
                                 {t('connectors.authorizeBrowser')}

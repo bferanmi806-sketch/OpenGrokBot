@@ -132,6 +132,7 @@ const gateway = createApp({
   uploadsMaxMb: config.uploadsMaxMb,
   settings: { env: process.env, startedWith: config },
   setup: { browser, dockerReachable: () => dockerReachable(docker, 1_500), dockerImageReady: () => botImageReady(docker) },
+  autoDistill: true,
 })
 const { app, hub } = gateway
 
@@ -145,6 +146,7 @@ schedulerBox.current = createScheduler({
   },
 })
 schedulerBox.current.load(listRoutines(db))
+gateway.startFeedTopics()
 
 // 动作日志和截图证据留 90 天：启动时清一次，之后每天清一次
 const ACTION_LOG_DAYS = 90

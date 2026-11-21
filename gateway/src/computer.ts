@@ -34,12 +34,22 @@ export interface BotComputer {
    */
   putFile?(path: string, bytes: Buffer): Promise<void>
   goto(url: string): Promise<{ url: string; title: string }>
+  /** 当前活动标签页的真实 URL（用于 Vault 域名白名单与 TOCTOU 校验） */
+  currentUrl(): Promise<string>
   /** 当前页可见文字（全文，分页由调用方做） */
   extract(maxChars?: number): Promise<string>
   /** 当前页上的链接：innerText 会把 href 丢掉，bot 需要知道能去哪 */
   links(): Promise<PageLink[]>
   click(target: string): Promise<{ clicked: string; url?: string; title?: string }>
   type(target: string, text: string, submit?: boolean): Promise<void>
+  /**
+   * 网关侧零明文代填：原子复核当前页 origin，且在 requirePasswordInput 时校验目标为密码输入框。
+   */
+  fillSecret(
+    target: string,
+    secretValue: string,
+    opts: { expectedOrigin: string; requirePasswordInput?: boolean; submit?: boolean },
+  ): Promise<{ origin: string }>
   press(key: string): Promise<void>
   scroll(direction: 'up' | 'down'): Promise<void>
   back(): Promise<{ url: string; title: string }>
@@ -64,6 +74,7 @@ export function createFakeComputer(
   const files = new Map<string, Buffer>()
   const pageText = overrides.pageText ?? 'Example Domain — this domain is for use in examples.'
   const pageLinks = overrides.pageLinks ?? []
+  let activeUrl = 'https://example.com/'
   const base: BotComputer = {
     kind: overrides.kind ?? 'docker',
     ...(overrides.startWorkflowRecording ? { startWorkflowRecording: overrides.startWorkflowRecording } : {}),
@@ -73,14 +84,19 @@ export function createFakeComputer(
     async readFile(path) { calls.push(`read:${path}`); return 'file contents' },
     async writeFile(path) { calls.push(`write:${path}`) },
     async putFile(path, bytes) { calls.push(`put:${path}`); files.set(path, bytes) },
-    async goto(url) { calls.push(`goto:${url}`); return { url, title: 'Example Domain' } },
+    async goto(url) { activeUrl = url; calls.push(`goto:${url}`); return { url, title: 'Example Domain' } },
+    async currentUrl() { return activeUrl },
     async extract(maxChars) { calls.push('extract'); return maxChars ? pageText.slice(0, maxChars) : pageText },
     async links() { return pageLinks },
     async click(target) { calls.push(`click:${target}`); return { clicked: target } },
     async type(target) { calls.push(`type:${target}`) },
+    async fillSecret(target, _secretValue, opts) {
+      calls.push(`fillSecret:${target}`)
+      return { origin: opts.expectedOrigin }
+    },
     async press(key) { calls.push(`press:${key}`) },
     async scroll(direction) { calls.push(`scroll:${direction}`) },
-    async back() { calls.push('back'); return { url: 'https://example.com/', title: 'Example Domain' } },
+    async back() { activeUrl = 'https://example.com/'; calls.push('back'); return { url: activeUrl, title: 'Example Domain' } },
     async screenshot() { calls.push('screenshot'); return { buffer: TINY_PNG, width: 1280, height: 800 } },
     async dispose() { calls.push('dispose') },
   }

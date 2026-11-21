@@ -38,6 +38,10 @@ export const CONNECTOR_READ_TOOL_NAMES: ReadonlySet<string> = new Set([
   'mail_list',
   'mail_read',
   'calendar_list',
+  'polery_list_documents',
+  'polery_search_documents',
+  'polery_read_document',
+  'polery_get_proposal',
   'notion_search',
   'notion_read_page',
   'slack_list_channels',
@@ -50,6 +54,8 @@ export const CONNECTOR_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
   'mail_archive',
   'calendar_create_event',
   'calendar_update_event',
+  'polery_create_document',
+  'polery_propose_edits',
   'notion_create_page',
   'notion_append',
   'slack_send_message',
@@ -130,6 +136,7 @@ export function buildConnectorTools(
   const byDomain = (domain: ConnectorDomain) => active.filter((a) => catalogByApp(a.app)?.domain === domain)
   const mailAccounts = byDomain('mail')
   const calendarAccounts = byDomain('calendar')
+  const poleryAccounts = byDomain('polery')
   const notionAccounts = byDomain('notion')
   const slackAccounts = byDomain('slack')
 
@@ -258,6 +265,73 @@ export function buildConnectorTools(
     )
   }
 
+  if (poleryAccounts.length) {
+    const acct = accountParam(poleryAccounts)
+    tools.push(
+      makeTool(
+        'polery_list_documents',
+        'List shared Polery cloud documents accessible through the connected Polery Docs account.',
+        acct,
+        {},
+      ),
+      makeTool(
+        'polery_search_documents',
+        'Search shared Polery Docs by plain text (document names and readable document bodies).',
+        acct,
+        {
+          query: { type: 'string', description: 'Plain text search query (1-200 characters).' },
+        },
+        ['query'],
+      ),
+      makeTool(
+        'polery_read_document',
+        'Read a shared Polery document page-by-page with [¶n] block addresses and its current rev.',
+        acct,
+        {
+          document_id: { type: 'string', description: 'Document UUID returned by polery_list_documents or polery_search_documents.' },
+          cursor: { type: 'number', description: 'Optional pagination cursor from the previous read.' },
+          max_chars: { type: 'number', description: 'Optional page size in characters (1000-80000).' },
+        },
+        ['document_id'],
+      ),
+      makeTool(
+        'polery_get_proposal',
+        'Check whether a Polery edit proposal is still pending or has been accepted/rejected by the user.',
+        acct,
+        {
+          proposal_id: { type: 'string', description: 'Proposal UUID returned by polery_propose_edits.' },
+        },
+        ['proposal_id'],
+      ),
+      makeTool(
+        'polery_create_document',
+        'Create a brand-new Polery online document from Markdown in the user\'s cloud workspace (held by the gateway for operator approval).',
+        acct,
+        {
+          title: { type: 'string', description: 'New document title shown in Polery.' },
+          markdown: { type: 'string', description: 'Document body in standard Markdown.' },
+        },
+        ['title', 'markdown'],
+      ),
+      makeTool(
+        'polery_propose_edits',
+        'Submit a reviewable [¶n] block-level edit proposal on a shared Polery online document (held by the gateway for operator approval).',
+        acct,
+        {
+          document_id: { type: 'string', description: 'Target Polery document UUID.' },
+          rev: { type: 'string', description: 'Exact rev returned by polery_read_document.' },
+          summary: { type: 'string', description: 'Short explanation of the proposed edits.' },
+          edits: {
+            type: 'array',
+            description: 'Array of block edit operations (replace/insert/delete referencing [¶n] addresses).',
+            items: { type: 'object' },
+          },
+        },
+        ['document_id', 'rev', 'summary', 'edits'],
+      ),
+    )
+  }
+
   if (notionAccounts.length) {
     const acct = accountParam(notionAccounts)
     tools.push(
@@ -347,6 +421,7 @@ export function buildConnectorTools(
 function domainOfTool(name: string): ConnectorDomain | null {
   if (name.startsWith('mail_')) return 'mail'
   if (name.startsWith('calendar_')) return 'calendar'
+  if (name.startsWith('polery_')) return 'polery'
   if (name.startsWith('notion_')) return 'notion'
   if (name.startsWith('slack_')) return 'slack'
   return null
@@ -804,6 +879,40 @@ async function prepareConnectorWrite(
       }
     }
 
+    case 'polery_create_document': {
+      const title = optString(args.title)
+      const markdown = typeof args.markdown === 'string' ? args.markdown : ''
+      if (!title || !markdown.trim()) {
+        return { ok: false, error: 'polery_create_document requires non-empty "title" and "markdown".' }
+      }
+      return {
+        ok: true,
+        action: `Create Polery document "${title}" in ${label}`,
+        detail: `${acctLine}\nTitle: ${title}\n\n${truncateText(markdown, MAX_DETAIL_BODY_CHARS)}`,
+        kind: 'post',
+        target: normalizeTarget(`polery/${label}`),
+        frozenArgs: { title, markdown },
+      }
+    }
+
+    case 'polery_propose_edits': {
+      const documentId = optString(args.document_id)
+      const rev = optString(args.rev)
+      const summary = optString(args.summary)
+      const edits = Array.isArray(args.edits) ? args.edits : []
+      if (!documentId || !rev || !summary || !edits.length) {
+        return { ok: false, error: 'polery_propose_edits requires "document_id", "rev", "summary", and non-empty "edits".' }
+      }
+      return {
+        ok: true,
+        action: `Propose ${edits.length} edit(s) on Polery doc ${documentId.slice(0, 8)} (${label})`,
+        detail: `${acctLine}\nDocument ID: ${documentId}\nBase rev: ${rev}\nSummary: ${summary}\nEdits: ${edits.length}`,
+        kind: 'post',
+        target: normalizeTarget(`polery/${documentId}`),
+        frozenArgs: { document_id: documentId, rev, summary, edits },
+      }
+    }
+
     case 'notion_create_page': {
       const parentPageId = optString(args.parentPageId)
       const title = optString(args.title)
@@ -987,6 +1096,22 @@ export async function runConnectorToolCall(
           ...(limit ? { limit } : {}),
         })
         return { text: formatReadJson(acc, res), ok: true, tainted: true }
+      }
+
+      case 'polery_list_documents':
+      case 'polery_search_documents':
+      case 'polery_read_document':
+      case 'polery_get_proposal': {
+        if (!driver.callPoleryTool) {
+          return { text: 'Polery Docs connector driver is not configured on this gateway.', ok: false }
+        }
+        const mcpName = name.slice('polery_'.length)
+        const forwardArgs: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(args)) {
+          if (k !== 'account' && v !== undefined) forwardArgs[k] = v
+        }
+        const res = await driver.callPoleryTool(acc, mcpName, forwardArgs)
+        return { text: truncateText(res.text, MAX_READ_OUTPUT_CHARS), ok: !res.isError, tainted: true }
       }
 
       case 'notion_search': {

@@ -5,6 +5,7 @@ export const CATALOG: readonly CatalogApp[] = [
   { app: 'outlook', name: 'Outlook', group: 'mail_calendar', domain: 'mail', toolkitSlug: 'outlook', authScheme: 'OAUTH2' },
   { app: 'google_calendar', name: 'Google Calendar', group: 'mail_calendar', domain: 'calendar', toolkitSlug: 'googlecalendar', authScheme: 'OAUTH2' },
   { app: 'outlook_calendar', name: 'Outlook Calendar', group: 'mail_calendar', domain: 'calendar', toolkitSlug: 'outlook', authScheme: 'OAUTH2' },
+  { app: 'polery', name: 'Polery Docs', group: 'productivity', domain: 'polery', toolkitSlug: 'polery', authScheme: 'OAUTH2', native: true },
   { app: 'notion', name: 'Notion', group: 'productivity', domain: 'notion', toolkitSlug: 'notion', authScheme: 'OAUTH2' },
   { app: 'slack', name: 'Slack', group: 'messaging', domain: 'slack', toolkitSlug: 'slack', authScheme: 'OAUTH2' },
 ]

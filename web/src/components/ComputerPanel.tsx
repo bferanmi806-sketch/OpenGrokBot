@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useT, type MessageKey, type T } from '../i18n'
 import { blockReasonText, describeSchedule, errorText, sandboxMissingText } from '../i18n/describe'
 import { ApiError } from '../api'
-import type { ActionEntry, ComputerInfo, ComputerRoutine, RoutineAction } from '../types'
+import type { ActionEntry, ComputerInfo, ComputerRoutine, RoutineAction, SpaceRole } from '../types'
 import { untilLabel } from './ApprovalChip'
 import { CdpScreen } from './CdpScreen'
 import { PauseIcon, PlayIcon, RotateCwIcon, XIcon } from './Icons'
@@ -41,6 +41,10 @@ type PanelActions = {
   onToggleConnector?: (connectorId: string, granted: boolean) => void | Promise<void>
   /** 开关某个已配置 MCP 服务对这位同事的访问授权 */
   onToggleMcpServer?: (serverId: string, granted: boolean) => void | Promise<void>
+  /** 开关某条凭证库记录对这位同事的访问授权 */
+  onToggleVaultItem?: (itemId: string, granted: boolean) => void | Promise<void>
+  /** 设置这位同事对某个声明式空间的访问角色（null = 无权限） */
+  onSetSpaceRole?: (spaceId: string, role: SpaceRole | null) => void | Promise<void>
 }
 
 /** webhook 地址带着密钥：给一个「复制」，不把它整串摊在面板上 */
@@ -153,7 +157,7 @@ export function ComputerPanel({ info, botName, onClose, ...actions }: {
   )
 }
 
-function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWindowDone, onShell, onToggleConnector, onToggleMcpServer }: {
+function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWindowDone, onShell, onToggleConnector, onToggleMcpServer, onToggleVaultItem, onSetSpaceRole }: {
   info: ComputerInfo
   botName: string
 } & PanelActions) {
@@ -163,10 +167,12 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
   const skills = info.skills ?? []
   const connectors = info.connectors ?? []
   const mcpServers = info.mcpServers ?? []
-  // 开关命令行、收回窗口、切连接器或 MCP 授权都要等网关响应：期间锁住控件，失败把原因写在旁边，不用 alert
-  const [busy, setBusy] = useState<'shell' | 'window' | `connector:${string}` | `mcp:${string}` | null>(null)
+  const vaultItems = info.vaultItems ?? []
+  const spaces = info.spaces ?? []
+  // 开关命令行、收回窗口、切连接器、MCP、凭证库或空间授权都要等网关响应：期间锁住控件，失败把原因写在旁边，不用 alert
+  const [busy, setBusy] = useState<'shell' | 'window' | `connector:${string}` | `mcp:${string}` | `vault:${string}` | `space:${string}` | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
-  const act = async (what: 'shell' | 'window' | `connector:${string}` | `mcp:${string}`, run: () => void | Promise<void>) => {
+  const act = async (what: 'shell' | 'window' | `connector:${string}` | `mcp:${string}` | `vault:${string}` | `space:${string}`, run: () => void | Promise<void>) => {
     setBusy(what)
     setProblem(null)
     try {
@@ -302,6 +308,72 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
                 </label>
               )
             })}
+          </div>
+        </div>
+      ) : null}
+
+      {vaultItems.length > 0 ? (
+        <div className="panel-section">
+          <div className="panel-section-title">{t('panel.vaultItems')}</div>
+          <div className="panel-connectors-hint">{t('panel.vaultItemsHint')}</div>
+          <div className="panel-connectors-list">
+            {vaultItems.map((v) => (
+              <label className="panel-connector" key={v.id}>
+                <input
+                  type="checkbox"
+                  checked={v.granted}
+                  disabled={!onToggleVaultItem || busy !== null}
+                  aria-label={v.name}
+                  onChange={(e) => {
+                    const next = e.target.checked
+                    void act(`vault:${v.id}`, () => onToggleVaultItem?.(v.id, next))
+                  }}
+                />
+                <span className="panel-connector-body">
+                  <span className="panel-connector-label">{v.name}</span>
+                  <span className="panel-connector-meta">
+                    <span>{t(`vault.kind.${v.kind}` as MessageKey)}</span>
+                    {v.allowedDomains.length ? (
+                      <>
+                        <span aria-hidden="true"> · </span>
+                        <span>{v.allowedDomains.join(', ')}</span>
+                      </>
+                    ) : null}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {spaces.length > 0 ? (
+        <div className="panel-section">
+          <div className="panel-section-title">{t('panel.spaces')}</div>
+          <div className="panel-connectors-hint">{t('panel.spacesHint')}</div>
+          <div className="panel-connectors-list">
+            {spaces.map((sp) => (
+              <div className="panel-space-row" key={sp.id}>
+                <span className="panel-space-label">
+                  <span>{sp.icon}</span>
+                  <span>{sp.title}</span>
+                </span>
+                <select
+                  className="panel-space-select"
+                  aria-label={sp.title}
+                  value={sp.role ?? ''}
+                  disabled={!onSetSpaceRole || busy !== null}
+                  onChange={(e) => {
+                    const next = e.target.value ? (e.target.value as SpaceRole) : null
+                    void act(`space:${sp.id}`, () => onSetSpaceRole?.(sp.id, next))
+                  }}
+                >
+                  <option value="">{t('spaces.role.none')}</option>
+                  <option value="viewer">{t('spaces.role.viewer')}</option>
+                  <option value="editor">{t('spaces.role.editor')}</option>
+                </select>
+              </div>
+            ))}
           </div>
         </div>
       ) : null}
