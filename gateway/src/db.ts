@@ -17,6 +17,8 @@ export type MessageKind =
   | 'question'
   | 'webhook'
   | 'attachment'
+  | 'quiet_digest'
+  | 'rule_proposal'
 
 export type BotRow = {
   id: string
@@ -366,6 +368,48 @@ const MIGRATIONS: Migration[] = [
         search_text,
         tokenize='unicode61 remove_diacritics 2'
       );
+    `)
+  },
+  // v15：免打扰晨报缓冲表、受控学习规矩提议表，以及按驳回模式统计审批的索引
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS quiet_digest_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        routine_id INTEGER,
+        routine_name TEXT NOT NULL DEFAULT '',
+        routine_mode TEXT NOT NULL DEFAULT 'watch',
+        kind TEXT NOT NULL DEFAULT 'text',
+        summary TEXT NOT NULL DEFAULT '',
+        payload_json TEXT,
+        created_at INTEGER NOT NULL,
+        delivered_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_quiet_digest_pending
+        ON quiet_digest_items(delivered_at, bot_id, id);
+
+      CREATE TABLE IF NOT EXISTS rule_proposals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        rule TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'agent',
+        dedupe_key TEXT NOT NULL DEFAULT '',
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        message_id INTEGER,
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_rule_proposals_bot_status
+        ON rule_proposals(bot_id, status, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_rule_proposals_dedupe
+        ON rule_proposals(bot_id, dedupe_key, status);
+
+      CREATE INDEX IF NOT EXISTS idx_approvals_discard_lookup
+        ON approvals(bot_id, status, kind, target, resolved_at DESC);
     `)
   },
 ]

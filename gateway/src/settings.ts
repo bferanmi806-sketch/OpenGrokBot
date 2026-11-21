@@ -25,6 +25,9 @@ export type Settings = {
   computers: ComputerChoice
   browserMirror: string
   checkUpdates: boolean
+  quietHoursEnabled: boolean
+  quietHoursStart: string
+  quietHoursEnd: string
 }
 export type SettingKey = keyof Settings
 export type SettingSource = 'env' | 'saved' | 'default'
@@ -40,6 +43,9 @@ export const SETTING_DEFAULTS: Settings = {
   computers: 'auto',
   browserMirror: '',
   checkUpdates: true,
+  quietHoursEnabled: false,
+  quietHoursStart: '22:00',
+  quietHoursEnd: '08:00',
 }
 
 /** 能锁住某项设置的环境变量；没列的项只能在界面上改 */
@@ -62,6 +68,12 @@ const httpUrl = (v: unknown): v is string => {
   }
 }
 const CONTROL = /[\u0000-\u001f\u007f]/
+const HH_MM = /^([01]\d|2[0-3]):[0-5]\d$/
+const hhMm = (v: unknown): string | undefined => {
+  if (typeof v !== 'string') return undefined
+  const trimmed = v.trim()
+  return HH_MM.test(trimmed) ? trimmed : undefined
+}
 
 /** 合法就返回规范化后的值，不合法返回 undefined */
 const PARSE: { [K in SettingKey]: (v: unknown) => Settings[K] | undefined } = {
@@ -78,6 +90,9 @@ const PARSE: { [K in SettingKey]: (v: unknown) => Settings[K] | undefined } = {
   computers: (v) => v === 'auto' || v === 'docker' || v === 'local' ? v : undefined,
   browserMirror: (v) => v === '' || httpUrl(v) ? (v as string).replace(/\/+$/, '') : undefined,
   checkUpdates: (v) => typeof v === 'boolean' ? v : undefined,
+  quietHoursEnabled: (v) => typeof v === 'boolean' ? v : undefined,
+  quietHoursStart: hhMm,
+  quietHoursEnd: hhMm,
 }
 const isKey = (k: string): k is SettingKey => Object.hasOwn(PARSE, k)
 
