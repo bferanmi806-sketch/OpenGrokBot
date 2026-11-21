@@ -366,6 +366,7 @@ export async function runTurn(
         brief?.shown()
       }
       if (turn.usage) deps.onUsage?.(turn.usage)
+      if (signal?.aborted) return stopped(notify, isBackgroundTask)
       if (turn.toolCalls.length > 0) {
         messages.push(turn.raw)
         let latestImage: string | undefined
@@ -457,6 +458,7 @@ async function closeOut(
     })
     const turn = await deps.llm.chat(messages, tools, { signal: deps.signal, toolChoice: 'none', priority })
     if (turn.usage) deps.onUsage?.(turn.usage)
+    if (deps.signal?.aborted) return stopped(notify, deps.isBackgroundTask)
     const text = turn.content?.trim()
     notify({ notice: 'paused', params: limit, ...(text ? { lead: text } : {}) })
   } catch {
