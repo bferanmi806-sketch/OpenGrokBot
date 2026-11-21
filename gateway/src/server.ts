@@ -190,7 +190,7 @@ export type AppDeps = {
   db: Db
   llm: LLM
   /** 每位同事各用各的模型：传了就按同事拿模型客户端和「看不看图」，没传就都用 llm / vision */
-  llmFor?: (botId: string) => { llm: LLM; vision: boolean }
+  llmFor?: (botId: string) => { llm: LLM; vision: boolean; model?: string }
   /** 本地模型优先级信号量队列：用于设置改动后唤醒等待项及 /api/llm-queue 快照 */
   llmQueue?: LlmQueue
   pool?: Pool
@@ -214,6 +214,8 @@ export type AppDeps = {
   maxSteps?: number
   /** 一个回合最长几分钟；0 = 不限，不传用 agent 的默认值 */
   turnMinutes?: number
+  /** 模型上下文窗口上限（token）；0 或不传 = 按模型名自动推断 */
+  contextWindow?: number
   /** 设置页的路由（读写设置、测试连接）；不传就不挂 */
   settings?: SettingsDeps
   /** 首次启动向导要的（浏览器、Docker 情况）；和 settings 一起传才挂 /api/setup */
@@ -1435,6 +1437,8 @@ export function createApp(deps: AppDeps): GatewayApp {
       ...(deps.timeZone ? { timeZone: deps.timeZone } : {}),
       ...(deps.maxSteps ? { maxSteps: deps.maxSteps } : {}),
       ...(deps.turnMinutes !== undefined ? { turnTimeoutMs: deps.turnMinutes * 60_000 } : {}),
+      ...(own?.model ? { modelName: own.model } : {}),
+      ...(deps.contextWindow ? { contextWindow: deps.contextWindow } : {}),
       ...(effectiveGroup ? { group: effectiveGroup } : {}),
       onUsage: (usage) => recordUsage(db, { botId: bot.id, threadId, usage, at: now().getTime() }),
       onAction: (a) => recordAction(db, {

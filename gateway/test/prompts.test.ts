@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildSystemPrompt, timeNote, withTimeNote } from '../src/prompts.js'
+import { buildSystemPrompt, timeNote, withStableTimeNotes, withTimeNote } from '../src/prompts.js'
 
 const bot = { id: 'researcher', name: 'Scout', role: 'research briefs', emoji: '🔎', soul_path: '' }
 
@@ -104,5 +104,40 @@ describe('time awareness', () => {
     expect(out[3]!.content).toBe('latest\n\n(Current time: X)')
     expect(out[1]!.content).toBe('earlier')
     expect(history[3]!.content).toBe('latest')
+  })
+
+  it('keeps prior user messages byte-identical across turns and throttles notes within 10 minutes', () => {
+    const t1 = Date.parse('2026-09-27T14:40:00Z')
+    const t2 = Date.parse('2026-09-27T14:45:00Z') // +5 min: throttled
+    const t3 = Date.parse('2026-09-27T14:55:00Z') // +15 min from t1: new stamp
+
+    const turn1 = withStableTimeNotes([
+      { msg: { role: 'system' as const, content: 'sys' } },
+      { msg: { role: 'user' as const, content: 'first' }, at: t1 },
+    ], 'Asia/Shanghai')
+
+    const turn2 = withStableTimeNotes([
+      { msg: { role: 'system' as const, content: 'sys' } },
+      { msg: { role: 'user' as const, content: 'first' }, at: t1 },
+      { msg: { role: 'assistant' as const, content: 'ok' } },
+      { msg: { role: 'user' as const, content: 'second' }, at: t2 },
+    ], 'Asia/Shanghai')
+
+    const turn3 = withStableTimeNotes([
+      { msg: { role: 'system' as const, content: 'sys' } },
+      { msg: { role: 'user' as const, content: 'first' }, at: t1 },
+      { msg: { role: 'assistant' as const, content: 'ok' } },
+      { msg: { role: 'user' as const, content: 'second' }, at: t2 },
+      { msg: { role: 'assistant' as const, content: 'done' } },
+      { msg: { role: 'user' as const, content: 'third' }, at: t3 },
+    ], 'Asia/Shanghai')
+
+    // Prefix stays byte-identical across turns
+    expect(turn1[1]!.content).toContain('Sunday 2026-09-27 22:40')
+    expect(turn2[1]!.content).toBe(turn1[1]!.content)
+    expect(turn2[3]!.content).toBe('second')
+    expect(turn3[1]!.content).toBe(turn1[1]!.content)
+    expect(turn3[3]!.content).toBe('second')
+    expect(turn3[5]!.content).toContain('Sunday 2026-09-27 22:55')
   })
 })

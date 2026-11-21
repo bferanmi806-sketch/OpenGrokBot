@@ -279,3 +279,61 @@ describe('per-turn limits', () => {
     expect(listMessages(db, threadId).at(-1)!.content).toBe('Done.')
   })
 })
+
+describe('KV cache stability, loop guard, and context overflow recovery', () => {
+  it('keeps prior turn user message byte-identical on the next turn so prefix cache survives', async () => {
+    const { db, threadId, events } = setup()
+    const t1 = Date.parse('2026-09-27T14:40:00Z')
+    const t2 = Date.parse('2026-09-27T14:45:00Z') // +5 min
+    const { llm: llm1, calls: calls1 } = scriptedLLM([textTurn('First answer.')])
+    await runTurn({ db, llm: llm1, bot, soul: '', threadId, now: () => new Date(t1), timeZone: 'Asia/Shanghai' }, 'first q', events)
+
+    const { llm: llm2, calls: calls2 } = scriptedLLM([textTurn('Second answer.')])
+    await runTurn({ db, llm: llm2, bot, soul: '', threadId, now: () => new Date(t2), timeZone: 'Asia/Shanghai' }, 'second q', events)
+
+    // System prompt and first user message (with its original time note) stay byte-identical
+    expect(calls2[0]!.messages[0]).toEqual(calls1[0]!.messages[0])
+    expect(calls2[0]!.messages[1]).toEqual(calls1[0]!.messages[1])
+    expect(calls2[0]!.messages[3]!.content).toBe('second q')
+  })
+
+  it('injects a repeat-tool reminder after 3 identical consecutive tool calls', async () => {
+    const { db, threadId, events } = setup()
+    const { llm, calls } = scriptedLLM([
+      toolTurn('shell', { cmd: 'ls' }, 'c1'),
+      toolTurn('shell', { cmd: 'ls' }, 'c2'),
+      toolTurn('shell', { cmd: 'ls' }, 'c3'),
+      textTurn('Stopped repeating.'),
+    ])
+    await runTurn({ db, llm, bot, soul: '', threadId, getComputer: async () => createFakeComputer() }, 'go', events)
+    expect(calls).toHaveLength(4)
+    const afterThird = calls[3]!.messages.at(-1)!
+    expect(afterThird.role).toBe('user')
+    expect(afterThird.content).toContain('repeating the exact same tool call')
+  })
+
+  it('recovers from context-window overflow by pruning older tool outputs and retrying in place', async () => {
+    const { db, threadId, events } = setup()
+    const huge = `HEAD\n${'a'.repeat(3_500)}\nTAIL`
+    const comp = createFakeComputer({ shell: async () => ({ stdout: huge, stderr: '', exitCode: 0 }) })
+    const seen: { messages: ChatMsg[]; opts?: { prefixModified?: boolean } }[] = []
+    let attempt = 0
+    const llm: LLM = {
+      async chat(messages, _tools, opts) {
+        seen.push({ messages: messages.map((m) => ({ ...m })), opts })
+        attempt++
+        if (attempt === 1) return toolTurn('shell', { cmd: 'step 1' }, 'c1')
+        if (attempt === 2) return toolTurn('shell', { cmd: 'step 2' }, 'c2')
+        if (attempt === 3) throw new Error('LLM API 400: maximum context length exceeded')
+        return textTurn('Recovered after pruning.')
+      },
+    }
+    const outcome = await runTurn({ db, llm, bot, soul: '', threadId, getComputer: async () => comp }, 'go', events)
+    expect(outcome).toBe('replied')
+    expect(seen).toHaveLength(4)
+    expect(seen[3]!.opts?.prefixModified).toBe(true)
+    const firstToolAfterPrune = seen[3]!.messages.find((m) => m.role === 'tool' && m.tool_call_id === 'c1')!
+    expect(firstToolAfterPrune.content).toContain('earlier tool output pruned')
+    expect(listMessages(db, threadId).at(-1)!.content).toBe('Recovered after pruning.')
+  })
+})

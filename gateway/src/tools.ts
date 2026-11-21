@@ -343,6 +343,27 @@ const WORKFLOW_TOOLS: ToolDef[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'search_history',
+      description:
+        'Search earlier messages in your own conversation history (useful for recalling details from before a checkpoint or from group threads you belong to). Read-only and cursor-free: if results are truncated, narrow your query.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Keywords or phrase to look for (Chinese or English).' },
+          scope: {
+            type: 'string',
+            enum: ['current', 'all'],
+            description: '"current" searches only this thread (default); "all" searches your DM and group threads you belong to.',
+          },
+          limit: { type: 'number', description: 'Maximum matches to return (1–20, default 8).' },
+        },
+        required: ['query'],
+      },
+    },
+  },
 ]
 
 const SKILL_TOOL: ToolDef = {
@@ -440,7 +461,7 @@ export const CREATE_DISPATCH_PLAN_TOOL: ToolDef = {
  * 能改东西的（shell、写文件、点击、输入、按键）、能把话传出去的（转交）、能直接改规矩的都不给。
  */
 export const WATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'message_user', PUBLISH_FEED_TOOL_NAME, SPACE_READ_TOOL_NAME, 'hold_for_approval', 'ask_operator', 'propose_memory_rule', 'read_skill', 'read_file',
+  'message_user', PUBLISH_FEED_TOOL_NAME, SPACE_READ_TOOL_NAME, 'hold_for_approval', 'ask_operator', 'propose_memory_rule', 'read_skill', 'read_file', 'search_history',
   WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME,
   'browser_goto', 'browser_extract', 'browser_scroll', 'browser_back', 'browser_screenshot', 'ask_for_login',
   ...CONNECTOR_READ_TOOL_NAMES,

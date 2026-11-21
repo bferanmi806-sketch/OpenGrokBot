@@ -58,6 +58,8 @@ export type Config = {
   uploadsMaxMb: number
   /** 本地模型同一地址同时跑几个请求；0 = 不限，默认 1 */
   localLlmConcurrency: number
+  /** 模型上下文窗口上限（token）；0 = 按模型名自动推断 */
+  contextWindow: number
 }
 
 function num(value: string | undefined, fallback: number): number {
@@ -139,5 +141,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     turnMinutes: num(env.OPENSUPERBOT_TURN_MINUTES, 20),
     uploadsMaxMb: num(env.OPENSUPERBOT_UPLOADS_MAX_MB, 2048),
     localLlmConcurrency: parseLocalLlmConcurrencyEnv(env.OPENSUPERBOT_LOCAL_LLM_CONCURRENCY, DEFAULT_LOCAL_LLM_CONCURRENCY),
+    contextWindow: num(env.OPENSUPERBOT_CONTEXT_WINDOW, 0),
   }
 }

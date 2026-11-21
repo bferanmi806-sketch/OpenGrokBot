@@ -357,7 +357,7 @@ describe('removing an upload', () => {
     expect(events).toContainEqual({ type: 'message', threadId: DM, message: row })
     await ctx.send(DM, { text: 'still there?' })
     await ctx.idle()
-    expect(ctx.userLines(ctx.sent[1]!)[1]!.content).toBe('[file from your operator] notes.md. Your operator has removed it.')
+    expect(ctx.userLines(ctx.sent[1]!)[1]!.content!.split('\n')[0]).toBe('[file from your operator] notes.md. Your operator has removed it.')
   })
 })
 

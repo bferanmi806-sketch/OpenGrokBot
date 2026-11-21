@@ -34,10 +34,14 @@ export type ChatOptions = {
   toolChoice?: 'none'
   /** 本地模型排队优先级（云端接口忽略） */
   priority?: LlmPriority
+  /** 本回合内历史前缀被改写过（例如 L2 旧工具结果剪枝）：提示 Claude 适配器启用 drop_block 防止思考块签名 400 */
+  prefixModified?: boolean
 }
 
 export interface LLM {
   chat(messages: ChatMsg[], tools: ToolDef[], opts?: ChatOptions): Promise<AssistantTurn>
+  /** 离线脚本化假模型标记（避免触发自动摘要压缩） */
+  readonly isStub?: true
 }
 
 /** 造一个模型客户端要的全部：一个连接（地址、key、模型、接口）加上超时和重试 */
@@ -145,9 +149,44 @@ export async function postJson<T>(
 
 export const EARLIER_SCREENSHOT = '[an earlier screenshot, no longer shown]'
 
+/** OpenAI 兼容口与 Responses 接口的批量收图参数：最多保留 6 张，超出时一次把最老的 4 张换成占位，每 4 次截图才变动一次前缀以保护 KV Cache。 */
+export const MAX_KEPT_SCREENSHOTS = 6
+export const EVICT_SCREENSHOT_BATCH = 4
+
+export function screenshotsToEvict(
+  total: number,
+  maxKept = MAX_KEPT_SCREENSHOTS,
+  batch = EVICT_SCREENSHOT_BATCH,
+): number {
+  if (total <= maxKept) return 0
+  const keepAfter = Math.max(1, maxKept - batch + 1)
+  return batch * Math.floor((total - keepAfter) / batch)
+}
+
+/**
+ * 批量淘汰旧截图（保留操作者发来的 keepImages 附件图）：
+ * - 1–6 张：全部保留，前缀逐字节不变；
+ * - 第 7–10 张：批量替换最老的 4 张（留 3–6 张），连续 4 步复用热缓存。
+ * 发请求时现换、不改 messages 本身。
+ */
+export function evictOldScreenshots(
+  messages: ChatMsg[],
+  opts: { maxKept?: number; batch?: number } = {},
+): ChatMsg[] {
+  const total = messages.filter((m) => m.images?.length && !m.keepImages).length
+  let toHide = screenshotsToEvict(total, opts.maxKept, opts.batch)
+  if (toHide === 0) return messages
+  return messages.map((m) => {
+    if (!m.images?.length || m.keepImages || toHide <= 0) return m
+    toHide--
+    const { images: _images, ...rest } = m
+    return { ...rest, content: EARLIER_SCREENSHOT }
+  })
+}
+
 /**
  * 只给模型看最新一张截图，更早的换成一句占位，免得每一步都重复付图片的 token。
- * 发请求时现换、不改 messages 本身：Claude 要求历史一字不改（改了它就不认前面的思考块），所以 Claude 那边不调这个。
+ * 保留导出以兼容旧调用方；主路径已升级为缓存友好的 evictOldScreenshots。
  */
 export function latestImageOnly(messages: ChatMsg[]): ChatMsg[] {
   let last = -1
@@ -186,7 +225,7 @@ function createChatLLM(target: LlmTarget, fetchImpl: typeof fetch, sleep: Sleep)
       const body = JSON.stringify({
         ...target.extraBody,
         model: target.model,
-        messages: latestImageOnly(messages).map(toWire),
+        messages: evictOldScreenshots(messages).map(toWire),
         ...(tools.length ? { tools } : {}),
         ...(tools.length && opts.toolChoice ? { tool_choice: opts.toolChoice } : {}),
       })
@@ -335,6 +374,7 @@ function findUrl(messages: ChatMsg[]): string | null {
  */
 function createStubLLM(): LLM {
   return {
+    isStub: true,
     async chat(messages) {
       const last = messages[messages.length - 1]
       if (last?.role === 'tool') {

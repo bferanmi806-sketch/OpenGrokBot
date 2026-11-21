@@ -1,5 +1,5 @@
 import {
-  latestImageOnly, postJson, safeParseJson, type AssistantTurn, type ChatMsg, type LLM, type LlmTarget, type Sleep, type ToolCall, type ToolDef,
+  evictOldScreenshots, postJson, safeParseJson, type AssistantTurn, type ChatMsg, type LLM, type LlmTarget, type Sleep, type ToolCall, type ToolDef,
 } from './llm.js'
 
 /**
@@ -37,7 +37,7 @@ function userContent(m: ChatMsg): string | WireItem[] {
 export function toResponses(messages: ChatMsg[]): { instructions: string; input: WireItem[] } {
   const instructions = messages.filter((m) => m.role === 'system').map((m) => m.content ?? '').join('\n\n')
   const input: WireItem[] = []
-  for (const m of latestImageOnly(messages)) {
+  for (const m of evictOldScreenshots(messages)) {
     if (m.role === 'system') continue
     if (m.role === 'tool') {
       input.push({ type: 'function_call_output', call_id: m.tool_call_id ?? '', output: m.content ?? '' })

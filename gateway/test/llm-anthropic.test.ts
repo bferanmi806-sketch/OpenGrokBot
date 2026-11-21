@@ -215,6 +215,13 @@ describe('Claude: long browsing turns', () => {
     expect(sent[0]!.headers.get('anthropic-beta')).toContain('thinking-binding-controls-2026-08-01')
   })
 
+  it('also enables drop_block when mid-turn tool-result pruning modified the prefix', async () => {
+    const { sent, fetchImpl } = fakeAnthropic([message([{ type: 'text', text: 'ok' }])])
+    await createLLM(target(), fetchImpl).chat([{ role: 'user', content: 'go' }], [], { prefixModified: true })
+    expect(sent[0]!.body.thinking).toEqual({ type: 'adaptive', block_binding: { prefix_mismatch_behavior: 'drop_block' } })
+    expect(sent[0]!.headers.get('anthropic-beta')).toContain('thinking-binding-controls-2026-08-01')
+  })
+
   it('does not treat a reply cut off at the output limit as a finished step', async () => {
     const { fetchImpl } = fakeAnthropic([message([
       { type: 'thinking', thinking: '', signature: 's' },

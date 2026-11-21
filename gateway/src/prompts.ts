@@ -398,3 +398,46 @@ export function withTimeNote<T extends { role: string; content: string | null }>
   if (at === -1) return messages
   return messages.map((m, i) => (i === at ? { ...m, content: `${m.content}\n\n${note}` } : m))
 }
+
+/** 两次时间注记之间的最小间隔（10 分钟）：短间隔内不重复注记，既省 token 又保持前缀稳定。 */
+export const TIME_NOTE_INTERVAL_MS = 10 * 60_000
+
+export type TimedMessage<T extends { role: string; content: string | null }> = {
+  msg: T
+  /** 这条消息对应的不可变时间戳（毫秒）；持久化消息取 created_at，非落库 seed 取当前回合时间。 */
+  at?: number
+}
+
+/**
+ * 缓存友好的时间注记：按每条 user 消息自身的不可变时间戳（created_at）确定性贴注记，并按 10 分钟节流。
+ * 这样上一回合发给模型的 U1 + T(U1.created_at) 在下一回合回放时逐字节不变，不再每轮打穿 KV Cache。
+ */
+export function withStableTimeNotes<T extends { role: string; content: string | null }>(
+  entries: TimedMessage<T>[],
+  timeZone: string,
+  intervalMs = TIME_NOTE_INTERVAL_MS,
+): T[] {
+  const out = entries.map((e) => e.msg)
+  let lastStampedAt: number | null = null
+  let i = 0
+  while (i < entries.length) {
+    if (entries[i]!.msg.role !== 'user') { i++; continue }
+    let j = i
+    let lastTimed = -1
+    while (j < entries.length && entries[j]!.msg.role === 'user') {
+      const e = entries[j]!
+      if (typeof e.msg.content === 'string' && e.at !== undefined) lastTimed = j
+      j++
+    }
+    if (lastTimed !== -1) {
+      const target = entries[lastTimed]!
+      const at = target.at!
+      if (lastStampedAt === null || at - lastStampedAt >= intervalMs) {
+        lastStampedAt = at
+        out[lastTimed] = { ...target.msg, content: `${target.msg.content}\n\n${timeNote(new Date(at), timeZone)}` }
+      }
+    }
+    i = j
+  }
+  return out
+}

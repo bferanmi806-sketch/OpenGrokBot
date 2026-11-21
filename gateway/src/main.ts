@@ -19,6 +19,7 @@ import { createPool, reapIdleComputers } from './pool.js'
 import { listRoutines } from './routines.js'
 import { createScreenViewers, mountScreenProxy, screenRelay, screencastRelay } from './screen.js'
 import { pruneScreenshots } from './screenshots.js'
+import { pruneSpills } from './spill.js'
 import { killActiveSandboxes, probeSandbox, sandboxSelfCheck } from './sandbox.js'
 import { createScheduler, type Scheduler } from './scheduler.js'
 import { seedGroup, seedTeammates } from './seed.js'
@@ -59,7 +60,7 @@ const llm = llmQueue.wrap(createLiveLLM(live), () => live().baseURL, { model: ()
 // 每位同事各用各的模型连接：回合开始时按它此刻的选择现造一个客户端（改了设置下一回合就用上）
 const llmFor = (botId: string) => {
   const own = botConfig(startup, process.env, db, botId)
-  return { llm: llmQueue.wrap(createLLM(own), own.baseURL, { model: own.model }), vision: own.vision }
+  return { llm: llmQueue.wrap(createLLM(own), own.baseURL, { model: own.model }), vision: own.vision, model: own.model }
 }
 // 同事的电脑是什么做的：有 Docker 用容器，没有就用本机模式（宿主上的浏览器 + 一个文件夹）
 const docker = new Docker()
@@ -131,6 +132,7 @@ const gateway = createApp({
   timeZone: config.timeZone,
   maxSteps: config.maxSteps,
   turnMinutes: config.turnMinutes,
+  contextWindow: config.contextWindow,
   uploadsMaxMb: config.uploadsMaxMb,
   settings: { env: process.env, startedWith: config },
   setup: { browser, dockerReachable: () => dockerReachable(docker, 1_500), dockerImageReady: () => botImageReady(docker) },
@@ -172,6 +174,10 @@ const pruneOldActions = () => {
   if (removed) console.log(`[gateway] dropped ${removed} action-log entries older than ${ACTION_LOG_DAYS} days`)
   void pruneScreenshots(config.dataDir, cutoff).then((shots) => {
     if (shots) console.log(`[gateway] dropped ${shots} screenshots older than ${ACTION_LOG_DAYS} days`)
+  }).catch(() => {})
+  const spillCutoff = Date.now() - 7 * 24 * 60 * 60_000
+  void pruneSpills(config.dataDir, spillCutoff).then((spills) => {
+    if (spills) console.log(`[gateway] dropped ${spills} spill files older than 7 days`)
   }).catch(() => {})
 }
 pruneOldActions()

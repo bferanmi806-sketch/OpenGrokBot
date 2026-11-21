@@ -237,8 +237,8 @@ export function createAnthropicLLM(target: LlmTarget, fetchImpl: typeof fetch): 
       // key 有问题就在回合里报出来（同事的对话里看得见），不在造客户端时炸
       client ??= anthropicClient(target, fetchImpl)
       const { system, messages: wire, hidden } = toAnthropic(messages)
-      // 收过旧截图：在官方 API 上声明丢掉对不上的思考块，免得整个请求 400（第三方兼容口不认这个字段）
-      const dropBlocks = hidden > 0 && official && ADAPTIVE_MODELS.has(target.model)
+      // 收过旧截图或本回合剪枝过旧工具输出：在官方 API 上声明丢掉对不上的思考块，免得整个请求 400（第三方兼容口不认这个字段）
+      const dropBlocks = (hidden > 0 || opts.prefixModified === true) && official && ADAPTIVE_MODELS.has(target.model)
       const betas = [...(fallback ? [FALLBACK_BETA] : []), ...(dropBlocks ? [BINDING_BETA] : [])]
       const params: MessageCreateParamsNonStreaming = {
         ...(target.extraBody as Partial<MessageCreateParamsNonStreaming>),

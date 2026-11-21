@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, rmSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import Database from 'better-sqlite3'
+import { extractSearchableText, syncMessageFts } from './history-search.js'
 
 export type Db = Database.Database
 export type MessageKind =
@@ -45,6 +46,17 @@ export type MessageRow = {
   kind: MessageKind
   content: string
   payload: unknown | null
+  created_at: number
+}
+
+export type ThreadCheckpointRow = {
+  id: number
+  thread_id: string
+  bot_id: string
+  through_message_id: number
+  summary: string
+  source_count: number
+  had_webhook: number
   created_at: number
 }
 
@@ -700,6 +712,47 @@ const MIGRATIONS: Migration[] = [
     if (!goalCols.has('source_thread_id')) db.exec('ALTER TABLE goals ADD COLUMN source_thread_id TEXT;')
     if (!goalCols.has('origin')) db.exec(`ALTER TABLE goals ADD COLUMN origin TEXT NOT NULL DEFAULT 'operator';`)
   },
+  // v24：按 (thread_id, bot_id) 隔离的长对话压缩检查点，替代固定 40 条滑窗硬截断并保持前缀缓存稳定
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS thread_checkpoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        through_message_id INTEGER NOT NULL,
+        summary TEXT NOT NULL,
+        source_count INTEGER NOT NULL DEFAULT 0,
+        had_webhook INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_thread_checkpoints_lookup
+        ON thread_checkpoints(thread_id, bot_id, id DESC);
+    `)
+  },
+  // v25：SQLite FTS5 trigram 全文索引，支撑 search_history 跨历史消息检索（仅存脱敏文本，绝不索引审批 target/rule）
+  (db) => {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        message_id UNINDEXED,
+        thread_id UNINDEXED,
+        searchable_text,
+        tokenize='trigram'
+      );
+      CREATE TRIGGER IF NOT EXISTS trg_messages_fts_delete
+      AFTER DELETE ON messages BEGIN
+        DELETE FROM messages_fts WHERE message_id = old.id;
+      END;
+    `)
+    const rows = db.prepare(`SELECT id, thread_id, kind, content, payload FROM messages`).all() as {
+      id: number; thread_id: string; kind: MessageKind; content: string; payload: string | null
+    }[]
+    const insert = db.prepare(`INSERT INTO messages_fts (message_id, thread_id, searchable_text) VALUES (?, ?, ?)`)
+    for (const r of rows) {
+      const parsed = r.payload ? JSON.parse(r.payload) : null
+      const text = extractSearchableText(r.kind, r.content, parsed)
+      if (text) insert.run(r.id, r.thread_id, text)
+    }
+  },
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length
@@ -812,14 +865,14 @@ export function ensureDmThread(db: Db, botId: string): string {
 
 export function insertMessage(
   db: Db,
-  m: { threadId: string; sender: string; kind: MessageKind; content?: string; payload?: unknown },
+  m: { threadId: string; sender: string; kind: MessageKind; content?: string; payload?: unknown; createdAt?: number },
 ): MessageRow {
-  const createdAt = Date.now()
+  const createdAt = m.createdAt ?? Date.now()
   const payloadJson = m.payload === undefined ? null : JSON.stringify(m.payload)
   const info = db.prepare(
     `INSERT INTO messages (thread_id, sender, kind, content, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(m.threadId, m.sender, m.kind, m.content ?? '', payloadJson, createdAt)
-  return {
+  const row: MessageRow = {
     id: Number(info.lastInsertRowid),
     thread_id: m.threadId,
     sender: m.sender,
@@ -828,6 +881,8 @@ export function insertMessage(
     payload: m.payload ?? null,
     created_at: createdAt,
   }
+  syncMessageFts(db, row)
+  return row
 }
 
 function parseRow(r: Record<string, unknown>): MessageRow {
@@ -838,6 +893,50 @@ export function listMessages(db: Db, threadId: string, limit = 200): MessageRow[
   const rows = db.prepare(`SELECT * FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT ?`)
     .all(threadId, limit) as Record<string, unknown>[]
   return rows.reverse().map(parseRow)
+}
+
+/** 读取某个检查点之后（id > afterId）的消息，按时间正序返回；最多取最近 limit 条兜底。 */
+export function listMessagesAfter(db: Db, threadId: string, afterId: number, limit = 120): MessageRow[] {
+  const rows = db.prepare(`SELECT * FROM messages WHERE thread_id = ? AND id > ? ORDER BY id DESC LIMIT ?`)
+    .all(threadId, afterId, limit) as Record<string, unknown>[]
+  return rows.reverse().map(parseRow)
+}
+
+export function latestCheckpoint(db: Db, threadId: string, botId: string): ThreadCheckpointRow | null {
+  const row = db.prepare(
+    `SELECT * FROM thread_checkpoints WHERE thread_id = ? AND bot_id = ? ORDER BY id DESC LIMIT 1`,
+  ).get(threadId, botId) as ThreadCheckpointRow | undefined
+  return row ?? null
+}
+
+export function insertCheckpoint(
+  db: Db,
+  input: {
+    threadId: string
+    botId: string
+    throughMessageId: number
+    summary: string
+    sourceCount: number
+    hadWebhook: boolean
+    createdAt?: number
+  },
+): ThreadCheckpointRow {
+  const createdAt = input.createdAt ?? Date.now()
+  const hadWebhook = input.hadWebhook ? 1 : 0
+  const info = db.prepare(
+    `INSERT INTO thread_checkpoints (thread_id, bot_id, through_message_id, summary, source_count, had_webhook, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(input.threadId, input.botId, input.throughMessageId, input.summary, input.sourceCount, hadWebhook, createdAt)
+  return {
+    id: Number(info.lastInsertRowid),
+    thread_id: input.threadId,
+    bot_id: input.botId,
+    through_message_id: input.throughMessageId,
+    summary: input.summary,
+    source_count: input.sourceCount,
+    had_webhook: hadWebhook,
+    created_at: createdAt,
+  }
 }
 
 /** 一次取出给出一组线程各自的最后一条消息，避免侧栏刷新对每个同事和每个群单独查一遍 */
@@ -894,6 +993,8 @@ export function usageSince(db: Db, botId: string, since: number): UsageTotals {
 
 export function updateMessagePayload(db: Db, messageId: number, payload: unknown): void {
   db.prepare('UPDATE messages SET payload = ? WHERE id = ?').run(JSON.stringify(payload), messageId)
+  const updated = getMessage(db, messageId)
+  if (updated) syncMessageFts(db, updated)
 }
 
 export type Conversation = {

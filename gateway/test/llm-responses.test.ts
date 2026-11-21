@@ -60,28 +60,34 @@ describe('OpenAI Responses API', () => {
     ])
   })
 
-  it('shows only the latest screenshot, as input_image', () => {
-    const { input } = toResponses([
+  it('keeps recent screenshots intact up to the batch window, then evicts the oldest batch as input_image', () => {
+    const two = toResponses([
       { role: 'user', content: 'one', images: ['data:image/png;base64,ONE'] },
       { role: 'user', content: 'two', images: ['data:image/png;base64,TWO'] },
-    ])
-    expect(input).toEqual([
-      { role: 'user', content: EARLIER_SCREENSHOT },
+    ]).input
+    expect(two).toEqual([
+      { role: 'user', content: [{ type: 'input_text', text: 'one' }, { type: 'input_image', image_url: 'data:image/png;base64,ONE' }] },
       { role: 'user', content: [{ type: 'input_text', text: 'two' }, { type: 'input_image', image_url: 'data:image/png;base64,TWO' }] },
     ])
+
+    const seven = toResponses(Array.from({ length: 7 }, (_, i) => ({
+      role: 'user' as const, content: `s${i + 1}`, images: [`data:image/png;base64,S${i + 1}`],
+    }))).input
+    expect(seven.slice(0, 4)).toEqual(Array.from({ length: 4 }, () => ({ role: 'user', content: EARLIER_SCREENSHOT })))
+    expect(seven[4]).toEqual({ role: 'user', content: [{ type: 'input_text', text: 's5' }, { type: 'input_image', image_url: 'data:image/png;base64,S5' }] })
   })
 
-  it('keeps an image the operator sent this turn next to the latest screenshot', () => {
+  it('keeps an image the operator sent this turn even when older screenshots are evicted', () => {
+    const shots: ChatMsg[] = Array.from({ length: 7 }, (_, i) => ({
+      role: 'user', content: `s${i + 1}`, images: [`data:image/png;base64,S${i + 1}`],
+    }))
     const { input } = toResponses([
       { role: 'user', content: 'mine', images: ['data:image/png;base64,MINE'], keepImages: true },
-      { role: 'user', content: 'one', images: ['data:image/png;base64,ONE'] },
-      { role: 'user', content: 'two', images: ['data:image/png;base64,TWO'] },
+      ...shots,
     ])
-    expect(input).toEqual([
-      { role: 'user', content: [{ type: 'input_text', text: 'mine' }, { type: 'input_image', image_url: 'data:image/png;base64,MINE' }] },
-      { role: 'user', content: EARLIER_SCREENSHOT },
-      { role: 'user', content: [{ type: 'input_text', text: 'two' }, { type: 'input_image', image_url: 'data:image/png;base64,TWO' }] },
-    ])
+    expect(input[0]).toEqual({ role: 'user', content: [{ type: 'input_text', text: 'mine' }, { type: 'input_image', image_url: 'data:image/png;base64,MINE' }] })
+    expect(input[1]).toEqual({ role: 'user', content: EARLIER_SCREENSHOT })
+    expect(input[7]).toEqual({ role: 'user', content: [{ type: 'input_text', text: 's7' }, { type: 'input_image', image_url: 'data:image/png;base64,S7' }] })
   })
 
   it('replays turns from another provider as plain items, and asks for text only when told to', async () => {

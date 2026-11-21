@@ -20,19 +20,45 @@ import {
 } from './goals/tools.js'
 import { isMcpToolName } from './mcp/naming.js'
 import { limitText, noticeText, type BudgetHit, type Notice } from './notices.js'
-import { insertMessage, listMessages, updateMessagePayload, type BotRow, type Db, type MessageRow } from './db.js'
+import {
+  COMPACT_TRIGGER_MESSAGES,
+  MAX_UNCOMPACTED_ROWS,
+  compactThreadHistory,
+  frameCheckpoint,
+  selectCompactCut,
+} from './compaction.js'
+import {
+  PRESSURE_RATIO,
+  createContextMeter,
+  estimateMessagesTokens,
+  estimateToolsTokens,
+  inferContextWindow,
+  isContextOverflowError,
+  pruneOldToolResults,
+} from './context-budget.js'
+import {
+  insertMessage,
+  latestCheckpoint,
+  listMessagesAfter,
+  updateMessagePayload,
+  type BotRow,
+  type Db,
+  type MessageRow,
+} from './db.js'
 import type { ChatMsg, LLM, LlmPriority, ToolCall, ToolDef, Usage } from './llm.js'
 import {
   buildSystemPrompt,
-  timeNote,
-  withTimeNote,
+  withStableTimeNotes,
   type PromptConnector,
   type PromptGoal,
   type PromptMcpServer,
   type PromptRoutine,
   type PromptSpace,
   type PromptVaultItem,
+  type TimedMessage,
 } from './prompts.js'
+import { createRepeatGuard } from './loop-guard.js'
+import { formatHistorySearchResult, searchBotHistory } from './history-search.js'
 import type { CreateRuleProposalResult } from './proactive/rule-proposals.js'
 import {
   MANAGE_SPACE_TOOL_NAME,
@@ -44,6 +70,7 @@ import {
 } from './spaces/tools.js'
 import { validateReportPayload, type ReportPayload } from './report.js'
 import { normalizeMode, normalizeSurface, type RoutineMode, type RoutineSurface } from './routines.js'
+import { DEFAULT_SPILL_THRESHOLD_CHARS, SHELL_SPILL_THRESHOLD_CHARS, spillToolOutput } from './spill.js'
 import {
   BACKGROUND_CONTROL_TOOL_NAMES,
   BACKGROUND_TOOL_NAMES,
@@ -246,6 +273,12 @@ export type AgentDeps = {
   }) => Promise<{ ok: true; task: BackgroundTaskView } | { ok: false; error: string }>
   onFinalText?: (text: string) => void
   onReportFiled?: (summary: string) => void
+  /** 当前模型名（用于自动推断上下文窗口） */
+  modelName?: string
+  /** 显式上下文窗口上限（token）；省略或 ≤0 时按 modelName 推断 */
+  contextWindow?: number
+  /** false = 关闭跨回合自动压缩（测试或特定场景用） */
+  compact?: boolean
 }
 
 /**
@@ -319,11 +352,12 @@ export async function runTurn(
   const hasComputer = Boolean(deps.getComputer)
   const alreadyStored = opts.alreadyStored === true
   const persistUserMessage = opts.persistUserMessage !== false && !alreadyStored
+  const now = (deps.now ?? (() => new Date()))()
   const say = (content: string) => events.onMessage(insertMessage(db, { threadId, sender: bot.id, kind: 'text', content }))
   /** 网关替同事说的固定话：content 是英文（模型和老界面看这个），payload 让界面换成操作者的语言 */
   const notify = (n: Notice) => events.onMessage(insertMessage(db, { threadId, sender: bot.id, kind: 'text', content: noticeText(n), payload: n }))
   if (persistUserMessage) {
-    events.onMessage(insertMessage(db, { threadId, sender: 'user', kind: 'text', content: userText }))
+    events.onMessage(insertMessage(db, { threadId, sender: 'user', kind: 'text', content: userText, createdAt: now.getTime() }))
   }
   const effectiveMode = effectiveRoutineMode(deps)
   events.onStatus(bot.id, 'thinking')
@@ -341,77 +375,7 @@ export async function runTurn(
       && !isBackgroundTask
       && !isPipelineStep
       && effectiveMode === 'act'
-    const historyLimit = deps.historyLimit && deps.historyLimit > 0 ? Math.floor(deps.historyLimit) : HISTORY_LIMIT
-    const rows = orderHistory(listMessages(db, threadId, historyLimit), opts.pendingIds, opts.hiddenIds)
-    // 模型眼前还摆着 webhook / 受污染的转交载荷，或本回合读过外部数据时，就算是操作者开的头也不认规则：外部文字可能正是在诱导它
-    const hasOutsideDataHistory = rows.some(
-      (m) => m.kind === 'webhook' || (m.kind === 'bot_ref' && (m.payload as { tainted?: unknown } | null)?.tainted === true),
-    )
-    let taintedByOutsideData = deps.tainted === true || deps.origin === 'webhook'
-    const computeRuleBlock = (): RuleBlock | null =>
-      deps.origin !== 'operator'
-        ? (deps.origin ?? 'unknown')
-        : (hasOutsideDataHistory || taintedByOutsideData) ? 'outside-data' : null
-    const initiallyTainted = hasOutsideDataHistory || taintedByOutsideData
-    const ctx: TurnContext = {
-      ...deps,
-      ruleBlock: computeRuleBlock(),
-      usedVaultItemIds: new Set<string>(),
-      feedPublishedCount: 0,
-      goalProgressCount: 0,
-      spaceWriteCount: 0,
-      turnTainted: initiallyTainted,
-      effectiveMode,
-      proposedRuleThisTurn: false,
-    }
-    let taintNotified = false
-    const notifyTainted = () => {
-      if (taintNotified) return
-      taintNotified = true
-      deps.onTainted?.()
-    }
-    if (initiallyTainted) notifyTainted()
-    const attached = rows.filter((m) => m.kind === 'attachment')
-    // 查不出来（盘坏了、没有上传目录）不拦回合：模型仍然知道有这么个文件，只是拿不到
-    const brief = attached.length ? await deps.attachments?.(attached).catch(() => undefined) : undefined
-    let imagesSeen = false
-    const history: ChatMsg[] = [
-      {
-        role: 'system',
-        content: buildSystemPrompt(bot, soul, {
-          hasComputer,
-          hasWiki,
-          canBackgroundTasks:
-            Boolean(deps.onDelegateBackgroundTask)
-            && deps.origin === 'operator'
-            && !isBackgroundTask
-            && !isPipelineStep
-            && effectiveMode === 'act',
-          isBackgroundTask,
-          canDispatchPlan: allowDispatchPlan,
-          isPipelineStep,
-          computer: deps.computer,
-          memory: deps.memory,
-          group: deps.group,
-          canRelay,
-          manual: deps.manual,
-          routines: deps.routines,
-          goals: deps.goals,
-          spaces: deps.spaces,
-          connectors: deps.connectors,
-          mcpServers: deps.mcpServers,
-          vaultItems: deps.vaultItems,
-          skills: deps.onReadSkill ? deps.skills : undefined,
-          language: deps.language,
-        }),
-      },
-      ...rows.map((m) => toChatMsg(m, bot.id, brief)),
-    ]
-    // routine 触发 / 审批放行 / 群发言不落库，但模型必须看到这句话才知道要干什么
-    if (!persistUserMessage && !alreadyStored) history.push({ role: 'user', content: userText })
-    const now = (deps.now ?? (() => new Date()))()
     const timeZone = deps.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone
-    const messages = withTimeNote(history, timeNote(now, timeZone))
     const hasSkills = Boolean(deps.skills?.length && deps.onReadSkill)
     const tools = buildTools({
       hasComputer,
@@ -440,6 +404,149 @@ export async function runTurn(
       hasEditableSpaces: Boolean(deps.spaces?.some((s) => s.role === 'editor') && deps.onSpaceUpsertItem),
       hasWebResearch: Boolean(deps.onWebSearch || deps.onWebFetch),
     })
+    const systemMessage: ChatMsg = {
+      role: 'system',
+      content: buildSystemPrompt(bot, soul, {
+        hasComputer,
+        hasWiki,
+        canBackgroundTasks:
+          Boolean(deps.onDelegateBackgroundTask)
+          && deps.origin === 'operator'
+          && !isBackgroundTask
+          && !isPipelineStep
+          && effectiveMode === 'act',
+        isBackgroundTask,
+        canDispatchPlan: allowDispatchPlan,
+        isPipelineStep,
+        computer: deps.computer,
+        memory: deps.memory,
+        group: deps.group,
+        canRelay,
+        manual: deps.manual,
+        routines: deps.routines,
+        goals: deps.goals,
+        spaces: deps.spaces,
+        connectors: deps.connectors,
+        mcpServers: deps.mcpServers,
+        vaultItems: deps.vaultItems,
+        skills: deps.onReadSkill ? deps.skills : undefined,
+        language: deps.language,
+      }),
+    }
+    const contextWindow = inferContextWindow(deps.modelName, deps.contextWindow)
+    const pressureTokens = Math.floor(contextWindow * PRESSURE_RATIO)
+    const historyLimit = deps.historyLimit && deps.historyLimit > 0 ? Math.floor(deps.historyLimit) : HISTORY_LIMIT
+
+    let checkpoint = latestCheckpoint(db, threadId, bot.id)
+    let rows = orderHistory(
+      listMessagesAfter(db, threadId, checkpoint?.through_message_id ?? 0, MAX_UNCOMPACTED_ROWS),
+      opts.pendingIds,
+      opts.hiddenIds,
+    )
+    const attached = rows.filter((m) => m.kind === 'attachment')
+    // 查不出来（盘坏了、没有上传目录）不拦回合：模型仍然知道有这么个文件，只是拿不到
+    const brief = attached.length ? await deps.attachments?.(attached).catch(() => undefined) : undefined
+
+    const buildTimed = (list: MessageRow[], cp: typeof checkpoint): ChatMsg[] => {
+      const entries: TimedMessage<ChatMsg>[] = [{ msg: systemMessage }]
+      if (cp) entries.push({ msg: { role: 'user', content: frameCheckpoint(cp.summary) } })
+      for (const m of list) {
+        entries.push({
+          msg: toChatMsg(m, bot.id, brief),
+          // 只给操作者侧消息附带稳定时间戳；webhook 围栏载荷和群同事发言保持原样
+          ...(m.sender === 'user' || m.kind === 'approval_resolved' || m.kind === 'attachment' ? { at: m.created_at } : {}),
+        })
+      }
+      // routine 触发 / 审批放行 / 群发言不落库，但模型必须看到这句话才知道要干什么
+      if (!persistUserMessage && !alreadyStored) entries.push({ msg: { role: 'user', content: userText }, at: now.getTime() })
+      return withStableTimeNotes(entries, timeZone)
+    }
+
+    let messages = buildTimed(rows, checkpoint)
+    const initialTokens = estimateMessagesTokens(messages) + estimateToolsTokens(tools)
+    const shouldCompact = deps.compact !== false
+      && effectiveMode === 'act'
+      && !isBackgroundTask
+      && !isPipelineStep
+      && !llm.isStub
+      && !(opts.hiddenIds && opts.hiddenIds.length > 0)
+      && !signal?.aborted
+      && (rows.length > COMPACT_TRIGGER_MESSAGES || initialTokens >= pressureTokens)
+      && !deps.checkBudget?.()
+
+    if (shouldCompact) {
+      const protectedTail = Math.max(1, (opts.pendingIds?.length ?? 0) + (persistUserMessage ? 1 : 0))
+      const cut = selectCompactCut(rows, undefined, protectedTail)
+      if (cut > 0) {
+        const rowsToCompact = rows.slice(0, cut)
+        // 按相同稳定时间注记规则渲染待压缩区间，使其与上一回合热缓存前缀逐字节对齐
+        const renderedToCompact = withStableTimeNotes(
+          rowsToCompact.map((m) => ({
+            msg: toChatMsg(m, bot.id, brief),
+            ...(m.sender === 'user' || m.kind === 'approval_resolved' || m.kind === 'attachment' ? { at: m.created_at } : {}),
+          })),
+          timeZone,
+        )
+        const nextCp = await compactThreadHistory({
+          db,
+          llm,
+          threadId,
+          botId: bot.id,
+          systemMessage,
+          tools,
+          priorCheckpoint: checkpoint,
+          rowsToCompact,
+          renderedToCompact,
+          signal,
+          onUsage: deps.onUsage,
+          now: now.getTime(),
+        }).catch(() => null)
+        if (nextCp) {
+          checkpoint = nextCp
+          rows = rows.slice(cut)
+          messages = buildTimed(rows, checkpoint)
+        }
+      }
+    }
+
+    // 未能压缩（stub / watch / 后台任务 / 摘要失败）时仍保持最多 historyLimit 条的兜底上限
+    if (rows.length > historyLimit) {
+      rows = rows.slice(-historyLimit)
+      messages = buildTimed(rows, checkpoint)
+    }
+
+    // 模型眼前还摆着 webhook / 受污染转交载荷（含刚压缩进检查点的）或本回合读过外部数据时，就算是操作者开的头也不认规则
+    const hasOutsideDataHistory = Boolean(checkpoint?.had_webhook) || rows.some(
+      (m) => m.kind === 'webhook' || (m.kind === 'bot_ref' && (m.payload as { tainted?: unknown } | null)?.tainted === true),
+    )
+    let taintedByOutsideData = deps.tainted === true || deps.origin === 'webhook'
+    const computeRuleBlock = (): RuleBlock | null =>
+      deps.origin !== 'operator'
+        ? (deps.origin ?? 'unknown')
+        : (hasOutsideDataHistory || taintedByOutsideData) ? 'outside-data' : null
+    const initiallyTainted = hasOutsideDataHistory || taintedByOutsideData
+    const ctx: TurnContext = {
+      ...deps,
+      ruleBlock: computeRuleBlock(),
+      usedVaultItemIds: new Set<string>(),
+      feedPublishedCount: 0,
+      goalProgressCount: 0,
+      spaceWriteCount: 0,
+      turnTainted: initiallyTainted,
+      effectiveMode,
+      proposedRuleThisTurn: false,
+    }
+    let taintNotified = false
+    const notifyTainted = () => {
+      if (taintNotified) return
+      taintNotified = true
+      deps.onTainted?.()
+    }
+    if (initiallyTainted) notifyTainted()
+    let imagesSeen = false
+    const repeatGuard = createRepeatGuard()
+    const meter = createContextMeter()
+    let prefixModified = false
     const maxSteps = deps.maxSteps && deps.maxSteps > 0 ? Math.floor(deps.maxSteps) : DEFAULT_MAX_STEPS
     const turnMs = deps.turnTimeoutMs ?? DEFAULT_TURN_MS
     const priority = deps.priority ?? defaultPriority(deps.origin)
@@ -465,16 +572,49 @@ export async function runTurn(
         }
         messages.push({ role: 'user', content: `[operator steering note for your background task] ${note}` })
       }
-      const turn = await llm.chat(messages, tools, { signal, priority })
+      // L2：多步回合内估算或实测逼近窗口 75% 时，先零成本剪枝更早步骤的大段工具输出
+      if (step > 0 && meter.projectedTokens(messages, tools) >= pressureTokens) {
+        const pruned = pruneOldToolResults(messages)
+        if (pruned.prunedCount > 0) {
+          messages = pruned.messages
+          prefixModified = true
+          meter.resetAnchor()
+        }
+      }
+      let turn
+      try {
+        turn = await llm.chat(messages, tools, { signal, priority, ...(prefixModified ? { prefixModified: true } : {}) })
+      } catch (err) {
+        // 规范上下文溢出：原位激进剪枝旧工具结果后重试一次
+        if (!signal?.aborted && isContextOverflowError(err)) {
+          const pruned = pruneOldToolResults(messages, {
+            keepRecentToolSteps: 1, thresholdChars: 1_200, headChars: 500, tailChars: 300,
+          })
+          if (pruned.prunedCount > 0) {
+            messages = pruned.messages
+            prefixModified = true
+            meter.resetAnchor()
+            turn = await llm.chat(messages, tools, { signal, priority, prefixModified: true })
+          } else {
+            throw err
+          }
+        } else {
+          throw err
+        }
+      }
       if (!imagesSeen) {
         imagesSeen = true
         brief?.shown()
       }
-      if (turn.usage) deps.onUsage?.(turn.usage)
+      if (turn.usage) {
+        deps.onUsage?.(turn.usage)
+        meter.recordUsage(turn.usage, messages, tools)
+      }
       if (signal?.aborted) return stopped(notify, silentStop)
       if (turn.toolCalls.length > 0) {
         messages.push(turn.raw)
         let latestImage: string | undefined
+        const reminders: string[] = []
         for (const call of turn.toolCalls) {
           if (signal?.aborted) return stopped(notify, silentStop)
           const outcome = await execToolCall(ctx, call, events, activity, () => {
@@ -485,8 +625,11 @@ export async function runTurn(
           })
           messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.text })
           latestImage = outcome.image ?? latestImage
+          const nudge = repeatGuard.observe(call.name, call.args)
+          if (nudge) reminders.push(nudge)
         }
         if (deps.vision && latestImage) showLatestImage(messages, latestImage)
+        if (reminders.length > 0) messages.push({ role: 'user', content: reminders.join('\n\n') })
         continue
       }
       const text = turn.content?.trim()
@@ -898,6 +1041,34 @@ async function execToolCall(
       return failed(err)
     }
   }
+  if (call.name === 'search_history') {
+    try {
+      const query = String(args.query ?? '').trim()
+      if (!query) {
+        log(false)
+        return { text: 'search_history needs a non-empty "query".' }
+      }
+      const scope = args.scope === 'all' ? 'all' : 'current'
+      const limit = typeof args.limit === 'number' ? args.limit : undefined
+      const result = searchBotHistory(deps.db, {
+        botId: deps.bot.id, currentThreadId: deps.threadId, query, scope, limit,
+      })
+      if (result.hasWebhookHit) onOutsideDataRead?.()
+      const rendered = formatHistorySearchResult(result, query)
+      log(true)
+      if (rendered.length > DEFAULT_SPILL_THRESHOLD_CHARS) {
+        const computer = deps.getComputer ? await deps.getComputer().catch(() => null) : null
+        const spilled = await spillToolOutput(rendered, {
+          toolName: 'search_history', computer, now: (deps.now ?? (() => new Date()))().getTime(),
+          thresholdChars: DEFAULT_SPILL_THRESHOLD_CHARS,
+        })
+        return { text: spilled.text }
+      }
+      return { text: rendered }
+    } catch (err) {
+      return failed(err)
+    }
+  }
   if (WORKFLOW_TOOL_NAMES.has(call.name)) {
     try {
       const text = truncate(await execWorkflowTool(deps, call.name, args, events))
@@ -917,6 +1088,14 @@ async function execToolCall(
       const res = await deps.onConnectorTool({ name: call.name, args, ruleBlock: deps.ruleBlock, events })
       if (res.tainted) onOutsideDataRead?.()
       log(res.ok)
+      if (res.text.length > DEFAULT_SPILL_THRESHOLD_CHARS) {
+        const computer = deps.getComputer ? await deps.getComputer().catch(() => null) : null
+        const spilled = await spillToolOutput(res.text, {
+          toolName: call.name, computer, now: (deps.now ?? (() => new Date()))().getTime(),
+          thresholdChars: DEFAULT_SPILL_THRESHOLD_CHARS,
+        })
+        return { text: spilled.text }
+      }
       return { text: res.text }
     } catch (err) {
       return failed(err)
@@ -932,6 +1111,14 @@ async function execToolCall(
       const res = await deps.onMcpTool({ name: call.name, args, events, signal: deps.signal })
       if (deps.mcpReadToolNames?.has(call.name) || res.tainted) onOutsideDataRead?.()
       log(res.ok)
+      if (res.text.length > DEFAULT_SPILL_THRESHOLD_CHARS) {
+        const computer = deps.getComputer ? await deps.getComputer().catch(() => null) : null
+        const spilled = await spillToolOutput(res.text, {
+          toolName: call.name, computer, now: (deps.now ?? (() => new Date()))().getTime(),
+          thresholdChars: DEFAULT_SPILL_THRESHOLD_CHARS,
+        })
+        return { text: spilled.text }
+      }
       return { text: res.text }
     } catch (err) {
       return failed(err)
@@ -1113,6 +1300,7 @@ function summarize(tool: string, args: Record<string, unknown>): string {
     }
     case 'cancel_background_task': return pick('taskId')
     case 'create_dispatch_plan': return pick('title')
+    case 'search_history': return pick('query')
     case 'message_user': {
       const payload = args.payload as { lines?: unknown[]; closing?: unknown } | undefined
       const closing = typeof payload?.closing === 'string' ? payload.closing : ''
@@ -1532,14 +1720,6 @@ function sliceForModel(text: string, args: Record<string, unknown>, tool: string
   return out
 }
 
-/** 命令输出两头都留：开头是上下文，报错通常在结尾。 */
-function headAndTail(text: string, max = MAX_TOOL_CHARS): string {
-  if (text.length <= max) return text
-  const half = Math.floor(max / 2)
-  const omitted = text.length - half * 2
-  return `${text.slice(0, half)}\n…(${omitted} characters omitted — pipe through head, tail or sed -n to see a part)…\n${text.slice(-half)}`
-}
-
 async function linksSection(computer: BotComputer): Promise<string> {
   const links = await computer.links().catch(() => [])
   const lines: string[] = []
@@ -1565,7 +1745,14 @@ async function execComputerTool(
       const r = await computer.shell(String(args.cmd ?? ''), shellTimeout(args.timeoutMs), deps.signal)
       const text = [`exit ${r.exitCode}`, r.stdout.trim(), r.stderr.trim() ? `stderr:\n${r.stderr.trim()}` : '']
         .filter(Boolean).join('\n')
-      return { text: headAndTail(text) }
+      const spilled = await spillToolOutput(text, {
+        toolName: 'shell',
+        computer,
+        now: (deps.now ?? (() => new Date()))().getTime(),
+        thresholdChars: SHELL_SPILL_THRESHOLD_CHARS,
+        fallbackHint: 'pipe through head, tail or sed -n to see a part',
+      })
+      return { text: spilled.text }
     }
     case 'read_file':
       return { text: sliceForModel(await computer.readFile(String(args.path ?? '')), args, 'read_file', 'file') }

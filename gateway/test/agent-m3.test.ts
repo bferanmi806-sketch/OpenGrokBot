@@ -40,13 +40,13 @@ describe('buildTools', () => {
   it('always offers approval, memory and routine tools', () => {
     expect(buildTools({ hasComputer: false }).map((t) => t.function.name)).toEqual([
       'message_user', 'hold_for_approval', 'ask_operator', 'save_memory', 'forget_memory', 'create_routine',
-      'stop_routine',
+      'stop_routine', 'search_history',
     ])
   })
 
   it('adds the computer surface on top when one is attached', () => {
     const names = buildTools({ hasComputer: true }).map((t) => t.function.name)
-    expect(names).toHaveLength(19)
+    expect(names).toHaveLength(20)
     expect(names).toContain('browser_screenshot')
     expect(names).toContain('hold_for_approval')
   })

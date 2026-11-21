@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { loadConfig, type Config } from '../src/config.js'
-import { EARLIER_SCREENSHOT, createLLM, createLiveLLM, type ChatMsg, type ToolDef } from '../src/llm.js'
+import {
+  EARLIER_SCREENSHOT, MAX_KEPT_SCREENSHOTS, createLLM, createLiveLLM, evictOldScreenshots, screenshotsToEvict,
+  type ChatMsg, type ToolDef,
+} from '../src/llm.js'
 
 const toolDefs: ToolDef[] = [{ type: 'function', function: { name: 'message_user', parameters: {} } }]
 
@@ -183,23 +186,37 @@ describe('createLLM resilience', () => {
     expect((await llm.chat(hi, [])).usage).toEqual({ prompt: 1200, completion: 80, cached: 1024 })
   })
 
-  it('keeps an image the operator sent this turn when a later screenshot replaces the earlier ones', async () => {
+  it('evicts screenshots in batches to protect KV cache while always keeping operator attachments', async () => {
+    expect([0, 1, 6, 7, 8, 9, 10, 11].map((n) => screenshotsToEvict(n))).toEqual([0, 0, 0, 4, 4, 4, 4, 8])
+
     let body: { messages: Record<string, unknown>[] } | null = null
     const fakeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       body = JSON.parse(String(init!.body))
       return new Response(okBody())
     }) as typeof fetch
     const llm = createLLM(loadConfig({}), fakeFetch)
+    const shots: ChatMsg[] = Array.from({ length: MAX_KEPT_SCREENSHOTS + 1 }, (_, i) => ({
+      role: 'user', content: `shot ${i + 1}`, images: [`data:image/png;base64,S${i + 1}`],
+    }))
     await llm.chat([
       { role: 'user', content: 'find this product', images: ['data:image/png;base64,MINE'], keepImages: true },
-      { role: 'user', content: 'first shot', images: ['data:image/png;base64,ONE'] },
-      { role: 'user', content: 'second shot', images: ['data:image/png;base64,TWO'] },
+      ...shots,
     ], [])
-    expect(body!.messages).toEqual([
-      { role: 'user', content: [{ type: 'text', text: 'find this product' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,MINE' } }] },
-      { role: 'user', content: EARLIER_SCREENSHOT },
-      { role: 'user', content: [{ type: 'text', text: 'second shot' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,TWO' } }] },
-    ])
+    // Operator attachment stays intact; oldest 4 screenshots evicted, newest 3 kept
+    expect(body!.messages[0]).toEqual({
+      role: 'user',
+      content: [{ type: 'text', text: 'find this product' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,MINE' } }],
+    })
+    for (let i = 1; i <= 4; i++) expect(body!.messages[i]).toEqual({ role: 'user', content: EARLIER_SCREENSHOT })
+    for (let i = 5; i <= 7; i++) {
+      expect(body!.messages[i]).toEqual({
+        role: 'user',
+        content: [{ type: 'text', text: `shot ${i}` }, { type: 'image_url', image_url: { url: `data:image/png;base64,S${i}` } }],
+      })
+    }
+    // Up to MAX_KEPT_SCREENSHOTS, prefix stays completely untouched
+    const small = evictOldScreenshots(shots.slice(0, MAX_KEPT_SCREENSHOTS))
+    expect(small.every((m) => m.images?.length === 1)).toBe(true)
   })
 
   it('sends attached images as image_url parts', async () => {
