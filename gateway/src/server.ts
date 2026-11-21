@@ -957,16 +957,16 @@ export function createApp(deps: AppDeps): GatewayApp {
     const effectiveDetail = applied ? applied.detail : existing.detail
     const effectiveTarget = applied ? applied.target : existing.target
 
+    if (remember && decision !== 'approve') {
+      return { kind: 'unrememberable', reason: 'only an approval can be remembered' }
+    }
     if (workflowApproval && remember && !continuation?.rulesAllowed) {
       return { kind: 'unrememberable', reason: rememberBlock({ kind: existing.kind, target: effectiveTarget }) }
     }
-    if (remember && (decision !== 'approve' || items || !canRemember({ kind: existing.kind, target: effectiveTarget }))) {
-      const reason =
-        decision !== 'approve'
-          ? 'only an approval can be remembered'
-          : items
-            ? blockText({ code: 'batch' })
-            : rememberBlock({ kind: existing.kind, target: effectiveTarget })
+    if (remember && (items || !canRemember({ kind: existing.kind, target: effectiveTarget }))) {
+      const reason = items
+        ? blockText({ code: 'batch' })
+        : rememberBlock({ kind: existing.kind, target: effectiveTarget })
       return { kind: 'unrememberable', reason }
     }
 
@@ -1004,7 +1004,7 @@ export function createApp(deps: AppDeps): GatewayApp {
         detail: approval.detail,
         target: approval.target,
         status: approval.status,
-        ...(applied ? { editable: applied.editable } : {}),
+        ...(edited && applied ? { editable: applied.editable } : {}),
         ...(edited ? { edited: true } : {}),
         ...(remembered ? { remembered } : {}),
         ...(picked ? { approvedItems: picked } : {}),
