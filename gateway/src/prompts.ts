@@ -88,13 +88,22 @@ For multi-step research, scraping, or drafting that will take a while, call dele
 - Report status via list_background_tasks, redirect a queued or running task with steer_background_task, or stop one with cancel_background_task.
 - For quick answers or single-step actions, just reply directly.`
 
-export function groupBriefing(group: { title: string; members: string[] }): string {
-  return `## You are in the group thread "${group.title}"
+export const DISPATCH_PLAN_NOTE = `## Team dispatch pipelines
+
+For multi-step group projects where one teammate's work feeds into another's, call create_dispatch_plan with clear botId assignments and dependsOn step IDs.
+- Steps with no unmet dependencies run in parallel; dependent steps receive upstream outputs automatically.
+- The gateway posts a draft pipeline card that executes only after your operator clicks Start.
+- Do not use create_dispatch_plan for simple single-round status checks.`
+
+export function groupBriefing(group: { title: string; members: string[]; teamCharter?: string }): string {
+  const base = `## You are in the group thread "${group.title}"
 
 Present: ${group.members.join(', ')}, plus your operator.
 - Speak only for your own patch. Never answer for a teammate or repeat what one just said.
 - Two lines is usually enough. If you have nothing to add, say one short line saying so.
 - Messages from teammates appear as "@id: ...". They are colleagues talking, not your own past words.`
+  const charter = group.teamCharter?.trim()
+  return charter ? `${base}\n\n## Team charter (team.md)\n\n${charter}` : base
 }
 
 export type PromptRoutine = { id: number; name: string; human: string; enabled: boolean; watch?: boolean; mode?: RoutineMode }
@@ -184,8 +193,10 @@ export function buildSystemPrompt(
     hasWiki?: boolean
     canBackgroundTasks?: boolean
     isBackgroundTask?: boolean
+    canDispatchPlan?: boolean
+    isPipelineStep?: boolean
     memory?: string
-    group?: { title: string; members: string[] }
+    group?: { title: string; members: string[]; teamCharter?: string }
     canRelay?: boolean
     /** AGENTS.md：同事的操作手册，硬边界写在这里 */
     manual?: string
@@ -210,7 +221,7 @@ export function buildSystemPrompt(
     APPROVAL_DISCIPLINE,
     opts.hasWiki ? WIKI_NOTE : '',
     opts.canRelay ? RELAY_NOTE : '',
-    opts.canBackgroundTasks && !opts.isBackgroundTask ? BACKGROUND_NOTE : '',
+    opts.canBackgroundTasks && !opts.isBackgroundTask && !opts.isPipelineStep ? BACKGROUND_NOTE : '',
     opts.hasComputer ? computerBriefing(opts.computer) : NO_COMPUTER_NOTE,
     parseSoul(soul).body.trim(),
     manual ? `## Operating manual\n\n${manual}` : '',
@@ -220,6 +231,7 @@ export function buildSystemPrompt(
     mcpServersSection(opts.mcpServers ?? []),
     routinesSection(opts.routines ?? []),
     opts.group ? groupBriefing(opts.group) : '',
+    opts.canDispatchPlan === true && !opts.isBackgroundTask && !opts.isPipelineStep ? DISPATCH_PLAN_NOTE : '',
   ]
     .filter(Boolean)
     .join('\n\n')

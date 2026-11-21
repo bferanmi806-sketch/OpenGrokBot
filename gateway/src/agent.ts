@@ -10,6 +10,7 @@ import { BROWSER_LEASE_TOOL_NAMES } from './browser-lease.js'
 import { checkBrowserUrl } from './browser-page.js'
 import type { BotComputer, Shot } from './computer.js'
 import { CONNECTOR_READ_TOOL_NAMES, isConnectorTool } from './connectors/tools.js'
+import type { DispatchPlanView } from './dispatch-plans.js'
 import { isMcpToolName } from './mcp/naming.js'
 import { limitText, noticeText, type BudgetHit, type Notice } from './notices.js'
 import { insertMessage, listMessages, updateMessagePayload, type BotRow, type Db, type MessageRow } from './db.js'
@@ -89,7 +90,7 @@ export type AgentDeps = {
     Promise<{ id: number; name: string; cron: string; human: string; webhook: boolean; mode: RoutineMode }>
   onStopRoutine?: (id: number) => Promise<{ ok: boolean; name?: string; reason?: string }>
   hop?: number
-  group?: { title: string; members: string[] }
+  group?: { title: string; members: string[]; teamCharter?: string }
   onMessageBot?: (input: { to: string; content: string; tainted?: boolean }) =>
     Promise<{ delivered: boolean; reason?: string; toName?: string }>
   onAskForLogin?: (input: { site: string; why: string }) => Promise<void>
@@ -166,10 +167,17 @@ export type AgentDeps = {
     | { text: string; ok: boolean; tainted?: boolean; summary: string }
   /** 后台任务车道（AlterEgo）：非阻塞执行、不发 activity 卡片、禁止递归创建后台任务 */
   isBackgroundTask?: boolean
+  /** 群流水线步骤（DAG dispatch step）：禁止递归创建流水线或后台任务 */
+  isPipelineStep?: boolean
   historyLimit?: number
   drainSteeringNotes?: () => Array<string | { note: string; tainted?: boolean }>
   onStepProgress?: (step: { tool: string; summary: string; ok: boolean; ms: number }) => void
   onAcquireBrowser?: (toolName: string) => { ok: true } | { ok: false; reason: string }
+  onCreateDispatchPlan?: (input: {
+    title: string
+    steps: unknown
+    sourceTainted: boolean
+  }) => Promise<{ ok: true; plan: DispatchPlanView } | { ok: false; error: string }>
   onDelegateBackgroundTask?: (input: {
     title: string
     instructions: string
@@ -269,6 +277,13 @@ export async function runTurn(
     const hasWiki = Boolean(deps.onWikiTool)
     const canBackgroundTasks = Boolean(deps.onDelegateBackgroundTask || deps.onListBackgroundTasks)
     const isBackgroundTask = deps.isBackgroundTask === true
+    const isPipelineStep = deps.isPipelineStep === true
+    const allowDispatchPlan =
+      Boolean(deps.onCreateDispatchPlan)
+      && deps.origin === 'operator'
+      && !isBackgroundTask
+      && !isPipelineStep
+      && effectiveMode === 'act'
     const historyLimit = deps.historyLimit && deps.historyLimit > 0 ? Math.floor(deps.historyLimit) : HISTORY_LIMIT
     const rows = orderHistory(listMessages(db, threadId, historyLimit), opts.pendingIds, opts.hiddenIds)
     // 模型眼前还摆着 webhook / 受污染的转交载荷，或本回合读过外部数据时，就算是操作者开的头也不认规则：外部文字可能正是在诱导它
@@ -306,8 +321,14 @@ export async function runTurn(
           hasComputer,
           hasWiki,
           canBackgroundTasks:
-            Boolean(deps.onDelegateBackgroundTask) && deps.origin === 'operator' && !isBackgroundTask && effectiveMode === 'act',
+            Boolean(deps.onDelegateBackgroundTask)
+            && deps.origin === 'operator'
+            && !isBackgroundTask
+            && !isPipelineStep
+            && effectiveMode === 'act',
           isBackgroundTask,
+          canDispatchPlan: allowDispatchPlan,
+          isPipelineStep,
           computer: deps.computer,
           memory: deps.memory,
           group: deps.group,
@@ -336,6 +357,8 @@ export async function runTurn(
       canProposeRule: Boolean(deps.onProposeMemoryRule),
       canBackgroundTasks,
       isBackgroundTask,
+      canDispatchPlan: allowDispatchPlan,
+      isPipelineStep,
       watch: effectiveMode === 'watch',
       routineMode: effectiveMode,
       shell: deps.computer?.shell,
@@ -603,13 +626,53 @@ async function execToolCall(
     log(false)
     return { text: operatorOnlyRefusal(call.name, deps.origin) }
   }
-  // 后台任务控制工具：只在操作者发起的前台 act 回合允许，杜绝后台递归派生或外部输入操控
+  // 后台任务控制工具：只在操作者发起的前台 act 回合允许，杜绝后台/流水线递归派生或外部输入操控
   if (
     BACKGROUND_CONTROL_TOOL_NAMES.has(call.name) &&
-    (deps.origin !== 'operator' || deps.isBackgroundTask || deps.effectiveMode !== 'act')
+    (deps.origin !== 'operator' || deps.isBackgroundTask || deps.isPipelineStep || deps.effectiveMode !== 'act')
   ) {
     log(false)
     return { text: `${call.name} only works in a foreground turn your operator started.` }
+  }
+  if (call.name === 'create_dispatch_plan') {
+    const allowDispatchPlan =
+      Boolean(deps.onCreateDispatchPlan)
+      && deps.origin === 'operator'
+      && !deps.isBackgroundTask
+      && !deps.isPipelineStep
+      && deps.effectiveMode === 'act'
+    if (!allowDispatchPlan || !deps.onCreateDispatchPlan) {
+      log(false)
+      return { text: 'create_dispatch_plan is only available to Chief during an operator-started group turn.' }
+    }
+    if (typeof args.title !== 'string' || !args.title.trim()) {
+      log(false)
+      return { text: 'create_dispatch_plan needs a non-empty string "title".' }
+    }
+    if (!Array.isArray(args.steps)) {
+      log(false)
+      return { text: 'create_dispatch_plan needs a "steps" array.' }
+    }
+    const sourceTainted = deps.turnTainted || deps.origin === 'webhook'
+    try {
+      const res = await deps.onCreateDispatchPlan({
+        title: args.title,
+        steps: args.steps,
+        sourceTainted,
+      })
+      if (!res.ok) {
+        log(false)
+        return { text: res.error }
+      }
+      log(true)
+      return {
+        text:
+          `Draft dispatch plan "${res.plan.title}" (${res.plan.id}, ${res.plan.steps.length} steps) posted to the group thread. `
+          + 'Tell your operator it is ready for review — it will run once they click Start pipeline.',
+      }
+    } catch (err) {
+      return failed(err)
+    }
   }
   if (call.name === 'message_user') {
     try {
@@ -818,6 +881,7 @@ function summarize(tool: string, args: Record<string, unknown>): string {
       return `${taskId}${note ? `: ${note}` : ''}`.slice(0, 120)
     }
     case 'cancel_background_task': return pick('taskId')
+    case 'create_dispatch_plan': return pick('title')
     case 'message_user': {
       const payload = args.payload as { lines?: unknown[]; closing?: unknown } | undefined
       const closing = typeof payload?.closing === 'string' ? payload.closing : ''
@@ -1400,6 +1464,36 @@ function backgroundTaskForModel(payload: unknown): string {
   })
 }
 
+function dispatchPlanForModel(payload: unknown): string {
+  const p = (payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}) as {
+    planId?: unknown
+    title?: unknown
+    status?: unknown
+    steps?: unknown
+  }
+  const rawSteps = Array.isArray(p.steps) ? p.steps : []
+  const steps = rawSteps.map((raw) => {
+    const s = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as {
+      id?: unknown
+      botId?: unknown
+      title?: unknown
+      status?: unknown
+    }
+    return {
+      ...(typeof s.id === 'string' ? { id: s.id } : {}),
+      ...(typeof s.botId === 'string' ? { botId: s.botId } : {}),
+      ...(typeof s.title === 'string' ? { title: s.title } : {}),
+      ...(typeof s.status === 'string' ? { status: s.status } : {}),
+    }
+  })
+  return JSON.stringify({
+    ...(typeof p.planId === 'string' ? { planId: p.planId } : {}),
+    ...(typeof p.title === 'string' ? { title: p.title } : {}),
+    ...(typeof p.status === 'string' ? { status: p.status } : {}),
+    steps,
+  })
+}
+
 function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): ChatMsg {
   if (m.kind === 'webhook') return { role: 'user', content: webhookForModel(m.payload) }
   // 操作者发来的文件：一行说明；图只在这位同事第一次见到它的回合带上，并在这一回合里钉住
@@ -1423,7 +1517,8 @@ function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): Chat
           : m.kind === 'rule_proposal' ? `[proposed rule] ${ruleProposalForModel(m.payload)}`
             : m.kind === 'quiet_digest' ? `[morning digest delivered] ${quietDigestForModel(m.payload)}`
               : m.kind === 'background_task' ? `[background task] ${backgroundTaskForModel(m.payload)}`
-                : `[${m.kind}] ${JSON.stringify(m.payload)}`
+                : m.kind === 'dispatch_plan' ? `[dispatch plan] ${dispatchPlanForModel(m.payload)}`
+                  : `[${m.kind}] ${JSON.stringify(m.payload)}`
     return { role: 'user', content: `@${m.sender}: ${body}` }
   }
   if (m.kind === 'activity') return { role: 'assistant', content: `[steps taken] ${describeSteps(m.payload)}` }
@@ -1435,6 +1530,7 @@ function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): Chat
   if (m.kind === 'rule_proposal') return { role: 'assistant', content: `[proposed rule] ${ruleProposalForModel(m.payload)}` }
   if (m.kind === 'quiet_digest') return { role: 'assistant', content: `[morning digest delivered] ${quietDigestForModel(m.payload)}` }
   if (m.kind === 'background_task') return { role: 'assistant', content: `[background task] ${backgroundTaskForModel(m.payload)}` }
+  if (m.kind === 'dispatch_plan') return { role: 'assistant', content: `[dispatch plan] ${dispatchPlanForModel(m.payload)}` }
   if (m.kind === 'bot_ref') return { role: 'user', content: `[message from teammate] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'login_request') return { role: 'assistant', content: `[asked for a sign-in] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'question') return { role: 'assistant', content: `[asked your operator] ${JSON.stringify(m.payload)}` }
