@@ -1,0 +1,60 @@
+import { randomBytes } from 'node:crypto'
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { isWikiKind, WIKI_SLUG_RE, type WikiKind, type WikiPageDetail } from './types.js'
+
+export function wikiRootDir(dataDir: string): string {
+  return join(dataDir, 'wiki')
+}
+
+export function wikiPageFilePath(dataDir: string, kind: WikiKind, slug: string): string {
+  if (!isWikiKind(kind)) {
+    throw new Error(`Invalid wiki kind: ${String(kind)}`)
+  }
+  if (!WIKI_SLUG_RE.test(slug)) {
+    throw new Error(`Invalid wiki slug: ${slug}`)
+  }
+  return join(wikiRootDir(dataDir), kind, `${slug}.md`)
+}
+
+export function renderWikiMarkdown(page: WikiPageDetail): string {
+  const tagsYaml = `[${page.tags.map((tag) => JSON.stringify(tag)).join(', ')}]`
+  const updatedAtIso = new Date(page.updatedAt).toISOString()
+  const frontmatter = [
+    '---',
+    `id: ${JSON.stringify(page.id)}`,
+    `kind: ${JSON.stringify(page.kind)}`,
+    `slug: ${JSON.stringify(page.slug)}`,
+    `title: ${JSON.stringify(page.title)}`,
+    `summary: ${JSON.stringify(page.summary)}`,
+    `tags: ${tagsYaml}`,
+    `version: ${page.version}`,
+    `updated_by: ${JSON.stringify(page.updatedBy)}`,
+    `source_tainted: ${page.sourceTainted ? 'true' : 'false'}`,
+    `updated_at: ${JSON.stringify(updatedAtIso)}`,
+    '---',
+  ].join('\n')
+
+  const body = page.body.trimEnd()
+  return body ? `${frontmatter}\n\n${body}\n` : `${frontmatter}\n`
+}
+
+export function writeWikiMirror(dataDir: string | undefined, page: WikiPageDetail): void {
+  if (!dataDir || !dataDir.trim()) return
+  const filePath = wikiPageFilePath(dataDir, page.kind, page.slug)
+  mkdirSync(dirname(filePath), { recursive: true })
+  const tmpPath = `${filePath}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
+  try {
+    writeFileSync(tmpPath, renderWikiMarkdown(page), 'utf8')
+    renameSync(tmpPath, filePath)
+  } catch (err) {
+    rmSync(tmpPath, { force: true })
+    throw err
+  }
+}
+
+export function removeWikiMirror(dataDir: string | undefined, kind: WikiKind, slug: string): void {
+  if (!dataDir || !dataDir.trim()) return
+  const filePath = wikiPageFilePath(dataDir, kind, slug)
+  rmSync(filePath, { force: true })
+}

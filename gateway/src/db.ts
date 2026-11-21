@@ -319,6 +319,55 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_bot_mcp_servers_server ON bot_mcp_servers(server_id);
     `)
   },
+  // v14：共享团队实体知识库（contact / client / project / topic），含修订历史与 FTS5 全文索引
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS wiki_pages (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        body TEXT NOT NULL DEFAULT '',
+        search_text TEXT NOT NULL DEFAULT '',
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        updated_by TEXT NOT NULL DEFAULT 'operator',
+        version INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        archived_at INTEGER,
+        UNIQUE(kind, slug)
+      );
+      CREATE INDEX IF NOT EXISTS idx_wiki_pages_active ON wiki_pages(archived_at, kind, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS wiki_revisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        page_id TEXT NOT NULL REFERENCES wiki_pages(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        body TEXT NOT NULL DEFAULT '',
+        edited_by TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        UNIQUE(page_id, version)
+      );
+      CREATE INDEX IF NOT EXISTS idx_wiki_revisions_page ON wiki_revisions(page_id, version DESC);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
+        page_id UNINDEXED,
+        title,
+        tags,
+        summary,
+        body,
+        search_text,
+        tokenize='unicode61 remove_diacritics 2'
+      );
+    `)
+  },
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

@@ -15,6 +15,7 @@ export type GatewayEvent =
   | { type: 'setup.browser'; browser: BrowserStatus }
   | { type: 'connectors_changed' }
   | { type: 'mcp_changed' }
+  | { type: 'wiki_changed' }
 
 type WsLike = { send(data: string): void }
 
