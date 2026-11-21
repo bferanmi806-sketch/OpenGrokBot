@@ -133,4 +133,34 @@ describe('Sidebar', () => {
     expect(screen.getByRole('button', { name: 'Connectors (needs attention)' })).toBeInTheDocument()
     expect(container.querySelector('.sidebar-foot-dot')).not.toBeNull()
   })
+
+  it('offers a quick theme toggle in the header when provided', async () => {
+    const onToggleTheme = vi.fn()
+    const { rerender } = render(
+      <Sidebar
+        conversations={[conversation()]}
+        selectedId={null}
+        statuses={{}}
+        onSelect={() => {}}
+        onNewBot={() => {}}
+        resolvedTheme="dark"
+        onToggleTheme={onToggleTheme}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Switch to light theme' }))
+    expect(onToggleTheme).toHaveBeenCalledTimes(1)
+
+    rerender(
+      <Sidebar
+        conversations={[conversation()]}
+        selectedId={null}
+        statuses={{}}
+        onSelect={() => {}}
+        onNewBot={() => {}}
+        resolvedTheme="light"
+        onToggleTheme={onToggleTheme}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'Switch to dark theme' })).toBeInTheDocument()
+  })
 })

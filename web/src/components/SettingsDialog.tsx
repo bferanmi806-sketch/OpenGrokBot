@@ -3,7 +3,7 @@ import { ApiError, FieldErrors, SignedOut, downloadBrowser, fetchAbout, fetchSet
 import { desktopApi, type DesktopInfo } from '../desktop'
 import { useT, type MessageKey } from '../i18n'
 import { errorText } from '../i18n/describe'
-import type { AboutInfo, BrowserStatus, ConnectionsState, FieldError, ProviderPreset, SettingsView, SetupInfo } from '../types'
+import type { AboutInfo, BrowserStatus, ConnectionsState, FieldError, ProviderPreset, SettingsView, SetupInfo, ThemeSetting } from '../types'
 import { connectionLabel, fieldText } from './ModelsDialog'
 import { BrowserLine, type LanguageSetting } from './SetupWizard'
 import { StartAtLogin } from './StartAtLogin'
@@ -12,6 +12,7 @@ import { XIcon } from './Icons'
 
 type Computers = SettingsView['values']['computers']
 const COMPUTERS: Computers[] = ['auto', 'local', 'docker']
+const THEMES: ThemeSetting[] = ['dark', 'light', 'system']
 
 /** 一块设置：标题 + 内容 */
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -28,13 +29,15 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  * 被环境变量定死的项只读，说清楚去哪改；改了要重启才生效的，写明。
  * 桌面版多一块「桌面版」：开机自启（浏览器里打开没有这块）。
  */
-export function SettingsDialog({ llms, providers, browser, language, onLanguage, onBrowser, onModels, onWizard, onSignedOut, onClose }: {
+export function SettingsDialog({ llms, providers, browser, language, onLanguage, theme, onTheme, onBrowser, onModels, onWizard, onSignedOut, onClose }: {
   llms: ConnectionsState | null
   providers: ProviderPreset[]
   /** 浏览器此刻的状态（经 /ws 实时更新）；null = 还没收到过，用拉回来的那份 */
   browser: BrowserStatus | null
   language: LanguageSetting
   onLanguage: (next: LanguageSetting) => void
+  theme?: ThemeSetting
+  onTheme?: (next: ThemeSetting) => void
   onBrowser: (next: BrowserStatus) => void
   onModels: () => void
   /** 重开设置向导：换服务商、从演示模式接真模型 */
@@ -57,19 +60,23 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
 
   useEffect(() => {
     let live = true
-    Promise.all([fetchSettings(), fetchSetup(), fetchAbout()])
-      .then(([s, su, a]) => {
+    const api = desktopApi()
+    const desktopPromise: Promise<DesktopInfo | null> = api
+      ? Promise.resolve(api.info()).catch(() => null)
+      : Promise.resolve(null)
+    Promise.all([fetchSettings(), fetchSetup(), fetchAbout(), desktopPromise])
+      .then(([s, su, a, d]) => {
         if (!live) return
         setSettings(s)
         setMirror(s.values.browserMirror)
         setSetup(su)
         setAbout(a)
+        setDesktop(d)
       })
       .catch((err: unknown) => {
         if (err instanceof SignedOut) onSignedOut()
         else if (live) setLoadError(true)
       })
-    desktopApi()?.info().then((d) => { if (live) setDesktop(d) }).catch(() => {})
     return () => { live = false }
   }, [onSignedOut])
 
@@ -169,6 +176,21 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
                 ))}
               </div>
               {errorFor('language')}
+            </Section>
+
+            <Section title={t('settings.theme')}>
+              <div className="setup-langs">
+                {THEMES.map((mode) => (
+                  <label key={mode} className="setup-radio">
+                    <input
+                      type="radio" name="settings-theme" checked={(theme ?? settings.values.theme ?? 'dark') === mode}
+                      onChange={() => { onTheme?.(mode); void save({ theme: mode }) }}
+                    />
+                    {t(`settings.theme.${mode}` as MessageKey)}
+                  </label>
+                ))}
+              </div>
+              {errorFor('theme')}
             </Section>
 
             <Section title={t('setup.computer.title')}>

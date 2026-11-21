@@ -275,6 +275,9 @@ export type SetupInfo = {
   }
 }
 
+export type ThemeSetting = 'dark' | 'light' | 'system'
+export type ResolvedTheme = 'dark' | 'light'
+
 /** /api/settings：生效的设置、每项来自哪（env 的在界面上锁定）、改了哪些要重启网关 */
 export type SettingsView = {
   values: {
@@ -283,6 +286,7 @@ export type SettingsView = {
     model: string
     vision: boolean
     language: '' | 'en' | 'zh-CN'
+    theme?: ThemeSetting
     computers: 'auto' | 'docker' | 'local'
     browserMirror: string
     checkUpdates: boolean

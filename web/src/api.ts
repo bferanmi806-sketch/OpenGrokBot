@@ -81,16 +81,27 @@ export async function checkSession(): Promise<boolean> {
   return res.status !== 401
 }
 
-/** 设置里存的界面语言；空串 = 跟浏览器。拿不到（老网关没有这个路由）就当没设 */
-export async function fetchLanguage(): Promise<string> {
+/** 启动时一次拿回界面语言与主题；老网关没有这个路由或没存过就回默认值 */
+export async function fetchUiPrefs(): Promise<{ language: string; theme: '' | 'dark' | 'light' | 'system'; themeSaved: boolean }> {
   try {
     const res = await fetch('/api/settings')
-    if (!res.ok) return ''
-    const body = (await res.json()) as { values?: { language?: unknown } }
-    return typeof body.values?.language === 'string' ? body.values.language : ''
+    if (!res.ok) return { language: '', theme: '', themeSaved: false }
+    const body = (await res.json()) as {
+      values?: { language?: unknown; theme?: unknown }
+      sources?: { theme?: unknown }
+    }
+    const language = typeof body.values?.language === 'string' ? body.values.language : ''
+    const rawTheme = body.values?.theme
+    const theme = rawTheme === 'dark' || rawTheme === 'light' || rawTheme === 'system' ? rawTheme : ''
+    return { language, theme, themeSaved: body.sources?.theme === 'saved' }
   } catch {
-    return ''
+    return { language: '', theme: '', themeSaved: false }
   }
+}
+
+/** 设置里存的界面语言；空串 = 跟浏览器。拿不到（老网关没有这个路由）就当没设 */
+export async function fetchLanguage(): Promise<string> {
+  return (await fetchUiPrefs()).language
 }
 
 export const fetchBots = () => getJson<Bot[]>('/api/bots')

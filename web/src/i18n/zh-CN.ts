@@ -578,7 +578,13 @@ export const zhCN: Record<MessageKey, string> = {
 
   // 设置页
   'sidebar.settings': '设置',
+  'sidebar.themeToLight': '切换到浅色主题',
+  'sidebar.themeToDark': '切换到深色主题',
   'settings.title': '设置',
+  'settings.theme': '外观',
+  'settings.theme.dark': '深色',
+  'settings.theme.light': '浅色',
+  'settings.theme.system': '跟随系统',
   'settings.close': '关闭设置',
   'settings.loading': '正在读取…',
   'settings.loadFailed': '读不到设置。确认网关在运行，再打开一次。',

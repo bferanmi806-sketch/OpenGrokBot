@@ -59,11 +59,11 @@ function gateway(settings: SettingsView, extra: Record<string, (body: Record<str
   })
 }
 
-function show(opts: { lang?: 'en' | 'zh-CN' } = {}) {
-  const props = { onLanguage: vi.fn(), onBrowser: vi.fn(), onModels: vi.fn(), onWizard: vi.fn(), onSignedOut: vi.fn(), onClose: vi.fn() }
+function show(opts: { lang?: 'en' | 'zh-CN'; theme?: 'dark' | 'light' | 'system' } = {}) {
+  const props = { onLanguage: vi.fn(), onTheme: vi.fn(), onBrowser: vi.fn(), onModels: vi.fn(), onWizard: vi.fn(), onSignedOut: vi.fn(), onClose: vi.fn() }
   render(
     <I18nProvider lang={opts.lang ?? 'en'}>
-      <SettingsDialog llms={llms} providers={providers} browser={null} language="" {...props} />
+      <SettingsDialog llms={llms} providers={providers} browser={null} language="" theme={opts.theme ?? 'dark'} {...props} />
     </I18nProvider>,
   )
   return props
@@ -236,5 +236,19 @@ describe('SettingsDialog', () => {
     await user.click(check)
     await waitFor(() => expect(calls.at(-1)).toEqual({ method: 'PUT', path: '/api/settings', body: { checkUpdates: false } }))
     expect(check).not.toBeChecked()
+  })
+
+  it('switches appearance between dark, light and follow system', async () => {
+    const calls = gateway(view(), {
+      'PUT /api/settings': (b) => ({ body: view({ theme: b.theme as 'light' | 'dark' | 'system' }, { theme: 'saved' }) }),
+    })
+    const user = userEvent.setup()
+    const p = show()
+    expect(await screen.findByLabelText('Dark')).toBeChecked()
+    await user.click(screen.getByLabelText('Light'))
+    expect(p.onTheme).toHaveBeenCalledWith('light')
+    await waitFor(() => expect(calls.at(-1)).toEqual({ method: 'PUT', path: '/api/settings', body: { theme: 'light' } }))
+    await user.click(screen.getByLabelText('Follow system'))
+    expect(p.onTheme).toHaveBeenCalledWith('system')
   })
 })

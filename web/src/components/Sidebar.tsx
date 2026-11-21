@@ -1,12 +1,12 @@
 import type {
   ActivityPayload, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, BotStatus, Conversation, LoginPayload,
-  MemoryPayload, QuestionPayload, ReportPayload, RoutinePayload, ScreenshotPayload, WebhookPayload,
+  MemoryPayload, QuestionPayload, ReportPayload, ResolvedTheme, RoutinePayload, ScreenshotPayload, WebhookPayload,
 } from '../types'
 import { useT, type MessageKey, type T } from '../i18n'
 import { isNotice, noticeText } from '../i18n/describe'
 import { BotAvatar, conversationSeed } from './BotAvatar'
 import { useEscape } from './ConfirmDialog'
-import { CpuSparkleIcon, PlugIcon, PlusIcon, SettingsIcon } from './Icons'
+import { CpuSparkleIcon, MoonIcon, PlugIcon, PlusIcon, SettingsIcon, SunIcon } from './Icons'
 
 /**
  * 单聊就是那位同事的状态。群只说「有人在干活」：等你、卡住、刚干完说的是某一位同事，
@@ -97,6 +97,8 @@ export function Sidebar({
   onConnectors,
   connectorsAttention,
   onSettings,
+  resolvedTheme,
+  onToggleTheme,
   open,
   onClose,
 }: {
@@ -113,6 +115,9 @@ export function Sidebar({
   connectorsAttention?: boolean
   /** 打开设置页；老网关没有设置路由就不传 */
   onSettings?: () => void
+  /** 当前生效的主题（深色 / 浅色）与快捷切换回调 */
+  resolvedTheme?: ResolvedTheme
+  onToggleTheme?: () => void
   /** 窄窗口下侧栏抽屉是否展开 */
   open?: boolean
   onClose?: () => void
@@ -165,6 +170,17 @@ export function Sidebar({
             <span className="sidebar-brand-mark" aria-hidden="true" />
             <span>OpenSuperBot</span>
           </span>
+          {onToggleTheme ? (
+            <button
+              type="button"
+              className="sidebar-theme-btn"
+              onClick={onToggleTheme}
+              aria-label={t(resolvedTheme === 'light' ? 'sidebar.themeToDark' : 'sidebar.themeToLight')}
+              title={t(resolvedTheme === 'light' ? 'sidebar.themeToDark' : 'sidebar.themeToLight')}
+            >
+              {resolvedTheme === 'light' ? <MoonIcon size={14} /> : <SunIcon size={14} />}
+            </button>
+          ) : null}
         </div>
 
         <div className="sidebar-list">

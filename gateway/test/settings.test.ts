@@ -24,12 +24,12 @@ describe('settings', () => {
     expect(readSavedSettings(db)).toEqual({})
     const saved = saveSettings(db, {
       provider: 'deepseek', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat', vision: false,
-      language: 'zh-CN', computers: 'local', browserMirror: 'https://cdn.npmmirror.com/binaries/playwright', checkUpdates: false,
+      language: 'zh-CN', theme: 'light', computers: 'local', browserMirror: 'https://cdn.npmmirror.com/binaries/playwright', checkUpdates: false,
     })
     expect(saved).toEqual({ ok: true })
     expect(readSavedSettings(db)).toEqual({
       provider: 'deepseek', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat', vision: false,
-      language: 'zh-CN', computers: 'local', browserMirror: 'https://cdn.npmmirror.com/binaries/playwright', checkUpdates: false,
+      language: 'zh-CN', theme: 'light', computers: 'local', browserMirror: 'https://cdn.npmmirror.com/binaries/playwright', checkUpdates: false,
     })
     const { values, sources } = resolveSettings({}, readSavedSettings(db))
     expect(values.model).toBe('deepseek-chat')
@@ -48,13 +48,13 @@ describe('settings', () => {
   it('refuses unknown keys and bad values, and then saves nothing at all', () => {
     const db = openDb(':memory:')
     const result = saveSettings(db, {
-      model: 'deepseek-chat', apiKey: 'sk-x', baseURL: 'file:///etc/passwd', vision: 'yes', language: 'fr',
+      model: 'deepseek-chat', apiKey: 'sk-x', baseURL: 'file:///etc/passwd', vision: 'yes', language: 'fr', theme: 'neon',
       computers: 'cloud', browserMirror: 'ftp://mirror', provider: 'Deep Seek!', checkUpdates: 1,
     })
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(Object.fromEntries(result.errors.map((e) => [e.key, e.code]))).toEqual({
-      apiKey: 'unknown_setting', baseURL: 'invalid', vision: 'invalid', language: 'invalid', computers: 'invalid',
+      apiKey: 'unknown_setting', baseURL: 'invalid', vision: 'invalid', language: 'invalid', theme: 'invalid', computers: 'invalid',
       browserMirror: 'invalid', provider: 'invalid', checkUpdates: 'invalid',
     })
     expect(readSavedSettings(db)).toEqual({})
@@ -62,6 +62,8 @@ describe('settings', () => {
     expect(saveSettings(db, { model: '  qwen-plus  ' })).toEqual({ ok: true })
     expect(readSavedSettings(db).model).toBe('qwen-plus')
     expect(saveSettings(db, { browserMirror: '' })).toEqual({ ok: true }) // 明确选官方源
+    expect(saveSettings(db, { language: '', theme: 'system' })).toEqual({ ok: true }) // 跟随浏览器/系统
+    expect(readSavedSettings(db)).toMatchObject({ language: '', theme: 'system' })
   })
 
   it('skips rows it cannot make sense of instead of failing to start', () => {

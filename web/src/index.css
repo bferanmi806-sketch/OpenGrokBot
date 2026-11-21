@@ -1,4 +1,4 @@
-/* OpenSuperBot — 精致暗色工作台设计系统（Obsidian Zinc + 微光发丝边框 + 细腻动效）。
+/* OpenSuperBot — 精致工作台设计系统（深色 Obsidian Zinc + 浅色 Paper Zinc，微光发丝边框 + 细腻动效）。
    信息架构保持清晰：侧栏是组织架构，线程是协作流，chip 是管理界面，右侧是同事电脑。 */
 
 :root {
@@ -9,18 +9,32 @@
   --bg-card: #161920;
   --bg-card-hover: #1b1f28;
   --bg-input: #11141b;
+  --bg-subtle: rgba(255, 255, 255, 0.024);
   --bg-hover: rgba(255, 255, 255, 0.048);
   --bg-active: rgba(255, 255, 255, 0.084);
+  --bg-disabled: rgba(255, 255, 255, 0.08);
+  --bg-track: rgba(255, 255, 255, 0.07);
+  --bg-activity: rgba(22, 25, 32, 0.65);
+  --bg-inset: #0c0e12;
   --bg-user: #1b2231;
 
   --border: rgba(255, 255, 255, 0.075);
   --border-strong: rgba(255, 255, 255, 0.135);
   --border-focus: rgba(255, 255, 255, 0.26);
+  --border-user: rgba(136, 168, 230, 0.18);
 
   --highlight-top: inset 0 1px 0 rgba(255, 255, 255, 0.045);
   --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.22);
   --shadow-md: 0 10px 28px rgba(0, 0, 0, 0.42);
   --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.65), 0 4px 16px rgba(0, 0, 0, 0.36);
+  --focus-ring: rgba(255, 255, 255, 0.04);
+  --welcome-glow: rgba(255, 255, 255, 0.06);
+
+  --scrim: rgba(4, 5, 8, 0.72);
+  --scrim-strong: rgba(4, 5, 8, 0.88);
+  --drop-bg: rgba(11, 12, 15, 0.88);
+  --scroll-thumb: rgba(255, 255, 255, 0.13);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.22);
 
   --text: #f0f2f5;
   --text-dim: #9aa1ae;
@@ -28,10 +42,13 @@
 
   --accent: #f2f4f8;
   --accent-fg: #0b0c0f;
+  --accent-hover: #ffffff;
+  --badge-fg: #111111;
   --blue: #58a6ff;
   --amber: #e3ad4b;
   --green: #4ac976;
   --red: #ec5b53;
+  --red-text: #f4a8a5;
 
   --r-sm: 7px;
   --r-md: 10px;
@@ -42,6 +59,56 @@
   --t-fast: 150ms var(--ease-out);
 
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+html[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #f6f7f9;
+  --bg-raised: #eef0f4;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f8f9fb;
+  --bg-input: #ffffff;
+  --bg-subtle: rgba(15, 23, 42, 0.028);
+  --bg-hover: rgba(15, 23, 42, 0.05);
+  --bg-active: rgba(15, 23, 42, 0.085);
+  --bg-disabled: rgba(15, 23, 42, 0.08);
+  --bg-track: rgba(15, 23, 42, 0.08);
+  --bg-activity: #f0f2f6;
+  --bg-inset: #e8ecf2;
+  --bg-user: #e7f0ff;
+
+  --border: rgba(15, 23, 42, 0.085);
+  --border-strong: rgba(15, 23, 42, 0.145);
+  --border-focus: rgba(15, 23, 42, 0.32);
+  --border-user: rgba(29, 108, 224, 0.18);
+
+  --highlight-top: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 8px 24px rgba(15, 23, 42, 0.09), 0 2px 6px rgba(15, 23, 42, 0.05);
+  --shadow-lg: 0 20px 48px rgba(15, 23, 42, 0.16), 0 4px 14px rgba(15, 23, 42, 0.08);
+  --focus-ring: rgba(29, 108, 224, 0.10);
+  --welcome-glow: rgba(15, 23, 42, 0.05);
+
+  --scrim: rgba(15, 23, 42, 0.42);
+  --scrim-strong: rgba(15, 23, 42, 0.78);
+  --drop-bg: rgba(246, 247, 249, 0.92);
+  --scroll-thumb: rgba(15, 23, 42, 0.18);
+  --scroll-thumb-hover: rgba(15, 23, 42, 0.32);
+
+  --text: #14161a;
+  --text-dim: #525a69;
+  --text-faint: #737c8d;
+
+  --accent: #14161a;
+  --accent-fg: #ffffff;
+  --accent-hover: #2c313c;
+  --badge-fg: #ffffff;
+  --blue: #1d6ce0;
+  --amber: #b4690e;
+  --green: #15803d;
+  --red: #c93a33;
+  --red-text: #9f231d;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -60,20 +127,20 @@ body {
 button, input, select, textarea { font: inherit; }
 
 :focus-visible {
-  outline: 2px solid rgba(88, 166, 255, 0.62);
+  outline: 2px solid color-mix(in srgb, var(--blue) 62%, transparent);
   outline-offset: 2px;
 }
 .composer-box textarea:focus-visible { outline: none; }
 
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.13);
+  background: var(--scroll-thumb);
   border: 2px solid transparent;
   background-clip: padding-box;
   border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.22);
+  background: var(--scroll-thumb-hover);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
@@ -131,6 +198,14 @@ html[data-desktop='darwin'] .signin::before {
   background: linear-gradient(135deg, #68adff, #4ac976);
   box-shadow: 0 0 10px rgba(88, 166, 255, 0.45);
 }
+.sidebar-theme-btn {
+  margin-left: auto; width: 26px; height: 26px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-dim); cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.sidebar-theme-btn:hover { background: var(--bg-hover); border-color: var(--border); color: var(--text); }
 
 .sidebar-list {
   flex: 1; overflow-y: auto;
@@ -200,10 +275,10 @@ html[data-desktop='darwin'] .signin::before {
 /* 等你拍板的审批数 */
 .sidebar-badge {
   margin-left: auto; flex-shrink: 0; min-width: 18px; height: 18px; padding: 0 5px;
-  border-radius: 9px; background: var(--amber); color: #111;
+  border-radius: 9px; background: var(--amber); color: var(--badge-fg);
   font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
   display: inline-flex; align-items: center; justify-content: center;
-  box-shadow: 0 2px 6px rgba(227, 173, 75, 0.3);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--amber) 30%, transparent);
 }
 
 .sidebar-footer {
@@ -215,21 +290,21 @@ html[data-desktop='darwin'] .signin::before {
   flex: 1; min-width: 0; height: 32px; padding: 0 8px;
   display: inline-flex; align-items: center; gap: 6px;
   border: 1px solid var(--border); border-radius: var(--r-sm);
-  background: rgba(255, 255, 255, 0.02); color: var(--text-dim);
+  background: var(--bg-subtle); color: var(--text-dim);
   font-size: 12px; font-weight: 500; cursor: pointer;
   transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 .sidebar-foot-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-foot-btn .sidebar-foot-dot {
   width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; margin-left: auto;
-  background: var(--amber); box-shadow: 0 0 6px rgba(227, 173, 75, 0.5);
+  background: var(--amber); box-shadow: 0 0 6px color-mix(in srgb, var(--amber) 50%, transparent);
 }
 .sidebar-foot-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--text); }
 .sidebar-foot-icon {
   width: 32px; height: 32px; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--border); border-radius: var(--r-sm);
-  background: rgba(255, 255, 255, 0.02); color: var(--text-dim); cursor: pointer;
+  background: var(--bg-subtle); color: var(--text-dim); cursor: pointer;
   transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 .sidebar-foot-icon:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--text); }
@@ -262,7 +337,7 @@ html[data-desktop='darwin'] .signin::before {
   }
   .sidebar-scrim {
     display: block; position: fixed; inset: 0; z-index: 15;
-    background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(3px);
+    background: var(--scrim);
     animation: scrim-in 150ms ease-out;
   }
 }
@@ -346,6 +421,16 @@ html[data-desktop='darwin'] .signin::before {
 @keyframes state-pulse { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .avatar[data-state='thinking']::after { animation: none; } }
 
+/* 弹窗打开时暂停底层头像和状态点的无限动画，避免 Chromium/Electron 合成层持续重绘与闪烁 */
+body:has(.modal-scrim, .lightbox-scrim) .avatar .av-body,
+body:has(.modal-scrim, .lightbox-scrim) .avatar .av-eyes,
+body:has(.modal-scrim, .lightbox-scrim) .avatar .av-pupil,
+body:has(.modal-scrim, .lightbox-scrim) .avatar::after,
+body:has(.modal-scrim, .lightbox-scrim) .bubble.typing,
+body:has(.modal-scrim, .lightbox-scrim) .activity-pulse {
+  animation-play-state: paused;
+}
+
 /* ── 线程与顶部栏 ─────────────────────── */
 .thread { position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
 .thread-empty { align-items: center; justify-content: center; color: var(--text-faint); }
@@ -354,8 +439,7 @@ html[data-desktop='darwin'] .signin::before {
   display: flex; align-items: center; gap: 10px;
   padding: 0 18px; height: 48px; flex-shrink: 0;
   border-bottom: 1px solid var(--border);
-  background: rgba(11, 12, 15, 0.85);
-  backdrop-filter: blur(12px);
+  background: var(--bg);
 }
 .thread-heading { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; }
 .thread-name { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
@@ -369,13 +453,13 @@ html[data-desktop='darwin'] .signin::before {
   width: 30px; height: 30px; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--border-strong); border-radius: var(--r-sm);
-  background: rgba(255, 255, 255, 0.02); color: var(--text-dim); cursor: pointer;
+  background: var(--bg-subtle); color: var(--text-dim); cursor: pointer;
   transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 .screen-button:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border-focus); }
 .screen-button.active {
-  background: rgba(88, 166, 255, 0.14);
-  border-color: rgba(88, 166, 255, 0.42);
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+  border-color: color-mix(in srgb, var(--blue) 42%, transparent);
   color: var(--blue);
 }
 
@@ -388,7 +472,7 @@ html[data-desktop='darwin'] .signin::before {
 }
 .thread-welcome-avatar {
   padding: 10px; border-radius: 22px;
-  background: radial-gradient(circle at 50% 35%, rgba(255, 255, 255, 0.06), transparent 72%);
+  background: radial-gradient(circle at 50% 35%, var(--welcome-glow), transparent 72%);
 }
 .thread-welcome-hint { color: var(--text-dim); font-size: 13px; max-width: 400px; line-height: 1.6; }
 .thread-starters {
@@ -434,7 +518,7 @@ html[data-desktop='darwin'] .signin::before {
   align-self: flex-end; width: auto; max-width: min(78%, 560px);
   padding: 9px 14px;
   background: var(--bg-user);
-  border: 1px solid rgba(136, 168, 230, 0.18);
+  border: 1px solid var(--border-user);
   border-radius: 16px 16px 4px 16px;
   box-shadow: var(--highlight-top), var(--shadow-sm);
   color: var(--text);
@@ -532,7 +616,7 @@ html[data-desktop='darwin'] .signin::before {
   transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast), opacity var(--t-fast);
 }
 .approval-buttons .approve { background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent); }
-.approval-buttons .approve:hover:not(:disabled) { background: #fff; }
+.approval-buttons .approve:hover:not(:disabled) { background: var(--accent-hover); }
 .approval-buttons .discard { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
 .approval-buttons .discard:hover:not(:disabled) { background: var(--bg-hover); }
 .approval-buttons button:disabled { opacity: 0.45; cursor: default; }
@@ -546,7 +630,7 @@ html[data-desktop='darwin'] .signin::before {
 
 .approval-scope {
   display: inline-block; margin-top: 6px; padding: 1.5px 7px; border: 1px solid var(--border-strong);
-  border-radius: 5px; background: rgba(255, 255, 255, 0.02);
+  border-radius: 5px; background: var(--bg-subtle);
   color: var(--text-dim); font-family: var(--mono); font-size: 11px;
 }
 .approval-buttons .remember-toggle {
@@ -557,7 +641,7 @@ html[data-desktop='darwin'] .signin::before {
 .approval-remember-why { color: var(--text-dim); font-size: 12px; }
 .approval-remember .approval-buttons { margin-top: 7px; flex-wrap: wrap; }
 .approval-buttons .remember { background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent); }
-.approval-buttons .remember:hover:not(:disabled) { background: #fff; }
+.approval-buttons .remember:hover:not(:disabled) { background: var(--accent-hover); }
 .approval-items { margin-top: 9px; }
 .approval-items ul { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
 .approval-items li { padding: 3px 0; font-size: 13px; }
@@ -575,7 +659,7 @@ html[data-desktop='darwin'] .signin::before {
 .decision {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 10px; border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border);
+  background: var(--bg-subtle); border: 1px solid var(--border);
   color: var(--text-dim); font-size: 12px;
 }
 
@@ -595,7 +679,7 @@ html[data-desktop='darwin'] .signin::before {
 .question-options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .question-option {
   padding: 6px 12px; border: 1px solid var(--border-strong); border-radius: var(--r-sm);
-  background: rgba(255, 255, 255, 0.02); color: var(--text); cursor: pointer;
+  background: var(--bg-subtle); color: var(--text); cursor: pointer;
   transition: background var(--t-fast), border-color var(--t-fast);
 }
 button.question-option:hover { background: var(--bg-hover); border-color: var(--border-focus); }
@@ -607,7 +691,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   background: var(--accent); color: var(--accent-fg); font-weight: 500; cursor: pointer;
   transition: background var(--t-fast), opacity var(--t-fast);
 }
-.question-submit:hover:not(:disabled) { background: #fff; }
+.question-submit:hover:not(:disabled) { background: var(--accent-hover); }
 .question-submit:disabled { opacity: 0.4; cursor: default; }
 .question-hint { margin-top: 9px; color: var(--text-faint); font-size: 12px; }
 
@@ -615,13 +699,15 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .memory-rule { margin-top: 5px; font-weight: 600; }
 .memory-diff {
   margin-top: 8px; padding: 7px 10px; border-radius: var(--r-sm);
-  background: rgba(74, 201, 118, 0.09); border: 1px solid rgba(74, 201, 118, 0.2); color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 24%, transparent); color: var(--green);
   font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
 }
 .memory-total { margin-top: 7px; color: var(--text-faint); font-size: 12px; }
 .memory-rule.removed { text-decoration: line-through; color: var(--text-dim); }
 .memory-diff.removed {
-  background: rgba(236, 91, 83, 0.09); border-color: rgba(236, 91, 83, 0.2); color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  border-color: color-mix(in srgb, var(--red) 24%, transparent); color: var(--red);
 }
 
 .routine-name {
@@ -658,16 +744,19 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   background: var(--accent); color: var(--accent-fg); font-weight: 500; cursor: pointer;
   transition: background var(--t-fast);
 }
-.login-open:hover { background: #fff; }
+.login-open:hover { background: var(--accent-hover); }
 
 /* ── 电脑步骤折叠条 ─────────────────────── */
 .activity-chip {
   width: 100%;
-  background: rgba(22, 25, 32, 0.65);
+  background: var(--bg-activity);
   border: 1px solid var(--border); border-radius: var(--r-lg);
   transition: border-color var(--t-fast), background var(--t-fast);
 }
-.activity-chip.running { border-color: rgba(88, 166, 255, 0.3); background: rgba(88, 166, 255, 0.04); }
+.activity-chip.running {
+  border-color: color-mix(in srgb, var(--blue) 32%, transparent);
+  background: color-mix(in srgb, var(--blue) 5%, var(--bg-activity));
+}
 .activity-toggle {
   display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 13px;
   border: 0; border-radius: var(--r-lg); background: transparent; color: inherit;
@@ -714,7 +803,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 }
 .composer-box:focus-within {
   border-color: var(--border-focus);
-  box-shadow: var(--highlight-top), var(--shadow-md), 0 0 0 3px rgba(255, 255, 255, 0.04);
+  box-shadow: var(--highlight-top), var(--shadow-md), 0 0 0 3px var(--focus-ring);
 }
 .composer-box textarea {
   width: 100%; min-height: 42px; max-height: 180px; resize: none; overflow-y: auto;
@@ -753,15 +842,15 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .composer-send {
   border: 0; background: var(--accent); color: var(--accent-fg);
 }
-.composer-send:hover:not(:disabled) { background: #fff; transform: translateY(-1px); }
+.composer-send:hover:not(:disabled) { background: var(--accent-hover); transform: translateY(-1px); }
 .composer-send:disabled {
-  background: rgba(255, 255, 255, 0.08); color: var(--text-faint); cursor: default;
+  background: var(--bg-disabled); color: var(--text-faint); cursor: default;
 }
 .composer-stop {
-  border: 1px solid rgba(236, 91, 83, 0.42);
-  background: rgba(236, 91, 83, 0.12); color: var(--red);
+  border: 1px solid color-mix(in srgb, var(--red) 42%, transparent);
+  background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red);
 }
-.composer-stop:hover { background: rgba(236, 91, 83, 0.2); }
+.composer-stop:hover { background: color-mix(in srgb, var(--red) 20%, transparent); }
 
 /* 浮动「回到底部」胶囊 */
 .jump-latest {
@@ -769,14 +858,14 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   z-index: 4; height: 30px; padding: 0 13px;
   display: inline-flex; align-items: center; gap: 6px;
   border-radius: 999px; border: 1px solid var(--border-strong);
-  background: rgba(22, 25, 32, 0.92); backdrop-filter: blur(10px);
+  background: var(--bg-card);
   box-shadow: var(--shadow-md); color: var(--text-dim);
   font-size: 12px; font-weight: 500; white-space: nowrap; cursor: pointer;
   transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 .jump-latest:hover { background: var(--bg-card-hover); color: var(--text); border-color: var(--border-focus); }
 .jump-latest.unread {
-  border-color: rgba(88, 166, 255, 0.48);
+  border-color: color-mix(in srgb, var(--blue) 48%, transparent);
   color: var(--blue);
 }
 
@@ -812,8 +901,8 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .drop-hint {
   position: absolute; inset: 14px; z-index: 6;
   display: flex; align-items: center; justify-content: center;
-  border: 1.5px dashed rgba(88, 166, 255, 0.55); border-radius: var(--r-xl);
-  background: rgba(11, 12, 15, 0.82); backdrop-filter: blur(6px);
+  border: 1.5px dashed color-mix(in srgb, var(--blue) 55%, transparent); border-radius: var(--r-xl);
+  background: var(--drop-bg);
   color: var(--text); font-size: 14px; font-weight: 500; pointer-events: none;
 }
 
@@ -887,12 +976,12 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .panel-close:hover { background: var(--bg-hover); color: var(--text); }
 
 .panel-screen { width: 100%; aspect-ratio: 16 / 10; border: 0; background: #050608; display: block; flex-shrink: 0; }
-.panel-offline { padding: 26px 16px; text-align: center; background: #0c0e12; border-bottom: 1px solid var(--border); }
+.panel-offline { padding: 26px 16px; text-align: center; background: var(--bg-inset); border-bottom: 1px solid var(--border); }
 
 .panel-loading {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
   aspect-ratio: 16 / 10; padding: 0 22px; text-align: center; flex-shrink: 0;
-  background: #0c0e12; border-bottom: 1px solid var(--border);
+  background: var(--bg-inset); border-bottom: 1px solid var(--border);
 }
 .panel-spinner {
   width: 18px; height: 18px; margin-bottom: 6px; border-radius: 50%;
@@ -945,7 +1034,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 }
 .panel-usage-bar {
   margin-top: 7px; width: 100%; height: 5px;
-  border-radius: 999px; background: rgba(255, 255, 255, 0.07); overflow: hidden;
+  border-radius: 999px; background: var(--bg-track); overflow: hidden;
 }
 .panel-usage-fill {
   height: 100%; border-radius: 999px; background: var(--blue);
@@ -973,7 +1062,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .panel-memory-rule { min-width: 0; color: var(--text); font-size: 13px; line-height: 1.45; }
 .panel-skill-why { color: var(--text-dim); font-size: 12px; line-height: 1.45; }
 .panel-routine-tag {
-  margin-left: 6px; padding: 0 5px; border: 1px solid rgba(88, 166, 255, 0.35); border-radius: 4px;
+  margin-left: 6px; padding: 0 5px; border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent); border-radius: 4px;
   color: var(--blue); font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
 }
 .panel-actions { list-style: none; margin: 8px 0 0; padding: 0; }
@@ -997,14 +1086,14 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .panel-screen-cdp img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .panel-screen-status { padding: 5px 15px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
 .panel-problem {
-  padding: 8px 15px; font-size: 12px; color: #f4a8a5;
-  background: rgba(236, 91, 83, 0.12); border-bottom: 1px solid var(--border);
+  padding: 8px 15px; font-size: 12px; color: var(--red-text);
+  background: color-mix(in srgb, var(--red) 12%, transparent); border-bottom: 1px solid var(--border);
 }
 .panel-kind { padding: 8px 15px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
 .panel-window {
   display: flex; gap: 10px; align-items: center; justify-content: space-between;
   padding: 10px 15px; font-size: 13px;
-  background: rgba(227, 173, 75, 0.1); border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--amber) 11%, transparent); border-bottom: 1px solid var(--border);
 }
 .panel-switch { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0 0; font-size: 13px; line-height: 1.45; cursor: pointer; }
 .panel-switch input { margin-top: 3px; flex: none; accent-color: var(--accent); }
@@ -1036,7 +1125,9 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 
 .modal-scrim {
   position: fixed; inset: 0; z-index: 24;
-  background: rgba(4, 5, 8, 0.68); backdrop-filter: blur(6px);
+  background: var(--scrim);
+  isolation: isolate;
+  -webkit-app-region: no-drag;
   display: flex; align-items: center; justify-content: center; padding: 16px;
   animation: scrim-in 150ms ease-out;
 }
@@ -1047,6 +1138,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   background: var(--bg-card); border: 1px solid var(--border-strong);
   border-radius: var(--r-xl); padding: 18px 20px;
   box-shadow: var(--highlight-top), var(--shadow-lg);
+  contain: layout style;
   animation: modal-in 180ms var(--ease-out);
 }
 .modal-wide { width: min(560px, 100%); max-height: calc(100vh - 48px); overflow-y: auto; }
@@ -1083,7 +1175,9 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 /* 灯箱预览 */
 .lightbox-scrim {
   position: fixed; inset: 0; z-index: 36;
-  background: rgba(4, 5, 8, 0.84); backdrop-filter: blur(10px);
+  background: var(--scrim-strong);
+  isolation: isolate;
+  -webkit-app-region: no-drag;
   display: flex; align-items: center; justify-content: center; padding: 20px;
   animation: scrim-in 150ms ease-out;
 }
@@ -1095,7 +1189,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .lightbox-bar {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 12px; border-radius: var(--r-md);
-  background: rgba(22, 25, 32, 0.9); border: 1px solid var(--border-strong);
+  background: var(--bg-card); border: 1px solid var(--border-strong);
 }
 .lightbox-caption {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1138,9 +1232,9 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   transition: background var(--t-fast), border-color var(--t-fast);
 }
 .new-bot-buttons button[type="submit"] { background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent); }
-.new-bot-buttons button[type="submit"]:hover:not(:disabled) { background: #fff; }
+.new-bot-buttons button[type="submit"]:hover:not(:disabled) { background: var(--accent-hover); }
 .new-bot-buttons button[type="submit"]:disabled {
-  background: rgba(255, 255, 255, 0.08); color: var(--text-faint); border-color: transparent; cursor: default;
+  background: var(--bg-disabled); color: var(--text-faint); border-color: transparent; cursor: default;
 }
 .new-bot-buttons button[type="button"] { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
 .new-bot-buttons button[type="button"]:hover { background: var(--bg-hover); }
@@ -1220,16 +1314,17 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .conn-form label.conn-check-row, .conn-plan label.conn-check-row { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
 .conn-note { margin: -2px 0 0; color: var(--text-faint); font-size: 12px; line-height: 1.5; }
 .conn-plan {
-  border: 1px solid rgba(227, 173, 75, 0.38); background: rgba(227, 173, 75, 0.08); border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--amber) 38%, transparent);
+  background: color-mix(in srgb, var(--amber) 9%, transparent); border-radius: var(--r-md);
   padding: 10px 12px; font-size: 12px; line-height: 1.5; color: var(--text);
 }
 .conn-plan p { margin: 0 0 6px; }
 .conn-form-buttons { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
 .conn-form-buttons .spacer { flex: 1; }
 .conn-form-buttons button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 500; }
-.conn-form-buttons button.primary:hover:not(:disabled) { background: #fff; }
+.conn-form-buttons button.primary:hover:not(:disabled) { background: var(--accent-hover); }
 .conn-form-buttons button.primary:disabled {
-  background: rgba(255, 255, 255, 0.08); color: var(--text-faint); border-color: transparent;
+  background: var(--bg-disabled); color: var(--text-faint); border-color: transparent;
 }
 .conn-form-buttons button.link { border: 0; padding-left: 0; color: var(--blue); }
 .conn-form-buttons button.link:hover { background: transparent; text-decoration: underline; }
@@ -1238,7 +1333,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .model-chip {
   display: inline-flex; align-items: center; gap: 6px; max-width: 42%; min-width: 0; flex-shrink: 0;
   height: 28px; padding: 0 11px; border: 1px solid var(--border-strong); border-radius: 999px;
-  background: rgba(255, 255, 255, 0.02); color: var(--text-dim); font-size: 12px; cursor: pointer;
+  background: var(--bg-subtle); color: var(--text-dim); font-size: 12px; cursor: pointer;
   transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 .model-chip:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border-focus); }
@@ -1267,6 +1362,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .setup-langs { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 6px 16px; }
 .setup-langs legend { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; padding: 0; }
 .setup-radio { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.setup-radio input { accent-color: var(--accent); }
 .setup-region-title { font-size: 11px; font-weight: 600; letter-spacing: 0.05em; color: var(--text-faint); margin-bottom: 6px; text-transform: uppercase; }
 .setup-providers { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 7px; }
 .setup-provider {
@@ -1290,9 +1386,9 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 }
 .setup-buttons button:disabled { color: var(--text-faint); cursor: default; }
 .setup-buttons button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 500; }
-.setup-buttons button.primary:hover:not(:disabled) { background: #fff; }
+.setup-buttons button.primary:hover:not(:disabled) { background: var(--accent-hover); }
 .setup-buttons button.primary:disabled {
-  background: rgba(255, 255, 255, 0.08); color: var(--text-faint); border-color: transparent;
+  background: var(--bg-disabled); color: var(--text-faint); border-color: transparent;
 }
 .setup-buttons button.setup-demo { border-color: transparent; color: var(--text-dim); padding-left: 4px; padding-right: 4px; }
 .setup-buttons button.setup-demo:hover:not(:disabled) { background: transparent; color: var(--text); text-decoration: underline; }
@@ -1326,8 +1422,8 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .settings-restart { margin: 0; color: var(--amber); font-size: 12px; }
 .settings-update {
   display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
-  padding: 9px 12px; border: 1px solid rgba(91, 155, 255, 0.35); border-radius: var(--r-md);
-  background: rgba(91, 155, 255, 0.08); font-size: 13px; color: var(--text);
+  padding: 9px 12px; border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent); border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--blue) 9%, transparent); font-size: 13px; color: var(--text);
 }
 .settings-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .settings-buttons .spacer { flex: 1; }
@@ -1339,7 +1435,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .settings-buttons button:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-focus); }
 .settings-buttons button:disabled { color: var(--text-faint); cursor: default; }
 .settings-buttons button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 500; }
-.settings-buttons button.primary:hover { background: #fff; }
+.settings-buttons button.primary:hover { background: var(--accent-hover); }
 .settings-choices { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
 .settings-choices legend { padding: 0; margin-bottom: 4px; font-size: 12px; }
 .settings-choice { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; font-size: 13px; }
@@ -1358,10 +1454,10 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .demo-banner {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 8px 18px; border-bottom: 1px solid var(--border);
-  background: rgba(227, 173, 75, 0.08); font-size: 12px; color: var(--text-dim);
+  background: color-mix(in srgb, var(--amber) 9%, transparent); font-size: 12px; color: var(--text-dim);
 }
 .demo-banner-tag {
-  padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(227, 173, 75, 0.48);
+  padding: 1px 6px; border-radius: 4px; border: 1px solid color-mix(in srgb, var(--amber) 48%, transparent);
   color: var(--amber); font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
 }
 .demo-banner-text { flex: 1; min-width: 200px; line-height: 1.45; }
@@ -1370,7 +1466,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   background: var(--accent); color: var(--accent-fg); font-size: 12px; font-weight: 500; cursor: pointer;
   transition: background var(--t-fast);
 }
-.demo-banner button:hover { background: #fff; }
+.demo-banner button:hover { background: var(--accent-hover); }
 
 /* ── 连接器弹窗 ─────────────────────────── */
 .connectors-modal { width: min(600px, 100%); }
@@ -1421,10 +1517,10 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 500;
 }
 .connectors-key-form button.primary:hover:not(:disabled),
-.conn-actions button.primary:hover:not(:disabled) { background: #fff; }
+.conn-actions button.primary:hover:not(:disabled) { background: var(--accent-hover); }
 .connectors-key-form button.primary:disabled,
 .conn-actions button.primary:disabled {
-  background: rgba(255, 255, 255, 0.08); color: var(--text-faint); border-color: transparent;
+  background: var(--bg-disabled); color: var(--text-faint); border-color: transparent;
 }
 
 .connectors-need-key { margin: 0 0 12px; color: var(--amber); font-size: 12px; }
@@ -1460,16 +1556,16 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   border: 1px solid var(--border-strong); color: var(--text-dim);
 }
 .connector-status.active {
-  color: var(--green); border-color: rgba(74, 201, 118, 0.35); background: rgba(74, 201, 118, 0.08);
+  color: var(--green); border-color: color-mix(in srgb, var(--green) 35%, transparent); background: color-mix(in srgb, var(--green) 9%, transparent);
 }
 .connector-status.pending {
-  color: var(--blue); border-color: rgba(88, 166, 255, 0.35); background: rgba(88, 166, 255, 0.08);
+  color: var(--blue); border-color: color-mix(in srgb, var(--blue) 35%, transparent); background: color-mix(in srgb, var(--blue) 9%, transparent);
 }
 .connector-status.expired {
-  color: var(--amber); border-color: rgba(227, 173, 75, 0.42); background: rgba(227, 173, 75, 0.1);
+  color: var(--amber); border-color: color-mix(in srgb, var(--amber) 42%, transparent); background: color-mix(in srgb, var(--amber) 11%, transparent);
 }
 .connector-status.failed {
-  color: var(--red); border-color: rgba(236, 91, 83, 0.42); background: rgba(236, 91, 83, 0.1);
+  color: var(--red); border-color: color-mix(in srgb, var(--red) 42%, transparent); background: color-mix(in srgb, var(--red) 11%, transparent);
 }
 .connector-account-grants { font-size: 12px; color: var(--text-dim); }
 .connector-account-hint { font-size: 11.5px; color: var(--text-faint); line-height: 1.45; }
@@ -1505,7 +1601,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 }
 .connectors-tab-count {
   font-family: var(--mono); font-size: 11px; color: var(--text-faint);
-  padding: 0 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.06);
+  padding: 0 6px; border-radius: 999px; background: var(--bg-track);
 }
 .connectors-tab.active .connectors-tab-count { color: var(--text-dim); }
 
@@ -1578,16 +1674,16 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   background: var(--bg-input);
 }
 .mcp-status.connected {
-  color: var(--green); border-color: rgba(74, 201, 118, 0.35); background: rgba(74, 201, 118, 0.08);
+  color: var(--green); border-color: color-mix(in srgb, var(--green) 35%, transparent); background: color-mix(in srgb, var(--green) 9%, transparent);
 }
 .mcp-status.error {
-  color: var(--red); border-color: rgba(236, 91, 83, 0.42); background: rgba(236, 91, 83, 0.1);
+  color: var(--red); border-color: color-mix(in srgb, var(--red) 42%, transparent); background: color-mix(in srgb, var(--red) 11%, transparent);
 }
 .mcp-status.paused {
-  color: var(--amber); border-color: rgba(227, 173, 75, 0.42); background: rgba(227, 173, 75, 0.1);
+  color: var(--amber); border-color: color-mix(in srgb, var(--amber) 42%, transparent); background: color-mix(in srgb, var(--amber) 11%, transparent);
 }
 .mcp-status.disconnected {
-  color: var(--text-dim); border-color: var(--border-strong); background: rgba(255, 255, 255, 0.03);
+  color: var(--text-dim); border-color: var(--border-strong); background: var(--bg-subtle);
 }
 .mcp-endpoint {
   font-family: var(--mono); font-size: 11.5px; color: var(--text-dim);
@@ -1595,8 +1691,8 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 }
 .mcp-card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
 .mcp-server-error {
-  padding: 6px 9px; border-radius: var(--r-sm); border: 1px solid rgba(236, 91, 83, 0.35);
-  background: rgba(236, 91, 83, 0.09); color: #f4a8a5;
+  padding: 6px 9px; border-radius: var(--r-sm); border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+  background: color-mix(in srgb, var(--red) 10%, transparent); color: var(--red-text);
   font-family: var(--mono); font-size: 11.5px; word-break: break-word;
 }
 
@@ -1635,10 +1731,10 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   border: 1px solid var(--border-strong); color: var(--text-dim);
 }
 .mcp-hint-badge.readonly {
-  color: var(--blue); border-color: rgba(88, 166, 255, 0.35); background: rgba(88, 166, 255, 0.08);
+  color: var(--blue); border-color: color-mix(in srgb, var(--blue) 35%, transparent); background: color-mix(in srgb, var(--blue) 9%, transparent);
 }
 .mcp-hint-badge.destructive {
-  color: var(--red); border-color: rgba(236, 91, 83, 0.38); background: rgba(236, 91, 83, 0.08);
+  color: var(--red); border-color: color-mix(in srgb, var(--red) 38%, transparent); background: color-mix(in srgb, var(--red) 9%, transparent);
 }
 .mcp-policy-select {
   flex-shrink: 0; padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: var(--r-sm);

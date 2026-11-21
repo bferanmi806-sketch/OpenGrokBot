@@ -11,6 +11,7 @@ import { providerById } from './providers.js'
  * API key 不进数据库（库文件是默认权限），单独放 <data>/llm-key，0600，和网关令牌同级。
  */
 export type Language = '' | 'en' | 'zh-CN'
+export type Theme = 'dark' | 'light' | 'system'
 export type Settings = {
   /** 服务商预设的 id；空 = 没选过（自定义或环境变量配的） */
   provider: string
@@ -19,6 +20,8 @@ export type Settings = {
   vision: boolean
   /** 空 = 跟系统语言 */
   language: Language
+  /** 界面主题：默认深色，也支持浅色或跟随系统 */
+  theme: Theme
   computers: ComputerChoice
   browserMirror: string
   checkUpdates: boolean
@@ -33,6 +36,7 @@ export const SETTING_DEFAULTS: Settings = {
   model: 'grok-4.7',
   vision: false,
   language: '',
+  theme: 'dark',
   computers: 'auto',
   browserMirror: '',
   checkUpdates: true,
@@ -69,7 +73,8 @@ const PARSE: { [K in SettingKey]: (v: unknown) => Settings[K] | undefined } = {
     return m && m.length <= 200 && !CONTROL.test(m) ? m : undefined
   },
   vision: (v) => typeof v === 'boolean' ? v : undefined,
-  language: (v) => v === 'en' || v === 'zh-CN' ? v : undefined,
+  language: (v) => v === '' || v === 'en' || v === 'zh-CN' ? v : undefined,
+  theme: (v) => v === 'dark' || v === 'light' || v === 'system' ? v : undefined,
   computers: (v) => v === 'auto' || v === 'docker' || v === 'local' ? v : undefined,
   browserMirror: (v) => v === '' || httpUrl(v) ? (v as string).replace(/\/+$/, '') : undefined,
   checkUpdates: (v) => typeof v === 'boolean' ? v : undefined,

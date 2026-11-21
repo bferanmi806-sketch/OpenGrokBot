@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiError, SignedOut, answerQuestion, checkSession, connectEvents, createBot, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
-  fetchLanguage, fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, forgetMemoryRule, removeUpload, resolveApproval, revokeRule, sendMessage, setBotConnectors, setBotMcpServers,
+  fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchUiPrefs, forgetMemoryRule, removeUpload, resolveApproval, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers,
   setComputerShell, setComputerWindow, stopThread, updateRoutine, uploadFile,
 } from './api'
 import { BotModelChip, BotModelPicker, botModel, botSeesImages } from './components/BotModelPicker'
@@ -20,8 +20,9 @@ import { desktopApi } from './desktop'
 import { I18nProvider, browserLanguages, pickLang, useT, type Lang } from './i18n'
 import { errorText } from './i18n/describe'
 import { applyHello, applyStatus, clearDone } from './presence'
+import { applyTheme, hasStoredTheme, readStoredTheme, resolveTheme, systemTheme, writeStoredTheme } from './theme'
 import type {
-  BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, McpServersSnapshot, Message, ProviderPreset, RoutineAction, SetupInfo,
+  BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, SetupInfo, ThemeSetting,
 } from './types'
 
 const EMPTY_CONNECTORS: ConnectorsSnapshot = {
@@ -56,15 +57,37 @@ function withCode(text: string, name: string, code: string) {
  * 锁着的网关拿不到设置，登录页就按浏览器的语言。
  */
 export default function App() {
-  /** 设置里存的那一项（空 = 跟系统）；向导第一步改它 */
+  /** 设置里存的语言（空 = 跟系统）和主题（默认深色，支持浅色/跟随系统） */
   const [setting, setSetting] = useState<LanguageSetting>('')
+  const [themeSetting, setThemeSetting] = useState<ThemeSetting>(readStoredTheme)
+  const [sysTheme, setSysTheme] = useState<ResolvedTheme>(systemTheme)
   const lang: Lang = useMemo(() => pickLang(setting, browserLanguages()), [setting])
+  const resolvedTheme: ResolvedTheme = useMemo(() => resolveTheme(themeSetting, sysTheme), [themeSetting, sysTheme])
+
+  const changeTheme = useCallback((next: ThemeSetting) => {
+    setThemeSetting(next)
+    writeStoredTheme(next)
+  }, [])
+
   useEffect(() => {
     let live = true
-    void fetchLanguage().then((saved) => {
-      if (live && (saved === '' || saved === 'en' || saved === 'zh-CN')) setSetting(saved)
+    void fetchUiPrefs().then(({ language, theme, themeSaved }) => {
+      if (!live) return
+      if (language === '' || language === 'en' || language === 'zh-CN') setSetting(language)
+      if (theme && (themeSaved || !hasStoredTheme())) {
+        setThemeSetting(theme)
+        writeStoredTheme(theme)
+      }
     })
     return () => { live = false }
+  }, [])
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const media = window.matchMedia('(prefers-color-scheme: light)')
+    const onChange = () => setSysTheme(media.matches ? 'light' : 'dark')
+    onChange()
+    media.addEventListener?.('change', onChange)
+    return () => media.removeEventListener?.('change', onChange)
   }, [])
   useEffect(() => {
     const api = desktopApi()
@@ -73,11 +96,28 @@ export default function App() {
       if (d?.platform === 'darwin') document.documentElement.dataset.desktop = 'darwin'
     }).catch(() => {})
   }, [])
+  useLayoutEffect(() => { applyTheme(resolvedTheme) }, [resolvedTheme])
   useEffect(() => { document.documentElement.lang = lang }, [lang])
-  return <I18nProvider lang={lang}><Workspace language={setting} onLanguage={setSetting} /></I18nProvider>
+  return (
+    <I18nProvider lang={lang}>
+      <Workspace language={setting} onLanguage={setSetting} theme={themeSetting} resolvedTheme={resolvedTheme} onTheme={changeTheme} />
+    </I18nProvider>
+  )
 }
 
-function Workspace({ language, onLanguage }: { language: LanguageSetting; onLanguage: (next: LanguageSetting) => void }) {
+function Workspace({
+  language,
+  onLanguage,
+  theme,
+  resolvedTheme,
+  onTheme,
+}: {
+  language: LanguageSetting
+  onLanguage: (next: LanguageSetting) => void
+  theme: ThemeSetting
+  resolvedTheme: ResolvedTheme
+  onTheme: (next: ThemeSetting) => void
+}) {
   const t = useT()
   const [signedOut, setSignedOut] = useState<boolean | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -494,6 +534,11 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
       window.history.replaceState(null, '', window.location.pathname + window.location.search)
     }
   }, [])
+  const toggleTheme = useCallback(() => {
+    const next: ThemeSetting = resolvedTheme === 'dark' ? 'light' : 'dark'
+    onTheme(next)
+    void saveSettings({ theme: next }).catch(() => {})
+  }, [onTheme, resolvedTheme])
   const hireScrimDown = useRef(false)
 
   if (signedOut) return <SignIn />
@@ -543,6 +588,8 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
         onNewBot={() => { setHireError(undefined); setHiring(true) }}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        resolvedTheme={resolvedTheme}
+        onToggleTheme={toggleTheme}
         {...(llms ? { onModels: () => setModelsOpen(true) } : {})}
         {...(hasConnectors ? { onConnectors: () => setConnectorsOpen(true), connectorsAttention } : {})}
         {...(setup ? { onSettings: () => setSettingsOpen(true) } : {})}
@@ -616,6 +663,8 @@ function Workspace({ language, onLanguage }: { language: LanguageSetting; onLang
           browser={setupBrowser}
           language={language}
           onLanguage={onLanguage}
+          theme={theme}
+          onTheme={onTheme}
           onBrowser={setSetupBrowser}
           onModels={() => setModelsOpen(true)}
           onWizard={() => void reopenWizard()}

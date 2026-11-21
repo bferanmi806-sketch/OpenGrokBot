@@ -581,7 +581,13 @@ export const en = {
 
   // 设置页
   'sidebar.settings': 'Settings',
+  'sidebar.themeToLight': 'Switch to light theme',
+  'sidebar.themeToDark': 'Switch to dark theme',
   'settings.title': 'Settings',
+  'settings.theme': 'Appearance',
+  'settings.theme.dark': 'Dark',
+  'settings.theme.light': 'Light',
+  'settings.theme.system': 'Follow system',
   'settings.close': 'Close settings',
   'settings.loading': 'Loading…',
   'settings.loadFailed': 'Could not load the settings. Check that the gateway is running, then open this again.',
