@@ -3,6 +3,7 @@ import type {
   AboutInfo, AppKey, ApprovalEditInput, AttachmentPayload, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
   Conversation, CreateMcpServerInput, FieldError, GatewayEvent, ImportMcpServersInput, ImportMcpServersResult, McpServersSnapshot,
   McpServerView, Message, ProviderPreset, RoutineAction, RuleDuration, ServerEvent, SettingsView, SetupInfo, UpdateMcpServerPatch,
+  WikiCreateInput, WikiKind, WikiListResponse, WikiPageResponse, WikiSaveInput,
 } from './types'
 
 export type {
@@ -13,6 +14,11 @@ export type {
   ImportMcpServersResult,
   ServerEvent,
   UpdateMcpServerPatch,
+  WikiCreateInput,
+  WikiKind,
+  WikiListResponse,
+  WikiPageResponse,
+  WikiSaveInput,
 } from './types'
 
 /** 网关说「先登录」：界面换成锁屏说明，而不是一片空白。 */
@@ -51,6 +57,20 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
 async function getJson<T>(path: string): Promise<T> {
   const res = await request(path)
   if (!res.ok) throw new Error(`GET ${path} ${res.status}`)
+  return res.json() as Promise<T>
+}
+
+async function getApiJson<T>(path: string): Promise<T> {
+  const res = await request(path)
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as {
+      error?: string
+      code?: string
+      params?: Record<string, string | number>
+      detail?: string
+    }
+    throw new ApiError(data.error ?? `GET ${path} ${res.status}`, res.status, data.code, data.params, data.detail)
+  }
   return res.json() as Promise<T>
 }
 
@@ -296,6 +316,43 @@ export async function setMcpServerBots(id: string, botIds: string[]): Promise<vo
 
 export async function setBotMcpServers(botId: string, serverIds: string[]): Promise<void> {
   await send('PUT', `/api/bots/${encodeURIComponent(botId)}/mcp`, { serverIds }, { strict: true })
+}
+
+/** 团队知识库：按关键词 / 分类检索与列出、读详情与历史、创建、保存、回滚、删除 */
+export function fetchWiki(opts?: { q?: string; kind?: WikiKind; limit?: number }): Promise<WikiListResponse> {
+  const params = new URLSearchParams()
+  const q = opts?.q?.trim()
+  if (q) params.set('q', q)
+  if (opts?.kind) params.set('kind', opts.kind)
+  if (opts?.limit !== undefined && Number.isFinite(opts.limit)) {
+    params.set('limit', String(opts.limit))
+  }
+  const qs = params.toString()
+  return getApiJson<WikiListResponse>(qs ? `/api/wiki?${qs}` : '/api/wiki')
+}
+
+export function fetchWikiPage(kind: WikiKind, slug: string): Promise<WikiPageResponse> {
+  return getApiJson<WikiPageResponse>(`/api/wiki/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}`)
+}
+
+export async function createWikiPage(input: WikiCreateInput): Promise<WikiPageResponse> {
+  const res = await send('POST', '/api/wiki', input, { strict: true })
+  return res.json() as Promise<WikiPageResponse>
+}
+
+export async function saveWikiPage(kind: WikiKind, slug: string, input: WikiSaveInput): Promise<WikiPageResponse> {
+  const res = await send('PUT', `/api/wiki/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}`, input, { strict: true })
+  return res.json() as Promise<WikiPageResponse>
+}
+
+export async function revertWikiPage(kind: WikiKind, slug: string, version: number, note?: string): Promise<WikiPageResponse> {
+  const body = note !== undefined ? { version, note } : { version }
+  const res = await send('POST', `/api/wiki/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}/revert`, body, { strict: true })
+  return res.json() as Promise<WikiPageResponse>
+}
+
+export async function deleteWikiPage(kind: WikiKind, slug: string): Promise<void> {
+  await send('DELETE', `/api/wiki/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}`, undefined, { strict: true })
 }
 
 /** 首次启动要不要出向导；老网关没有这个路由（或出了错）就当不用，绝不因此挡住界面 */

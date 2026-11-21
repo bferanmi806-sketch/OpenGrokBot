@@ -263,7 +263,7 @@ export type QuestionPayload = {
   status: 'open' | 'answered' | 'skipped'
   answer?: string[]
 }
-export type BotRefPayload = { from: string; fromName: string; content: string }
+export type BotRefPayload = { from: string; fromName: string; content: string; tainted?: boolean }
 export type LoginPayload = { site: string; why?: string }
 /** webhook 带来的东西，网关已排好版、截过长 */
 export type WebhookPayload = { routineId: number; name: string; body: string }
@@ -431,6 +431,7 @@ export type GatewayEvent =
   | { type: 'setup.browser'; browser: BrowserStatus }
   | { type: 'connectors_changed' }
   | { type: 'mcp_changed' }
+  | { type: 'wiki_changed' }
 
 export type ServerEvent = GatewayEvent
 
@@ -685,4 +686,63 @@ export type ImportMcpServersInput = {
 export type ImportMcpServersResult = {
   imported: McpServerView[]
   errors: { name: string; error: string }[]
+}
+
+export type WikiKind = 'contact' | 'client' | 'project' | 'topic'
+
+export type WikiPageSummary = {
+  id: string
+  kind: WikiKind
+  slug: string
+  title: string
+  summary: string
+  tags: string[]
+  sourceTainted: boolean
+  updatedBy: string
+  version: number
+  createdAt: number
+  updatedAt: number
+  snippet?: string
+  score?: number
+}
+
+export type WikiPageDetail = WikiPageSummary & {
+  body: string
+}
+
+export type WikiRevision = {
+  id: number
+  pageId: string
+  version: number
+  title: string
+  summary: string
+  tags: string[]
+  body: string
+  editedBy: string
+  note: string
+  sourceTainted: boolean
+  createdAt: number
+}
+
+export type WikiListResponse = {
+  pages: WikiPageSummary[]
+  total: number
+}
+
+export type WikiPageResponse = {
+  page: WikiPageDetail
+  revisions: WikiRevision[]
+}
+
+export type WikiSaveInput = {
+  title: string
+  summary?: string
+  tags?: string[]
+  body: string
+  note?: string
+}
+
+export type WikiCreateInput = WikiSaveInput & {
+  kind: WikiKind
+  slug?: string
 }
