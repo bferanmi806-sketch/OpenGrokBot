@@ -172,6 +172,68 @@ describe('gateway auth', () => {
     })
     expect(res.status).toBe(202)
   })
+
+  it('refuses DNS rebinding via untrusted Host header on both GET and POST even when Origin matches Host', async () => {
+    const { app } = setup()
+    const getRes = await app.request('http://127.0.0.1:4747/api/bots', {
+      headers: { ...cookie, Host: 'evil.example:4747' },
+    })
+    expect(getRes.status).toBe(403)
+
+    const postRes = await app.request('http://127.0.0.1:4747/api/threads/dm:researcher/messages', {
+      method: 'POST',
+      headers: {
+        ...cookie,
+        'Content-Type': 'application/json',
+        Host: 'evil.example:4747',
+        Origin: 'http://evil.example:4747',
+      },
+      body: JSON.stringify({ text: 'hi' }),
+    })
+    expect(postRes.status).toBe(403)
+  })
+
+  it('refuses Sec-Fetch-Site: cross-site on protected reads and writes unless explicitly trusted', async () => {
+    const { app } = setup()
+    const res = await app.request('http://127.0.0.1:4747/api/bots', {
+      headers: { ...cookie, 'Sec-Fetch-Site': 'cross-site' },
+    })
+    expect(res.status).toBe(403)
+  })
+
+  it('allows an explicitly configured reverse-proxy host in allowedOrigins', async () => {
+    const db = openDb(':memory:')
+    upsertBot(db, bot)
+    ensureDmThread(db, bot.id)
+    const { app } = createApp({
+      db,
+      llm: okLLM,
+      token: TOKEN,
+      allowedOrigins: ['https://bots.example.com'],
+    })
+    const okGet = await app.request('http://127.0.0.1:4747/api/bots', {
+      headers: { ...cookie, Host: 'bots.example.com' },
+    })
+    expect(okGet.status).toBe(200)
+
+    const okPost = await app.request('http://127.0.0.1:4747/api/threads/dm:researcher/messages', {
+      method: 'POST',
+      headers: {
+        ...cookie,
+        'Content-Type': 'application/json',
+        Host: 'bots.example.com',
+        Origin: 'https://bots.example.com',
+        'X-Forwarded-Proto': 'https',
+      },
+      body: JSON.stringify({ text: 'hi' }),
+    })
+    expect(okPost.status).toBe(202)
+
+    const wrongPort = await app.request('http://127.0.0.1:4747/api/bots', {
+      headers: { ...cookie, Host: 'bots.example.com:9999' },
+    })
+    expect(wrongPort.status).toBe(403)
+  })
 })
 
 describe('websocket upgrades', () => {

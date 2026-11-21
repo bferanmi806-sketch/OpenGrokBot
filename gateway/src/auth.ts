@@ -90,9 +90,63 @@ function effectivePort(u: URL): string {
 }
 
 /** 同一端口上的 localhost / 127.0.0.1 / [::1] 是同一台机器的同一个服务 */
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase()
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]'
+}
+
 function sameHost(a: URL, b: URL): boolean {
-  const loopback = (h: string) => (['127.0.0.1', '[::1]', '::1'].includes(h) ? 'localhost' : h)
+  const loopback = (h: string) => (isLoopbackHost(h) ? 'localhost' : h.toLowerCase())
   return loopback(a.hostname) === loopback(b.hostname) && effectivePort(a) === effectivePort(b)
+}
+
+function parseAllowedOrigins(allowedOrigins: string[]): URL[] {
+  return allowedOrigins.flatMap((a) => {
+    try { return [new URL(a)] } catch { return [] }
+  })
+}
+
+/**
+ * 载体级 Host 校验（防 DNS Rebinding）：
+ * 只接受回环地址（localhost / 127.0.0.1 / [::1]）或显式配置在 allowedOrigins 里的主机。
+ * 防止攻击者把恶意域名解析到 127.0.0.1 后借 Host === Origin 冒充同源。
+ */
+export function hostAllowed(c: Context, allowedOrigins: string[] = []): boolean {
+  const rawHost = c.req.header('host')?.trim()
+  let target: URL
+  if (rawHost) {
+    if (rawHost.includes('@') || /[\s/?#]/.test(rawHost)) return false
+    try {
+      target = new URL(`http://${rawHost}`)
+    } catch {
+      return false
+    }
+  } else {
+    try {
+      target = new URL(c.req.url)
+    } catch {
+      return false
+    }
+  }
+  if (isLoopbackHost(target.hostname)) return true
+  const parsedAllowed = parseAllowedOrigins(allowedOrigins)
+  return parsedAllowed.some((allowed) => {
+    if (allowed.hostname.toLowerCase() !== target.hostname.toLowerCase()) return false
+    return allowed.port
+      ? target.port === allowed.port
+      : (!target.port || target.port === effectivePort(allowed))
+  })
+}
+
+function originExplicitlyAllowed(origin: string | undefined, allowedOrigins: string[]): boolean {
+  if (!origin) return false
+  try {
+    const from = new URL(origin)
+    return parseAllowedOrigins(allowedOrigins).some((allowed) =>
+      sameHost(from, allowed) && (allowed.protocol !== 'https:' || from.protocol === 'https:'))
+  } catch {
+    return false
+  }
 }
 
 function forwardedHttps(c: Context): boolean {
@@ -108,12 +162,10 @@ function selfUrl(c: Context, trustHttps = false): URL {
 
 function originAllowed(c: Context, allowedOrigins: string[]): boolean {
   const origin = c.req.header('origin')
-  if (!origin) return true // curl、脚本不带 Origin，交给令牌把关
+  if (!origin) return true // curl、脚本不带 Origin，交给令牌与 Host 把关
   try {
     const from = new URL(origin)
-    const parsedAllowed = allowedOrigins.flatMap((a) => {
-      try { return [new URL(a)] } catch { return [] }
-    })
+    const parsedAllowed = parseAllowedOrigins(allowedOrigins)
     const trustHttps = parsedAllowed.some((u) => u.protocol === 'https:')
     const self = selfUrl(c, trustHttps)
     if (sameHost(from, self) && (self.protocol !== 'https:' || from.protocol === 'https:')) return true
@@ -149,6 +201,13 @@ export function authMiddleware(token: string, allowedOrigins: string[] = []): Mi
     if (!isProtectedPath(c.req.path)) return next()
     const presented = presentedToken(c)
     if (!presented || !sameToken(presented, token)) return c.json({ error: 'sign in first' }, 401)
+    if (!hostAllowed(c, allowedOrigins)) {
+      return c.json({ error: 'untrusted host refused' }, 403)
+    }
+    const fetchSite = (c.req.header('sec-fetch-site') ?? '').trim().toLowerCase()
+    if (fetchSite === 'cross-site' && !originExplicitlyAllowed(c.req.header('origin'), allowedOrigins)) {
+      return c.json({ error: 'cross-site request refused' }, 403)
+    }
     const upgrading = c.req.header('upgrade')?.toLowerCase() === 'websocket'
     const changesState = upgrading || !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)
     if (changesState && !originAllowed(c, allowedOrigins)) {
