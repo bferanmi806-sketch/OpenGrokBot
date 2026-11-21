@@ -76,6 +76,7 @@ import {
   MAX_IMAGES_PER_TURN, MODEL_IMAGE_MAX_BYTES, MODEL_IMAGE_MAX_SIDE, computerPath, createUploads, describeUpload, isImage,
   type ImageNote, type UploadRow,
 } from './uploads.js'
+import { mountWiki } from './wiki/api.js'
 import type { WorkflowRecording } from './workflow-recorder.js'
 import { deleteWorkflowTrace, listWorkflowTraces, parseWorkflowTrace, readWorkflowTrace, saveWorkflowTrace, type WorkflowTrace } from './workflows.js'
 import {
@@ -451,6 +452,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     hub,
     now: () => now().getTime(),
   })
+  mountWiki(app, { db, dataDir, hub, now })
 
   const botById = (id: string) => db.prepare('SELECT * FROM bots WHERE id = ?').get(id) as BotRow | undefined
   const computerKind: ComputerKind = deps.computers?.kind ?? 'docker'

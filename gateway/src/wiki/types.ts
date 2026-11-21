@@ -15,11 +15,12 @@ export function isWikiSlug(value: unknown): value is string {
 }
 
 export function parseWikiPageId(id: string): { kind: WikiKind; slug: string } | null {
+  if (typeof id !== 'string') return null
   const slash = id.indexOf('/')
   if (slash <= 0 || id.indexOf('/', slash + 1) !== -1) return null
   const kind = id.slice(0, slash)
   const slug = id.slice(slash + 1)
-  if (!isWikiKind(kind) || !WIKI_SLUG_RE.test(slug)) return null
+  if (!isWikiKind(kind) || !isWikiSlug(slug)) return null
   return { kind, slug }
 }
 
@@ -31,7 +32,7 @@ export const MAX_WIKI_NOTE_CHARS = 200
 export const MAX_WIKI_TAGS = 12
 export const MAX_WIKI_TAG_CHARS = 40
 export const MAX_WIKI_REVISIONS = 20
-export const MAX_WIKI_SEARCH_TEXT_CHARS = 128_000
+export const MAX_WIKI_SEARCH_TEXT_CHARS = 256_000
 
 export class WikiValidationError extends Error {
   constructor(message: string) {

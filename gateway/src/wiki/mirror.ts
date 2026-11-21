@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { isWikiKind, WIKI_SLUG_RE, type WikiKind, type WikiPageDetail } from './types.js'
+import { isWikiKind, isWikiSlug, type WikiKind, type WikiPageDetail } from './types.js'
 
 export function wikiRootDir(dataDir: string): string {
   return join(dataDir, 'wiki')
@@ -11,8 +11,8 @@ export function wikiPageFilePath(dataDir: string, kind: WikiKind, slug: string):
   if (!isWikiKind(kind)) {
     throw new Error(`Invalid wiki kind: ${String(kind)}`)
   }
-  if (!WIKI_SLUG_RE.test(slug)) {
-    throw new Error(`Invalid wiki slug: ${slug}`)
+  if (!isWikiSlug(slug)) {
+    throw new Error(`Invalid wiki slug: ${String(slug)}`)
   }
   return join(wikiRootDir(dataDir), kind, `${slug}.md`)
 }
@@ -48,7 +48,11 @@ export function writeWikiMirror(dataDir: string | undefined, page: WikiPageDetai
     writeFileSync(tmpPath, renderWikiMarkdown(page), 'utf8')
     renameSync(tmpPath, filePath)
   } catch (err) {
-    rmSync(tmpPath, { force: true })
+    try {
+      rmSync(tmpPath, { force: true })
+    } catch {
+      // Ignore temp cleanup failures so the original error surfaces
+    }
     throw err
   }
 }

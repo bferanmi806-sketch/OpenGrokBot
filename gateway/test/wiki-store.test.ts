@@ -82,25 +82,23 @@ describe('wiki schema v14 & hub event', () => {
     expect(parseWikiPageId('client/acme-corp')).toEqual({ kind: 'client', slug: 'acme-corp' })
     expect(parseWikiPageId('invalid/acme-corp')).toBeNull()
     expect(parseWikiPageId('client/../evil')).toBeNull()
+    expect(parseWikiPageId(123 as unknown as string)).toBeNull()
+    expect(parseWikiPageId(null as unknown as string)).toBeNull()
     db.close()
   })
 })
 
 describe('wiki tokenizer (CJK + English + safe FTS5 queries)', () => {
-  it('emits Latin compounds + sub-tokens, CJK bigrams + short-run unigrams, deduplicates adjacent tokens, and caps length', () => {
+  it('emits Latin sub-tokens, CJK bigrams + short-run unigrams, deduplicates adjacent tokens, and caps length', () => {
     const eng = buildSearchText(['Acme-Corp', 'acme-corp', 'Café', 'Q3_Roadmap', 'v2.1'])
     expect(eng.split(' ')).toEqual([
-      'acme-corp',
       'acme',
       'corp',
-      'acme-corp',
       'acme',
       'corp',
       'cafe',
-      'q3_roadmap',
       'q3',
       'roadmap',
-      'v2.1',
       'v2',
       '1',
     ])
@@ -369,6 +367,51 @@ describe('wiki store CRUD, FTS5 matching, taint rules, revisions, revert, archiv
         editedBy: 'operator',
       }),
     ).toThrow(WikiValidationError)
+    expect(() =>
+      upsertWikiPage(db, {
+        kind: 'client',
+        slug: 123 as unknown as string,
+        title: 'ok',
+        body: 'x',
+        editedBy: 'operator',
+      }),
+    ).toThrow(WikiValidationError)
+    expect(() =>
+      upsertWikiPage(db, {
+        kind: 'client',
+        title: 'ok',
+        summary: 123 as unknown as string,
+        body: 'x',
+        editedBy: 'operator',
+      }),
+    ).toThrow(WikiValidationError)
+    expect(() =>
+      upsertWikiPage(db, {
+        kind: 'client',
+        title: 'ok',
+        note: {} as unknown as string,
+        body: 'x',
+        editedBy: 'operator',
+      }),
+    ).toThrow(WikiValidationError)
+    expect(() =>
+      upsertWikiPage(db, {
+        kind: 'client',
+        title: 'ok',
+        tags: 'not-an-array' as unknown as string[],
+        body: 'x',
+        editedBy: 'operator',
+      }),
+    ).toThrow(WikiValidationError)
+    expect(() =>
+      upsertWikiPage(db, {
+        kind: 'client',
+        title: 'ok',
+        tags: ['valid', 42 as unknown as string],
+        body: 'x',
+        editedBy: 'operator',
+      }),
+    ).toThrow(WikiValidationError)
     db.close()
   })
 
@@ -497,8 +540,10 @@ describe('wiki store CRUD, FTS5 matching, taint rules, revisions, revert, archiv
     expect(revertWikiPage(db, 'topic', 'pricing-policy', 1, { editedBy: 'operator', dataDir })).toBeNull()
 
     // Bot reverting a currently-tainted page to clean v10 still preserves taint
+    // Whitespace-only note falls back to default "Reverted to v10"
     const botReverted = revertWikiPage(db, 'topic', 'pricing-policy', 10, {
       editedBy: 'chief',
+      note: '   ',
       dataDir,
       now: 26_000,
     })

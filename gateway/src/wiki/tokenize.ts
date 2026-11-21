@@ -14,8 +14,8 @@ function normalizeForTokenize(text: string): string {
 
 /**
  * Builds an FTS5-friendly `search_text` column combining lowercased Latin/alphanumeric tokens
- * (preserving compound tokens like `acme-corp` and also emitting sub-tokens split on `.` / `_` / `-`)
- * and CJK 2-character bigrams (plus unigrams for runs of length 1..4 so short terms match cleanly).
+ * (split directly on `.` / `_` / `-`, matching `extractQueryTokens`) and CJK 2-character bigrams
+ * (plus unigrams for runs of length 1..4 so short terms match cleanly).
  * Adjacent duplicate tokens are deduplicated and total length is bounded to `MAX_WIKI_SEARCH_TEXT_CHARS`.
  */
 export function buildSearchText(parts: readonly string[]): string {
@@ -53,13 +53,9 @@ export function buildSearchText(parts: readonly string[]): string {
           }
         }
       } else if (latin) {
-        if (!push(latin)) return out.join(' ')
-        if (/[._-]/.test(latin)) {
-          for (const sub of latin.split(/[._-]+/)) {
-            if (sub && sub !== latin) {
-              if (!push(sub)) return out.join(' ')
-            }
-          }
+        for (const sub of latin.split(/[._-]+/)) {
+          if (!sub) continue
+          if (!push(sub)) return out.join(' ')
         }
       }
     }

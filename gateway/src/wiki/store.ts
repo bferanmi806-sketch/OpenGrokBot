@@ -4,6 +4,7 @@ import { removeWikiMirror, writeWikiMirror } from './mirror.js'
 import { buildSearchText } from './tokenize.js'
 import {
   isWikiKind,
+  isWikiSlug,
   MAX_WIKI_BODY_CHARS,
   MAX_WIKI_NOTE_CHARS,
   MAX_WIKI_REVISIONS,
@@ -13,7 +14,6 @@ import {
   MAX_WIKI_TAGS,
   MAX_WIKI_TITLE_CHARS,
   parseWikiPageId,
-  WIKI_SLUG_RE,
   WikiValidationError,
   type WikiKind,
   type WikiPageDetail,
@@ -109,11 +109,16 @@ function normalizeTitleKey(title: string): string {
 }
 
 function sanitizeTags(tags?: readonly string[]): string[] {
-  if (!tags) return []
+  if (tags === undefined) return []
+  if (!Array.isArray(tags)) {
+    throw new WikiValidationError('Wiki tags must be an array of strings')
+  }
   const seen = new Set<string>()
   const out: string[] = []
   for (const raw of tags) {
-    if (typeof raw !== 'string') continue
+    if (typeof raw !== 'string') {
+      throw new WikiValidationError('Wiki tags must be an array of strings')
+    }
     const cleaned = raw.trim()
     if (!cleaned) continue
     if (cleaned.length > MAX_WIKI_TAG_CHARS) {
@@ -198,19 +203,22 @@ export function allocateWikiSlug(
     throw new WikiValidationError(`Invalid wiki kind: ${String(kind)}`)
   }
   if (requestedSlug !== undefined) {
+    if (typeof requestedSlug !== 'string') {
+      throw new WikiValidationError('Wiki slug must be a string')
+    }
     const trimmed = requestedSlug.trim()
     if (!trimmed || trimmed.includes('..') || trimmed.includes('/') || trimmed.includes('\\')) {
       throw new WikiValidationError(`Invalid wiki slug: ${requestedSlug}`)
     }
     const normalized = normalizeWikiSlug(trimmed)
-    if (!normalized || !WIKI_SLUG_RE.test(normalized)) {
+    if (!isWikiSlug(normalized)) {
       throw new WikiValidationError(`Invalid wiki slug: ${requestedSlug}`)
     }
     return normalized
   }
 
   const base = normalizeWikiSlug(title)
-  if (!base || !WIKI_SLUG_RE.test(base)) {
+  if (!isWikiSlug(base)) {
     throw new WikiValidationError(`Cannot derive valid wiki slug from title: ${title}`)
   }
 
@@ -242,12 +250,18 @@ export function upsertWikiPage(
   if (!isWikiKind(input.kind)) {
     throw new WikiValidationError(`Invalid wiki kind: ${String(input.kind)}`)
   }
+  if (input.slug !== undefined && typeof input.slug !== 'string') {
+    throw new WikiValidationError('Wiki slug must be a string')
+  }
   const title = typeof input.title === 'string' ? input.title.trim() : ''
   if (!title) throw new WikiValidationError('Wiki title is required')
   if (title.length > MAX_WIKI_TITLE_CHARS) {
     throw new WikiValidationError(`Wiki title exceeds ${MAX_WIKI_TITLE_CHARS} characters`)
   }
 
+  if (input.summary !== undefined && typeof input.summary !== 'string') {
+    throw new WikiValidationError('Wiki summary must be a string')
+  }
   const summary = (input.summary ?? '').trim()
   if (summary.length > MAX_WIKI_SUMMARY_CHARS) {
     throw new WikiValidationError(`Wiki summary exceeds ${MAX_WIKI_SUMMARY_CHARS} characters`)
@@ -260,6 +274,9 @@ export function upsertWikiPage(
     throw new WikiValidationError(`Wiki body exceeds ${MAX_WIKI_BODY_CHARS} characters`)
   }
 
+  if (input.note !== undefined && typeof input.note !== 'string') {
+    throw new WikiValidationError('Wiki note must be a string')
+  }
   const note = (input.note ?? '').trim()
   if (note.length > MAX_WIKI_NOTE_CHARS) {
     throw new WikiValidationError(`Wiki note exceeds ${MAX_WIKI_NOTE_CHARS} characters`)
@@ -353,7 +370,7 @@ export function getWikiPage(
   slug: string,
   opts: { includeArchived?: boolean } = {},
 ): WikiPageDetail | null {
-  if (!isWikiKind(kind) || !WIKI_SLUG_RE.test(slug)) return null
+  if (!isWikiKind(kind) || !isWikiSlug(slug)) return null
   const sql = opts.includeArchived
     ? 'SELECT * FROM wiki_pages WHERE kind = ? AND slug = ?'
     : 'SELECT * FROM wiki_pages WHERE kind = ? AND slug = ? AND archived_at IS NULL'
@@ -428,13 +445,17 @@ export function revertWikiPage(
   targetVersion: number,
   opts: { editedBy: string; note?: string; dataDir?: string; now?: number },
 ): WikiPageDetail | null {
-  if (!isWikiKind(kind) || !WIKI_SLUG_RE.test(slug)) return null
+  if (!isWikiKind(kind) || !isWikiSlug(slug)) return null
   if (!Number.isInteger(targetVersion) || targetVersion < 1) return null
 
   const editedBy = typeof opts.editedBy === 'string' ? opts.editedBy.trim() : ''
   if (!editedBy) throw new WikiValidationError('Wiki editedBy is required')
 
-  const note = opts.note !== undefined ? opts.note.trim() : `Reverted to v${targetVersion}`
+  if (opts.note !== undefined && typeof opts.note !== 'string') {
+    throw new WikiValidationError('Wiki note must be a string')
+  }
+  const trimmedNote = (opts.note ?? '').trim()
+  const note = trimmedNote || `Reverted to v${targetVersion}`
   if (note.length > MAX_WIKI_NOTE_CHARS) {
     throw new WikiValidationError(`Wiki note exceeds ${MAX_WIKI_NOTE_CHARS} characters`)
   }
@@ -526,7 +547,7 @@ export function archiveWikiPage(
   slug: string,
   opts: { dataDir?: string; now?: number } = {},
 ): boolean {
-  if (!isWikiKind(kind) || !WIKI_SLUG_RE.test(slug)) return false
+  if (!isWikiKind(kind) || !isWikiSlug(slug)) return false
   const id = `${kind}/${slug}`
   const now = opts.now ?? Date.now()
 
