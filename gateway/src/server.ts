@@ -19,6 +19,7 @@ import {
 } from './db.js'
 import { createHub, type GatewayEvent, type Hub, type Presence } from './hub.js'
 import type { LLM } from './llm.js'
+import type { LlmPriority, LlmQueue } from './llm-queue.js'
 import { appendMemoryRule, listMemoryRules, readMemory, removeMemoryRule } from './memory.js'
 import type { BotComputer, ComputerKind } from './computer.js'
 import type { BackendWhy } from './backend.js'
@@ -115,6 +116,8 @@ export type AppDeps = {
   llm: LLM
   /** 每位同事各用各的模型：传了就按同事拿模型客户端和「看不看图」，没传就都用 llm / vision */
   llmFor?: (botId: string) => { llm: LLM; vision: boolean }
+  /** 本地模型优先级信号量队列：用于设置改动后唤醒等待项及 /api/llm-queue 快照 */
+  llmQueue?: LlmQueue
   pool?: Pool
   computers?: ComputersInfo
   dataDir?: string
@@ -239,6 +242,8 @@ const ruleView = (r: ApprovalRuleRow) => {
 type TurnOpts = {
   /** 谁叫起了这一回合：决定常驻授权认不认 */
   origin: TurnOrigin
+  /** 本地模型排队优先级：不传则按 origin 推导 */
+  priority?: LlmPriority
   /** 回合真正开跑时先做的事（比如把 webhook 载荷贴进线程）：排队期间别的回合看不到它 */
   onStart?: () => void
   persistUserMessage?: boolean
@@ -491,6 +496,9 @@ export function createApp(deps: AppDeps): GatewayApp {
       ...(deps.computers ? { runningKind: deps.computers.kind } : {}),
       onSettingsSaved: async (before, after) => {
         await externalOnSettingsSaved?.(before, after)
+        if (before.localLlmConcurrency !== after.localLlmConcurrency) {
+          deps.llmQueue?.notifyConcurrencyChange()
+        }
         if (!isInQuietHours(now(), after, deps.timeZone)) {
           flushQuietDigestsNow({ manual: false })
         }
@@ -677,6 +685,8 @@ export function createApp(deps: AppDeps): GatewayApp {
       // 这位同事此刻用的模型：回合开始时定下，回合中途改了设置从下一回合起生效
       const own = deps.llmFor?.(bot.id)
       const vision = own ? own.vision : (typeof deps.vision === 'function' ? deps.vision() : deps.vision) === true
+      const priority: LlmPriority =
+        opts.priority ?? (opts.origin === 'operator' ? 'interactive' : opts.origin === 'routine' ? 'routine' : 'background')
       const outcome = await runTurn({
         db,
         llm: own?.llm ?? llm,
@@ -694,6 +704,7 @@ export function createApp(deps: AppDeps): GatewayApp {
         signal,
         now,
         origin: opts.origin,
+        priority,
         ...(opts.tainted ? { tainted: true } : {}),
         ...(opts.onTainted ? { onTainted: opts.onTainted } : {}),
         hop: opts.hop ?? 0,
@@ -1619,6 +1630,7 @@ export function createApp(deps: AppDeps): GatewayApp {
           `Your ${what} "${fresh.name}" just fired. Do this now: ${fresh.instructions}${watchNote}${prepareNote}${quietNote}`,
           {
             origin: 'routine',
+            priority: opts.force ? 'interactive' : 'routine',
             persistUserMessage: false,
             prewarm: true,
             trigger,
@@ -1647,6 +1659,7 @@ export function createApp(deps: AppDeps): GatewayApp {
           + prepareNote,
         {
           origin: 'webhook',
+          priority: opts.force ? 'interactive' : 'background',
           onStart: postPayload,
           persistUserMessage: false,
           prewarm: true,
@@ -1690,6 +1703,14 @@ export function createApp(deps: AppDeps): GatewayApp {
     const ids = (db.prepare('SELECT id FROM bots').all() as { id: string }[]).map((r) => r.id)
     const routines = (db.prepare('SELECT COUNT(*) AS n FROM routines WHERE enabled = 1').get() as { n: number }).n
     return c.json({ working: ids.filter((id) => presenceOf(id) === 'thinking').length, waiting: pendingCount(db), routines })
+  })
+
+  app.get('/api/llm-queue', (c) => {
+    if (deps.llmQueue) return c.json(deps.llmQueue.snapshot())
+    return c.json({
+      concurrency: resolveSettings(deps.settings?.env ?? {}, readSavedSettings(db)).values.localLlmConcurrency,
+      endpoints: [],
+    })
   })
 
   app.get('/api/bots/:botId/computer', async (c) => {
@@ -2112,7 +2133,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       void startTurn(bot, message.thread_id,
         `Your operator answered your question "${question.question}": ${choices.join('; ')}. Carry on from there.`,
         {
-          origin: restricted ? 'routine' : 'operator', persistUserMessage: false, prewarm: true,
+          origin: restricted ? 'routine' : 'operator', priority: 'interactive', persistUserMessage: false, prewarm: true,
           trigger: mode === 'watch' ? 'watch' : mode === 'prepare' ? 'prepare' : 'question',
           ...(mode === 'watch' ? { watch: true, routineMode: 'watch' } : mode === 'prepare' ? { routineMode: 'prepare' } : {}),
           ...(group ? { group } : {}),

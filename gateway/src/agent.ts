@@ -11,7 +11,7 @@ import { CONNECTOR_READ_TOOL_NAMES, isConnectorTool } from './connectors/tools.j
 import { isMcpToolName } from './mcp/naming.js'
 import { limitText, noticeText, type BudgetHit, type Notice } from './notices.js'
 import { insertMessage, listMessages, updateMessagePayload, type BotRow, type Db, type MessageRow } from './db.js'
-import type { ChatMsg, LLM, ToolCall, ToolDef, Usage } from './llm.js'
+import type { ChatMsg, LLM, LlmPriority, ToolCall, ToolDef, Usage } from './llm.js'
 import {
   buildSystemPrompt,
   timeNote,
@@ -120,6 +120,8 @@ export type AgentDeps = {
   turnTimeoutMs?: number
   /** 谁叫起了这一回合；不传就当不是操作者，常驻授权不生效 */
   origin?: TurnOrigin
+  /** 本地模型队列优先级；不传则按 origin 推导 */
+  priority?: LlmPriority
   /** 回合起点已带入外部不受信任载荷（如 MCP 写操作返回正文）：本回合直接标记 outside-data */
   tainted?: boolean
   /** 本回合已带入或读到外部不受信任数据时通知调用方（如群聊轮次将 speaker 的 taint 传给 Chief） */
@@ -178,6 +180,16 @@ type TurnContext = AgentDeps & {
 
 function effectiveRoutineMode(deps: Pick<AgentDeps, 'routineMode' | 'watch'>): RoutineMode {
   return deps.routineMode ?? (deps.watch ? 'watch' : 'act')
+}
+
+function defaultPriority(origin: TurnOrigin | undefined): LlmPriority {
+  switch (origin) {
+    case 'routine': return 'routine'
+    case 'relay':
+    case 'webhook': return 'background'
+    case 'operator':
+    case undefined: return 'interactive'
+  }
 }
 
 /** 真实的浏览器活（开页、读、点、再读、填）十几步就用完了；40 步够干完一件事，又挡得住死循环 */
@@ -285,18 +297,19 @@ export async function runTurn(
     })
     const maxSteps = deps.maxSteps && deps.maxSteps > 0 ? Math.floor(deps.maxSteps) : DEFAULT_MAX_STEPS
     const turnMs = deps.turnTimeoutMs ?? DEFAULT_TURN_MS
+    const priority = deps.priority ?? defaultPriority(deps.origin)
     const startedAt = Date.now()
     for (let step = 0; ; step++) {
       if (signal?.aborted) return stopped(notify)
       const limit = step >= maxSteps ? stepLimit(maxSteps)
         : turnMs > 0 && Date.now() - startedAt >= turnMs ? timeLimit(turnMs) : null
-      if (limit) return await closeOut(deps, messages, tools, limit, say, notify)
+      if (limit) return await closeOut(deps, messages, tools, limit, priority, say, notify)
       const overBudget = deps.checkBudget?.()
       if (overBudget) {
         sayBudget(overBudget, say, notify)
         return 'budget'
       }
-      const turn = await llm.chat(messages, tools, { signal })
+      const turn = await llm.chat(messages, tools, { signal, priority })
       if (!imagesSeen) {
         imagesSeen = true
         brief?.shown()
@@ -375,6 +388,7 @@ async function closeOut(
   messages: ChatMsg[],
   tools: ReturnType<typeof buildTools>,
   limit: Limit,
+  priority: LlmPriority,
   say: (content: string) => void,
   notify: (n: Notice) => void,
 ): Promise<TurnOutcome> {
@@ -389,7 +403,7 @@ async function closeOut(
       content: `[gateway] You have reached ${limitText(limit.limit, limit.count)}. Do not call any tools. In a few plain lines: what you finished, `
         + 'what is left, and anything you need from your operator.',
     })
-    const turn = await deps.llm.chat(messages, tools, { signal: deps.signal, toolChoice: 'none' })
+    const turn = await deps.llm.chat(messages, tools, { signal: deps.signal, toolChoice: 'none', priority })
     if (turn.usage) deps.onUsage?.(turn.usage)
     const text = turn.content?.trim()
     notify({ notice: 'paused', params: limit, ...(text ? { lead: text } : {}) })
