@@ -16,6 +16,7 @@ import { SettingsDialog } from './components/SettingsDialog'
 import { SetupWizard, type LanguageSetting } from './components/SetupWizard'
 import { Sidebar } from './components/Sidebar'
 import { Thread } from './components/Thread'
+import { WikiDialog } from './components/WikiDialog'
 import { desktopApi } from './desktop'
 import { I18nProvider, browserLanguages, pickLang, useT, type Lang } from './i18n'
 import { errorText } from './i18n/describe'
@@ -136,9 +137,11 @@ function Workspace({
   const [connectors, setConnectors] = useState<ConnectorsSnapshot | null>(null)
   /** MCP 服务快照；老网关没有这块就一直是 null */
   const [mcpServers, setMcpServers] = useState<McpServersSnapshot | null>(null)
-  /** 开着的是哪个窗口：「AI 模型」总表、「连接器」总表，或给某位同事选模型 */
+  /** 开着的是哪个窗口：「AI 模型」总表、「连接器」总表、「团队知识库」，或给某位同事选模型 */
   const [modelsOpen, setModelsOpen] = useState(false)
   const [connectorsOpen, setConnectorsOpen] = useState(false)
+  const [wikiOpen, setWikiOpen] = useState(false)
+  const [wikiRefreshTick, setWikiRefreshTick] = useState(0)
   const [pickerFor, setPickerFor] = useState<string | null>(null)
   /** 首次启动向导：网关说要（needsSetup）才出；走完之前一直开着，哪怕中途已经存好了 key */
   const [setup, setSetup] = useState<SetupInfo | null>(null)
@@ -343,6 +346,10 @@ function Workspace({
       if (e.type === 'mcp_changed') {
         void loadMcpServers().catch(guard)
         if (panelFor.current) void loadPanel(panelFor.current)
+        return
+      }
+      if (e.type === 'wiki_changed') {
+        setWikiRefreshTick((n) => n + 1)
         return
       }
       if (e.type !== 'message') return // 更新的网关发来不认识的事件，不归这里管
@@ -592,6 +599,7 @@ function Workspace({
         onToggleTheme={toggleTheme}
         {...(llms ? { onModels: () => setModelsOpen(true) } : {})}
         {...(hasConnectors ? { onConnectors: () => setConnectorsOpen(true), connectorsAttention } : {})}
+        onWiki={() => setWikiOpen(true)}
         {...(setup ? { onSettings: () => setSettingsOpen(true) } : {})}
       />
       {selected ? (
@@ -660,7 +668,7 @@ function Workspace({
           onToggleMcpServer={onToggleMcpServer}
         />
       ) : null}
-      {settingsOpen && !modelsOpen && !connectorsOpen ? (
+      {settingsOpen && !modelsOpen && !connectorsOpen && !wikiOpen ? (
         <SettingsDialog
           llms={llms}
           providers={providers}
@@ -697,7 +705,15 @@ function Workspace({
           onClose={() => setConnectorsOpen(false)}
         />
       ) : null}
-      {llms && pickerFor && !modelsOpen && !connectorsOpen ? (
+      {wikiOpen ? (
+        <WikiDialog
+          roster={roster}
+          refreshTick={wikiRefreshTick}
+          onClose={() => setWikiOpen(false)}
+          onSignedOut={signOut}
+        />
+      ) : null}
+      {llms && pickerFor && !modelsOpen && !connectorsOpen && !wikiOpen ? (
         <BotModelPicker
           botId={pickerFor}
           botName={roster[pickerFor]?.name ?? pickerFor}

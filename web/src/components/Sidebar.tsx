@@ -6,7 +6,7 @@ import { useT, type MessageKey, type T } from '../i18n'
 import { isNotice, noticeText } from '../i18n/describe'
 import { BotAvatar, conversationSeed } from './BotAvatar'
 import { useEscape } from './ConfirmDialog'
-import { CpuSparkleIcon, MoonIcon, PlugIcon, PlusIcon, SettingsIcon, SunIcon } from './Icons'
+import { BookOpenIcon, CpuSparkleIcon, MoonIcon, PlugIcon, PlusIcon, SettingsIcon, SunIcon } from './Icons'
 
 /**
  * 单聊就是那位同事的状态。群只说「有人在干活」：等你、卡住、刚干完说的是某一位同事，
@@ -96,6 +96,7 @@ export function Sidebar({
   onModels,
   onConnectors,
   connectorsAttention,
+  onWiki,
   onSettings,
   resolvedTheme,
   onToggleTheme,
@@ -113,6 +114,8 @@ export function Sidebar({
   onConnectors?: () => void
   /** 有连接器账号过期或异常需处理 */
   connectorsAttention?: boolean
+  /** 打开「团队知识库」 */
+  onWiki?: () => void
   /** 打开设置页；老网关没有设置路由就不传 */
   onSettings?: () => void
   /** 当前生效的主题（深色 / 浅色）与快捷切换回调 */
@@ -210,7 +213,7 @@ export function Sidebar({
           ) : null}
         </div>
 
-        {onModels || onConnectors || onSettings ? (
+        {onModels || onConnectors || onWiki || onSettings ? (
           <div className="sidebar-footer">
             {onModels ? (
               <button
@@ -238,6 +241,17 @@ export function Sidebar({
               </button>
             ) : null}
             {!onModels && !onConnectors ? <span className="spacer" /> : null}
+            {onWiki ? (
+              <button
+                type="button"
+                className="sidebar-foot-icon sidebar-wiki"
+                onClick={() => { onClose?.(); onWiki() }}
+                aria-label={t('sidebar.wiki')}
+                title={t('sidebar.wiki')}
+              >
+                <BookOpenIcon size={15} />
+              </button>
+            ) : null}
             {onSettings ? (
               <button
                 type="button"
