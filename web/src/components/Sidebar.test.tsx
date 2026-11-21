@@ -290,4 +290,64 @@ describe('Sidebar', () => {
     expect(screen.getByText('⚡ Background: Competitor audit')).toBeInTheDocument()
     expect(screen.getByText('⚡ Background task')).toBeInTheDocument()
   })
+
+  it('previews dispatch_plan messages with title or fallback label', () => {
+    const withTitle = conversation({
+      id: 'group:offsite-crew',
+      kind: 'group',
+      title: 'Offsite crew',
+      members: ['chief', 'researcher'],
+      last_message: {
+        id: 24,
+        thread_id: 'group:offsite-crew',
+        sender: 'chief',
+        kind: 'dispatch_plan',
+        content: '',
+        created_at: 24,
+        payload: {
+          planId: 'dp-11112222',
+          threadId: 'group:offsite-crew',
+          createdBy: 'chief',
+          title: 'Q3 pricing rollout',
+          status: 'draft',
+          sourceTainted: false,
+          error: '',
+          steps: [],
+          createdAt: 24,
+          startedAt: null,
+          finishedAt: null,
+        },
+      },
+    })
+    const withoutTitle = conversation({
+      id: 'group:launch',
+      kind: 'group',
+      title: 'Launch room',
+      members: ['chief'],
+      last_message: {
+        id: 25,
+        thread_id: 'group:launch',
+        sender: 'chief',
+        kind: 'dispatch_plan',
+        content: '',
+        created_at: 25,
+        payload: {
+          planId: 'dp-33334444',
+          threadId: 'group:launch',
+          createdBy: 'chief',
+          title: '',
+          status: 'running',
+          sourceTainted: false,
+          error: '',
+          steps: [],
+          createdAt: 25,
+          startedAt: 25,
+          finishedAt: null,
+        },
+      },
+    })
+    render(<Sidebar conversations={[withTitle, withoutTitle]} selectedId={null} statuses={{}} onSelect={() => {}} onNewBot={() => {}} />)
+    expect(screen.getByText('🔀 Pipeline: Q3 pricing rollout')).toBeInTheDocument()
+    expect(screen.getByText('🔀 Dispatch pipeline')).toBeInTheDocument()
+  })
 })

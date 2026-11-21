@@ -1,9 +1,9 @@
 import { fileToBase64 } from './attachments'
 import type {
   AboutInfo, AppKey, ApprovalEditInput, AttachmentPayload, BackgroundTaskActionResponse, BackgroundTaskView, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
-  Conversation, CreateMcpServerInput, FieldError, GatewayEvent, ImportMcpServersInput, ImportMcpServersResult, LlmPriority, LlmQueueEndpointView,
+  Conversation, CreateMcpServerInput, DispatchPlanActionResponse, DispatchPlanView, FieldError, GatewayEvent, ImportMcpServersInput, ImportMcpServersResult, LlmPriority, LlmQueueEndpointView,
   LlmQueueSnapshot, McpServersSnapshot, McpServerView, Message, ProviderPreset, QuietDigestBotSummary, QuietDigestFlushResponse, QuietDigestSummary,
-  ResolveRuleProposalResponse, RoutineAction, RuleDuration, RuleProposalStatus, RuleProposalView, ServerEvent, SettingsView, SetupInfo, UpdateMcpServerPatch,
+  ResolveRuleProposalResponse, RoutineAction, RuleDuration, RuleProposalStatus, RuleProposalView, ServerEvent, SettingsView, SetupInfo, TeamCharterView, UpdateMcpServerPatch,
   WikiCreateInput, WikiKind, WikiListResponse, WikiPageResponse, WikiSaveInput,
 } from './types'
 
@@ -15,6 +15,12 @@ export type {
   BackgroundTaskStep,
   BackgroundTaskView,
   CreateMcpServerInput,
+  DispatchPlanActionResponse,
+  DispatchPlanPayload,
+  DispatchPlanStatus,
+  DispatchPlanView,
+  DispatchStepStatus,
+  DispatchStepView,
   GatewayEvent,
   ImportMcpServersInput,
   ImportMcpServersResult,
@@ -28,6 +34,7 @@ export type {
   RuleProposalStatus,
   RuleProposalView,
   ServerEvent,
+  TeamCharterView,
   UpdateMcpServerPatch,
   WikiCreateInput,
   WikiKind,
@@ -395,6 +402,34 @@ export async function steerBackgroundTask(id: string, note: string): Promise<Bac
 export async function cancelBackgroundTask(id: string): Promise<BackgroundTaskActionResponse> {
   const res = await send('POST', `/api/background-tasks/${encodeURIComponent(id)}/cancel`, undefined, { strict: true })
   return res.json() as Promise<BackgroundTaskActionResponse>
+}
+
+/** 读取某个群聊的团队章程（team.md） */
+export function fetchTeamCharter(threadId: string): Promise<TeamCharterView> {
+  return getApiJson<TeamCharterView>(`/api/threads/${encodeURIComponent(threadId)}/team`)
+}
+
+/** 保存某个群聊的团队章程（team.md） */
+export async function saveTeamCharter(threadId: string, content: string): Promise<TeamCharterView> {
+  const res = await send('PUT', `/api/threads/${encodeURIComponent(threadId)}/team`, { content }, { strict: true })
+  return res.json() as Promise<TeamCharterView>
+}
+
+/** 查询某个群聊的协作流水线列表 */
+export function fetchDispatchPlans(threadId: string): Promise<{ plans: DispatchPlanView[] }> {
+  return getApiJson<{ plans: DispatchPlanView[] }>(`/api/threads/${encodeURIComponent(threadId)}/dispatch-plans`)
+}
+
+/** 启动草稿状态的协作流水线 */
+export async function startDispatchPlan(id: string): Promise<DispatchPlanActionResponse> {
+  const res = await send('POST', `/api/dispatch-plans/${encodeURIComponent(id)}/start`, undefined, { strict: true })
+  return res.json() as Promise<DispatchPlanActionResponse>
+}
+
+/** 取消草稿、运行中或暂停中的协作流水线 */
+export async function cancelDispatchPlan(id: string): Promise<DispatchPlanActionResponse> {
+  const res = await send('POST', `/api/dispatch-plans/${encodeURIComponent(id)}/cancel`, undefined, { strict: true })
+  return res.json() as Promise<DispatchPlanActionResponse>
 }
 
 /** 立即投递免打扰期间暂存的晨报更新（可按同事筛选） */

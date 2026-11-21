@@ -461,6 +461,7 @@ describe('background tasks section', () => {
           ],
           actions: [
             { id: 10, thread_id: 'dm:researcher', trigger: 'background', tool: 'background_task', summary: 'completed: Summarize Q2 notes', ok: true, ms: 80, created_at: Date.now() },
+            { id: 12, thread_id: 'group:offsite-crew', trigger: 'pipeline', tool: 'wiki_upsert', summary: 'project/q3-launch', ok: true, ms: 90, created_at: Date.now() },
           ],
         }}
         botName="Scout"
@@ -482,6 +483,7 @@ describe('background tasks section', () => {
     expect(screen.getByText('Broken export')).toBeInTheDocument()
     expect(screen.getByText('Permission denied')).toBeInTheDocument()
     expect(screen.getByText(/· Background$/)).toBeInTheDocument()
+    expect(screen.getByText(/· Pipeline$/)).toBeInTheDocument()
 
     // Inline steer validates and forwards
     const steerInput = screen.getByPlaceholderText('Send a steering note…') as HTMLInputElement
@@ -506,6 +508,7 @@ describe('background tasks section', () => {
             backgroundTasks: [],
             actions: [
               { id: 11, thread_id: 'dm:researcher', trigger: 'background', tool: 'background_task', summary: 'completed: 整理调研报告', ok: true, ms: 80, created_at: Date.now() },
+              { id: 13, thread_id: 'group:offsite-crew', trigger: 'pipeline', tool: 'wiki_upsert', summary: 'project/q3', ok: true, ms: 90, created_at: Date.now() },
             ],
           }}
           botName="Scout"
@@ -515,5 +518,6 @@ describe('background tasks section', () => {
     )
     expect(screen.getByText('暂无后台任务')).toBeInTheDocument()
     expect(screen.getByText(/· 后台任务$/)).toBeInTheDocument()
+    expect(screen.getByText(/· 流水线$/)).toBeInTheDocument()
   })
 })

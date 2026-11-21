@@ -20,6 +20,7 @@ export type MessageKind =
   | 'quiet_digest'
   | 'rule_proposal'
   | 'background_task'
+  | 'dispatch_plan'
 
 export type BotRow = {
   id: string
@@ -439,6 +440,51 @@ const MIGRATIONS: Migration[] = [
         ON background_tasks(bot_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_background_tasks_status
         ON background_tasks(status, bot_id);
+    `)
+  },
+  // v17：群组协同调度管线表（DAG 计划与步骤状态）
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS dispatch_plans (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        message_id INTEGER,
+        error TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_plans_thread
+        ON dispatch_plans(thread_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_dispatch_plans_status
+        ON dispatch_plans(status);
+
+      CREATE TABLE IF NOT EXISTS dispatch_plan_steps (
+        plan_id TEXT NOT NULL REFERENCES dispatch_plans(id) ON DELETE CASCADE,
+        step_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        bot_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        instructions TEXT NOT NULL,
+        depends_on_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'pending',
+        output TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        output_tainted INTEGER NOT NULL DEFAULT 0,
+        waiting_approval_id INTEGER,
+        waiting_question_id INTEGER,
+        started_at INTEGER,
+        finished_at INTEGER,
+        PRIMARY KEY (plan_id, step_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_plan_steps_plan
+        ON dispatch_plan_steps(plan_id, seq ASC);
+      CREATE INDEX IF NOT EXISTS idx_dispatch_plan_steps_wait
+        ON dispatch_plan_steps(status, waiting_approval_id, waiting_question_id);
     `)
   },
 ]

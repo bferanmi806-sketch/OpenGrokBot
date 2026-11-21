@@ -360,6 +360,60 @@ export const PROPOSE_MEMORY_RULE_TOOL: ToolDef = {
   },
 }
 
+export const CREATE_DISPATCH_PLAN_TOOL: ToolDef = {
+  type: 'function',
+  function: {
+    name: 'create_dispatch_plan',
+    description:
+      'Propose a structured multi-step dependency pipeline (DAG) for this group room. '
+      + 'Steps with no unmet dependencies run in parallel once your operator clicks Start; '
+      + 'dependent steps receive upstream outputs automatically. Do NOT use for simple 1-round status checks.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: {
+          type: 'string',
+          description: 'Short single-line pipeline title (1–120 characters).',
+        },
+        steps: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 12,
+          description: 'Multi-step DAG definition (1–12 items) assigned to teammates in this group.',
+          items: {
+            type: 'object',
+            properties: {
+              id: {
+                type: 'string',
+                description: 'Unique step ID within this plan (1–32 lowercase alphanumeric, "_" or "-" chars).',
+              },
+              botId: {
+                type: 'string',
+                description: 'Teammate id in this group who will execute this step.',
+              },
+              title: {
+                type: 'string',
+                description: 'Short single-line step title (1–120 characters).',
+              },
+              instructions: {
+                type: 'string',
+                description: 'Clear task instructions and what "done" looks like (1–4000 characters).',
+              },
+              dependsOn: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Optional list of upstream step IDs that must finish before this step starts.',
+              },
+            },
+            required: ['id', 'botId', 'title', 'instructions'],
+          },
+        },
+      },
+      required: ['title', 'steps'],
+    },
+  },
+}
+
 /**
  * watch routine 的回合只拿这些：看网页、读文件、读技能、汇报、提问、提议规矩、把动作扣下来等人批。
  * 能改东西的（shell、写文件、点击、输入、按键）、能把话传出去的（转交）、能直接改规矩的都不给。
@@ -503,6 +557,8 @@ export function buildTools(opts: {
   canProposeRule?: boolean
   canBackgroundTasks?: boolean
   isBackgroundTask?: boolean
+  canDispatchPlan?: boolean
+  isPipelineStep?: boolean
   watch?: boolean
   routineMode?: RoutineMode
   /** false = 这一回合不是操作者开的头：改常设安排的工具不列出来（执行时另有一道门） */
@@ -519,7 +575,16 @@ export function buildTools(opts: {
 }): ToolDef[] {
   const effectiveMode: RoutineMode = opts.routineMode ?? (opts.watch ? 'watch' : 'act')
   const allowBackgroundControls =
-    opts.operatorTurn !== false && opts.isBackgroundTask !== true && effectiveMode === 'act'
+    opts.operatorTurn !== false
+    && opts.isBackgroundTask !== true
+    && opts.isPipelineStep !== true
+    && effectiveMode === 'act'
+  const allowDispatchPlan =
+    opts.canDispatchPlan === true
+    && opts.operatorTurn !== false
+    && opts.isBackgroundTask !== true
+    && opts.isPipelineStep !== true
+    && effectiveMode === 'act'
   const computerTools = COMPUTER_TOOLS
     .filter((t) => opts.shell !== false || t.function.name !== 'shell')
     .map((t) => (t.function.name === 'shell' && opts.kind === 'local'
@@ -544,6 +609,7 @@ export function buildTools(opts: {
     ...WORKFLOW_TOOLS,
     ...(opts.canProposeRule === true ? [PROPOSE_MEMORY_RULE_TOOL] : []),
     ...(opts.canBackgroundTasks === true ? BACKGROUND_TOOLS : []),
+    ...(allowDispatchPlan ? [CREATE_DISPATCH_PLAN_TOOL] : []),
     ...(opts.hasWiki ? WIKI_TOOLS : []),
     ...(opts.hasSkills ? [SKILL_TOOL] : []),
     ...(opts.canRelay ? [RELAY_TOOL] : []),
