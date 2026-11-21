@@ -1,7 +1,17 @@
 import type { WorkflowRecording } from './workflow-recorder.js'
 import type { PageLike } from './browser-page.js'
 
-export type ShellResult = { stdout: string; stderr: string; exitCode: number }
+export type SandboxOutcome = 'denied' | 'runner_error'
+export type ShellResult = {
+  stdout: string
+  stderr: string
+  exitCode: number
+  /** 命令是否因超时被强杀 */
+  timedOut?: boolean
+  /** 本机沙箱归因：'denied' = 沙箱策略正常拦截越权；'runner_error' = 沙箱运行器本身启动/执行故障 */
+  sandboxOutcome?: SandboxOutcome
+}
+export type FileStatResult = { exists: true; version: string } | { exists: false }
 export type Shot = { buffer: Buffer; width: number; height: number }
 export type PageLink = { text: string; href: string }
 
@@ -28,6 +38,8 @@ export interface BotComputer {
   shell(cmd: string, timeoutMs?: number, signal?: AbortSignal): Promise<ShellResult>
   readFile(path: string): Promise<string>
   writeFile(path: string, content: string): Promise<void>
+  /** 可选轻量化元数据探针（不读文件内容），用于 write_file 防陈旧覆盖乐观锁。 */
+  statFile?(path: string): Promise<FileStatResult | null>
   /**
    * 把操作者发来的文件原样放到这台电脑上（path 相对 workspace，如 uploads/1a2b3c4d-notes.md）。
    * 已经有同一份就什么都不做；有一份不一样的不覆盖。没有这个口子的电脑放不了文件。
@@ -109,6 +121,7 @@ export function createFakeComputer(
     ...(overrides.showWindow ? { showWindow: overrides.showWindow } : {}),
     ...(overrides.hideWindow ? { hideWindow: overrides.hideWindow } : {}),
     ...(overrides.windowShown ? { windowShown: overrides.windowShown } : {}),
+    ...(overrides.statFile ? { statFile: overrides.statFile } : {}),
   }
   for (const key of Object.keys(base) as (keyof BotComputer)[]) {
     if (key === 'kind') continue

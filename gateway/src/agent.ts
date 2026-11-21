@@ -19,6 +19,7 @@ import {
   type GoalToolResult,
 } from './goals/tools.js'
 import { isMcpToolName } from './mcp/naming.js'
+import type { McpOnDemandServer } from './mcp/tools.js'
 import { limitText, noticeText, type BudgetHit, type Notice } from './notices.js'
 import {
   COMPACT_TRIGGER_MESSAGES,
@@ -70,7 +71,8 @@ import {
 } from './spaces/tools.js'
 import { validateReportPayload, type ReportPayload } from './report.js'
 import { normalizeMode, normalizeSurface, type RoutineMode, type RoutineSurface } from './routines.js'
-import { DEFAULT_SPILL_THRESHOLD_CHARS, SHELL_SPILL_THRESHOLD_CHARS, spillToolOutput } from './spill.js'
+import { DEFAULT_SPILL_THRESHOLD_CHARS, SHELL_SPILL_THRESHOLD_CHARS, detachSlice, spillToolOutput } from './spill.js'
+import { MAX_PARALLEL_READ_TOOLS, partitionToolBatches, runWithConcurrency } from './tool-batch.js'
 import {
   BACKGROUND_CONTROL_TOOL_NAMES,
   BACKGROUND_TOOL_NAMES,
@@ -205,6 +207,10 @@ export type AgentDeps = {
   mcpServers?: PromptMcpServer[]
   mcpTools?: ToolDef[]
   mcpReadToolNames?: ReadonlySet<string>
+  /** 大 MCP 服务的按需工具加载器（按 loader 工具名索引） */
+  mcpLoaders?: ReadonlyMap<string, McpOnDemandServer>
+  /** 尚未加载的按需 MCP 工具名 -> 所属加载器元信息 */
+  mcpDeferredTools?: ReadonlyMap<string, { loaderName: string; serverName: string }>
   onMcpTool?: (input: {
     name: string
     args: Record<string, unknown>
@@ -304,6 +310,14 @@ type TurnContext = AgentDeps & {
   turnTainted: boolean
   effectiveMode: RoutineMode
   proposedRuleThisTurn: boolean
+  /** 本回合内经 read_file / write_file 观察过的文件版本快照（用于防陈旧覆盖乐观锁） */
+  observedFiles: Map<string, string>
+  /** 本回合动态活跃工具列表（含按需加载的 MCP 工具） */
+  activeTools: ToolDef[]
+  /** 本回合活跃的 MCP 只读工具名（含按需加载进来的只读工具） */
+  activeMcpReadToolNames: Set<string>
+  /** 本回合已按需加载的 MCP 暴露工具名 */
+  loadedDeferredMcp: Set<string>
 }
 
 function effectiveRoutineMode(deps: Pick<AgentDeps, 'routineMode' | 'watch'>): RoutineMode {
@@ -319,6 +333,16 @@ function defaultPriority(origin: TurnOrigin | undefined): LlmPriority {
     case 'operator':
     case undefined: return 'interactive'
   }
+}
+
+const PARALLEL_READ_TOOL_NAMES = new Set(['read_file', 'search_history', 'read_skill'])
+
+function normalizeWorkspacePath(raw: string): string {
+  let p = raw.trim().replace(/\\/g, '/')
+  if (p === '/workspace') return '.'
+  if (p.startsWith('/workspace/')) p = p.slice('/workspace/'.length)
+  p = p.replace(/^\.\//, '').replace(/\/+/g, '/').replace(/\/$/, '')
+  return p || '.'
 }
 
 /** 真实的浏览器活（开页、读、点、再读、填）十几步就用完了；40 步够干完一件事，又挡得住死循环 */
@@ -353,15 +377,23 @@ export async function runTurn(
   const alreadyStored = opts.alreadyStored === true
   const persistUserMessage = opts.persistUserMessage !== false && !alreadyStored
   const now = (deps.now ?? (() => new Date()))()
-  const say = (content: string) => events.onMessage(insertMessage(db, { threadId, sender: bot.id, kind: 'text', content }))
+  let botPostedVisible = false
+  const turnEvents: AgentEvents = {
+    onMessage(m) {
+      if (m.sender === bot.id && m.kind !== 'activity') botPostedVisible = true
+      events.onMessage(m)
+    },
+    onStatus: events.onStatus,
+  }
+  const say = (content: string) => turnEvents.onMessage(insertMessage(db, { threadId, sender: bot.id, kind: 'text', content }))
   /** 网关替同事说的固定话：content 是英文（模型和老界面看这个），payload 让界面换成操作者的语言 */
-  const notify = (n: Notice) => events.onMessage(insertMessage(db, { threadId, sender: bot.id, kind: 'text', content: noticeText(n), payload: n }))
+  const notify = (n: Notice) => turnEvents.onMessage(insertMessage(db, { threadId, sender: bot.id, kind: 'text', content: noticeText(n), payload: n }))
   if (persistUserMessage) {
     events.onMessage(insertMessage(db, { threadId, sender: 'user', kind: 'text', content: userText, createdAt: now.getTime() }))
   }
   const effectiveMode = effectiveRoutineMode(deps)
   events.onStatus(bot.id, 'thinking')
-  const activity = createActivity(deps, effectiveMode, events)
+  const activity = createActivity(deps, effectiveMode, turnEvents)
   try {
     const canRelay = Boolean(deps.onMessageBot)
     const hasWiki = Boolean(deps.onWikiTool)
@@ -525,6 +557,9 @@ export async function runTurn(
         ? (deps.origin ?? 'unknown')
         : (hasOutsideDataHistory || taintedByOutsideData) ? 'outside-data' : null
     const initiallyTainted = hasOutsideDataHistory || taintedByOutsideData
+    const activeTools = [...tools]
+    const activeMcpReadToolNames = new Set(deps.mcpReadToolNames ?? [])
+    const loadedDeferredMcp = new Set<string>()
     const ctx: TurnContext = {
       ...deps,
       ruleBlock: computeRuleBlock(),
@@ -535,6 +570,10 @@ export async function runTurn(
       turnTainted: initiallyTainted,
       effectiveMode,
       proposedRuleThisTurn: false,
+      observedFiles: new Map(),
+      activeTools,
+      activeMcpReadToolNames,
+      loadedDeferredMcp,
     }
     let taintNotified = false
     const notifyTainted = () => {
@@ -547,6 +586,8 @@ export async function runTurn(
     const repeatGuard = createRepeatGuard()
     const meter = createContextMeter()
     let prefixModified = false
+    let emptyRetries = 0
+    const MAX_EMPTY_RESPONSE_RETRIES = 2
     const maxSteps = deps.maxSteps && deps.maxSteps > 0 ? Math.floor(deps.maxSteps) : DEFAULT_MAX_STEPS
     const turnMs = deps.turnTimeoutMs ?? DEFAULT_TURN_MS
     const priority = deps.priority ?? defaultPriority(deps.origin)
@@ -555,7 +596,7 @@ export async function runTurn(
       if (signal?.aborted) return stopped(notify, silentStop)
       const limit = step >= maxSteps ? stepLimit(maxSteps)
         : turnMs > 0 && Date.now() - startedAt >= turnMs ? timeLimit(turnMs) : null
-      if (limit) return await closeOut(deps, messages, tools, limit, priority, say, notify)
+      if (limit) return await closeOut(deps, messages, activeTools, limit, priority, say, notify)
       const overBudget = deps.checkBudget?.()
       if (overBudget) {
         sayBudget(overBudget, say, notify)
@@ -573,7 +614,7 @@ export async function runTurn(
         messages.push({ role: 'user', content: `[operator steering note for your background task] ${note}` })
       }
       // L2：多步回合内估算或实测逼近窗口 75% 时，先零成本剪枝更早步骤的大段工具输出
-      if (step > 0 && meter.projectedTokens(messages, tools) >= pressureTokens) {
+      if (step > 0 && meter.projectedTokens(messages, activeTools) >= pressureTokens) {
         const pruned = pruneOldToolResults(messages)
         if (pruned.prunedCount > 0) {
           messages = pruned.messages
@@ -583,7 +624,7 @@ export async function runTurn(
       }
       let turn
       try {
-        turn = await llm.chat(messages, tools, { signal, priority, ...(prefixModified ? { prefixModified: true } : {}) })
+        turn = await llm.chat(messages, activeTools, { signal, priority, ...(prefixModified ? { prefixModified: true } : {}) })
       } catch (err) {
         // 规范上下文溢出：原位激进剪枝旧工具结果后重试一次
         if (!signal?.aborted && isContextOverflowError(err)) {
@@ -594,7 +635,7 @@ export async function runTurn(
             messages = pruned.messages
             prefixModified = true
             meter.resetAnchor()
-            turn = await llm.chat(messages, tools, { signal, priority, prefixModified: true })
+            turn = await llm.chat(messages, activeTools, { signal, priority, prefixModified: true })
           } else {
             throw err
           }
@@ -608,31 +649,80 @@ export async function runTurn(
       }
       if (turn.usage) {
         deps.onUsage?.(turn.usage)
-        meter.recordUsage(turn.usage, messages, tools)
+        meter.recordUsage(turn.usage, messages, activeTools)
       }
       if (signal?.aborted) return stopped(notify, silentStop)
       if (turn.toolCalls.length > 0) {
+        emptyRetries = 0
         messages.push(turn.raw)
         let latestImage: string | undefined
         const reminders: string[] = []
-        for (const call of turn.toolCalls) {
+        const isParallelSafe = (call: ToolCall): boolean =>
+          !call.argsError && !deps.mcpLoaders?.has(call.name) && (
+            PARALLEL_READ_TOOL_NAMES.has(call.name)
+            || CONNECTOR_READ_TOOL_NAMES.has(call.name)
+            || activeMcpReadToolNames.has(call.name)
+          )
+        const batches = partitionToolBatches(turn.toolCalls, isParallelSafe)
+        for (const batch of batches) {
           if (signal?.aborted) return stopped(notify, silentStop)
-          const outcome = await execToolCall(ctx, call, events, activity, () => {
-            taintedByOutsideData = true
-            ctx.turnTainted = true
-            ctx.ruleBlock = computeRuleBlock()
-            notifyTainted()
-          })
-          messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.text })
-          latestImage = outcome.image ?? latestImage
-          const nudge = repeatGuard.observe(call.name, call.args)
-          if (nudge) reminders.push(nudge)
+          if (batch.parallel) {
+            const batchResults = await runWithConcurrency(
+              batch.items,
+              MAX_PARALLEL_READ_TOOLS,
+              async (call) => {
+                let readOutside = false
+                const outcome = await execToolCall(ctx, call, turnEvents, activity, () => {
+                  readOutside = true
+                })
+                return { call, outcome, readOutside }
+              },
+              signal,
+            )
+            if (signal?.aborted) return stopped(notify, silentStop)
+            for (const entry of batchResults) {
+              if (!entry) continue
+              if (entry.readOutside) {
+                taintedByOutsideData = true
+                ctx.turnTainted = true
+                ctx.ruleBlock = computeRuleBlock()
+                notifyTainted()
+              }
+              messages.push({ role: 'tool', tool_call_id: entry.call.id, content: entry.outcome.text })
+              latestImage = entry.outcome.image ?? latestImage
+              const nudge = repeatGuard.observe(entry.call.name, entry.call.args)
+              if (nudge) reminders.push(nudge)
+            }
+          } else {
+            for (const call of batch.items) {
+              if (signal?.aborted) return stopped(notify, silentStop)
+              const outcome = await execToolCall(ctx, call, turnEvents, activity, () => {
+                taintedByOutsideData = true
+                ctx.turnTainted = true
+                ctx.ruleBlock = computeRuleBlock()
+                notifyTainted()
+              })
+              messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.text })
+              latestImage = outcome.image ?? latestImage
+              const nudge = repeatGuard.observe(call.name, call.args)
+              if (nudge) reminders.push(nudge)
+            }
+          }
         }
         if (deps.vision && latestImage) showLatestImage(messages, latestImage)
         if (reminders.length > 0) messages.push({ role: 'user', content: reminders.join('\n\n') })
         continue
       }
       const text = turn.content?.trim()
+      // 非 stub 模型静默空回复（且本回合尚未投递过报告/审批/提问等卡片）：复用原前缀原位重试，不再静默吞掉
+      if (!text && !botPostedVisible && effectiveMode === 'act' && !llm.isStub) {
+        if (emptyRetries < MAX_EMPTY_RESPONSE_RETRIES) {
+          emptyRetries++
+          step--
+          continue
+        }
+        throw new Error('LLM API returned an empty reply.')
+      }
       // watch / prepare 回合看完没发现需要打扰操作者的事：安静收场，不落进线程也不进晨报
       const silent =
         (effectiveMode === 'watch' && Boolean(text && WATCH_QUIET.test(text))) ||
@@ -823,15 +913,19 @@ async function execToolCall(
     // 工具失败必须回喂模型（让它换招/如实汇报），而不是炸掉整个回合
     return { text: `Tool ${call.name} failed: ${err instanceof Error ? err.message : String(err)}` }
   }
+  if (call.argsError) {
+    log(false)
+    return { text: `Invalid JSON arguments for ${call.name}: ${call.argsError}. Fix the JSON object and try again.` }
+  }
   // 没在清单里给它的工具，模型硬要调也不行：清单是给模型看的，这里才是门
-  if (deps.effectiveMode === 'watch' && !WATCH_TOOL_NAMES.has(call.name) && !deps.mcpReadToolNames?.has(call.name)) {
+  if (deps.effectiveMode === 'watch' && !WATCH_TOOL_NAMES.has(call.name) && !deps.activeMcpReadToolNames.has(call.name)) {
     log(false)
     return {
       text: `${call.name} is not available in a watch routine: this run only looks. `
         + 'If something should be done, hold it for approval and your operator decides.',
     }
   }
-  if (deps.effectiveMode === 'prepare' && !PREPARE_TOOL_NAMES.has(call.name) && !deps.mcpReadToolNames?.has(call.name)) {
+  if (deps.effectiveMode === 'prepare' && !PREPARE_TOOL_NAMES.has(call.name) && !deps.activeMcpReadToolNames.has(call.name)) {
     log(false)
     return {
       text: `${call.name} is not available in a prepare routine: this run allows reading, wiki_upsert, write_file, `
@@ -1102,14 +1196,61 @@ async function execToolCall(
     }
   }
   if (isMcpToolName(call.name)) {
-    if (deps.mcpReadToolNames?.has(call.name)) onOutsideDataRead?.()
+    const loader = deps.mcpLoaders?.get(call.name)
+    if (loader) {
+      const requested = Array.isArray(args.tools)
+        ? args.tools.map((x) => (typeof x === 'string' ? x.trim() : '')).filter(Boolean)
+        : []
+      if (requested.length === 0) {
+        log(false)
+        return { text: `${call.name} needs a non-empty "tools" array of tool names from the catalog.` }
+      }
+      const resolvedExposed: string[] = []
+      const unknown: string[] = []
+      for (const req of requested) {
+        const exposed = loader.defsByExposedName.has(req) ? req : loader.exposedByRawName.get(req)
+        if (!exposed) unknown.push(req)
+        else if (!resolvedExposed.includes(exposed)) resolvedExposed.push(exposed)
+      }
+      if (unknown.length > 0) {
+        log(false)
+        const avail = loader.entries.slice(0, 30).map((e) => e.name).join(', ')
+        return {
+          text: `Unknown ${loader.serverName} tool name(s): ${unknown.join(', ')}. Available in catalog: ${avail}${loader.entries.length > 30 ? ', …' : ''}.`,
+        }
+      }
+      const newlyLoaded: string[] = []
+      for (const exposed of resolvedExposed) {
+        if (deps.loadedDeferredMcp.has(exposed)) continue
+        const def = loader.defsByExposedName.get(exposed)!
+        deps.activeTools.push(def)
+        deps.loadedDeferredMcp.add(exposed)
+        if (loader.readNames.has(exposed)) deps.activeMcpReadToolNames.add(exposed)
+        newlyLoaded.push(exposed)
+      }
+      log(true)
+      if (newlyLoaded.length === 0) {
+        return { text: `Requested ${loader.serverName} tool(s) are already loaded: ${resolvedExposed.join(', ')}.` }
+      }
+      return {
+        text: `Loaded ${newlyLoaded.length} ${loader.serverName} tool(s): ${newlyLoaded.join(', ')}. Their full schemas are now active for your next step.`,
+      }
+    }
+    const deferred = deps.mcpDeferredTools?.get(call.name)
+    if (deferred && !deps.loadedDeferredMcp.has(call.name)) {
+      log(false)
+      return {
+        text: `Tool "${call.name}" on ${deferred.serverName} is loaded on demand and not active yet. Call ${deferred.loaderName} with {"tools": ["${call.name}"]} first.`,
+      }
+    }
+    if (deps.activeMcpReadToolNames.has(call.name)) onOutsideDataRead?.()
     if (!deps.onMcpTool) {
       log(false)
       return { text: 'MCP servers are not available on this gateway.' }
     }
     try {
       const res = await deps.onMcpTool({ name: call.name, args, events, signal: deps.signal })
-      if (deps.mcpReadToolNames?.has(call.name) || res.tainted) onOutsideDataRead?.()
+      if (deps.activeMcpReadToolNames.has(call.name) || res.tainted) onOutsideDataRead?.()
       log(res.ok)
       if (res.text.length > DEFAULT_SPILL_THRESHOLD_CHARS) {
         const computer = deps.getComputer ? await deps.getComputer().catch(() => null) : null
@@ -1714,7 +1855,7 @@ function sliceForModel(text: string, args: Record<string, unknown>, tool: string
   const start = Math.min(numberArg(args.offset, 0, total), total)
   const size = Math.max(numberArg(args.maxChars, MAX_TOOL_CHARS, MAX_SLICE_CHARS), 1)
   const end = Math.min(start + size, total)
-  let out = text.slice(start, end)
+  let out = detachSlice(text.slice(start, end), total)
   if (end < total) out += `\n…(showing characters ${start}–${end} of ${total}; call ${tool} with offset=${end} for more)`
   else if (start > 0) out += `\n(end of ${noun})`
   return out
@@ -1734,7 +1875,7 @@ async function linksSection(computer: BotComputer): Promise<string> {
 }
 
 async function execComputerTool(
-  deps: AgentDeps,
+  deps: TurnContext,
   name: string,
   args: Record<string, unknown>,
   events: AgentEvents,
@@ -1743,7 +1884,12 @@ async function execComputerTool(
   switch (name) {
     case 'shell': {
       const r = await computer.shell(String(args.cmd ?? ''), shellTimeout(args.timeoutMs), deps.signal)
-      const text = [`exit ${r.exitCode}`, r.stdout.trim(), r.stderr.trim() ? `stderr:\n${r.stderr.trim()}` : '']
+      const sandboxHint = r.sandboxOutcome === 'denied'
+        ? '[sandbox: blocked by workspace confinement — keep reads and writes inside /workspace]'
+        : r.sandboxOutcome === 'runner_error'
+          ? '[sandbox: the local sandbox runner failed to start — report this to your operator instead of retrying]'
+          : ''
+      const text = [`exit ${r.exitCode}`, r.stdout.trim(), r.stderr.trim() ? `stderr:\n${r.stderr.trim()}` : '', sandboxHint]
         .filter(Boolean).join('\n')
       const spilled = await spillToolOutput(text, {
         toolName: 'shell',
@@ -1754,11 +1900,36 @@ async function execComputerTool(
       })
       return { text: spilled.text }
     }
-    case 'read_file':
-      return { text: sliceForModel(await computer.readFile(String(args.path ?? '')), args, 'read_file', 'file') }
-    case 'write_file':
-      await computer.writeFile(String(args.path ?? ''), String(args.content ?? ''))
-      return { text: `Wrote ${String(args.path ?? '')}.` }
+    case 'read_file': {
+      const path = String(args.path ?? '')
+      const content = await computer.readFile(path)
+      if (computer.statFile) {
+        const st = await computer.statFile(path).catch(() => null)
+        if (st?.exists) deps.observedFiles.set(normalizeWorkspacePath(path), st.version)
+      }
+      return { text: sliceForModel(content, args, 'read_file', 'file') }
+    }
+    case 'write_file': {
+      const path = String(args.path ?? '')
+      const content = String(args.content ?? '')
+      const key = normalizeWorkspacePath(path)
+      const observedVersion = deps.observedFiles.get(key)
+      if (observedVersion && args.force !== true && computer.statFile) {
+        const current = await computer.statFile(path).catch(() => null)
+        if (current && (!current.exists || current.version !== observedVersion)) {
+          return {
+            text: `Refused to overwrite "${path}": the file changed on disk since you last read it. `
+              + 'Call read_file first to inspect the latest contents (or pass force: true to overwrite anyway).',
+          }
+        }
+      }
+      await computer.writeFile(path, content)
+      if (computer.statFile) {
+        const st = await computer.statFile(path).catch(() => null)
+        if (st?.exists) deps.observedFiles.set(key, st.version)
+      }
+      return { text: `Wrote ${path}.` }
+    }
     case 'browser_goto': {
       const url = checkBrowserUrl(String(args.url ?? ''))
       const r = await computer.goto(url)

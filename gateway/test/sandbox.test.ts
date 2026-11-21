@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
-  bubblewrapArgs, detectSandbox, homeLeaks, probeSandbox, runSandboxed, sandboxEnv, sandboxHint, sandboxSelfCheck, sandboxedCommand, seatbeltProfile,
+  bubblewrapArgs, classifySandboxOutcome, detectSandbox, homeLeaks, probeSandbox, runSandboxed, sandboxEnv, sandboxHint, sandboxSelfCheck, sandboxedCommand, seatbeltProfile,
 } from '../src/sandbox.js'
 
 const have = (...paths: string[]) => (p: string) => paths.includes(p)
@@ -196,5 +196,20 @@ describe('homeLeaks', () => {
 
   it('does not treat paths outside the home directory as put back', () => {
     expect(homeLeaks('tmp\n', home, ['/tmp/osb/workspaces/bob'])).toEqual(['tmp'])
+  })
+})
+
+describe('classifySandboxOutcome', () => {
+  it('distinguishes sandbox runner errors, sandbox denials, and ordinary non-zero exits per backend', () => {
+    expect(classifySandboxOutcome('seatbelt', 71, 'sandbox-exec: line 1: unbound variable', false)).toBe('runner_error')
+    expect(classifySandboxOutcome('seatbelt', 1, 'cat: /Users/op/.ssh/id: Operation not permitted', false)).toBe('denied')
+    expect(classifySandboxOutcome('seatbelt', 1, '', false)).toBeUndefined() // normal grep miss
+    expect(classifySandboxOutcome('seatbelt', 1, 'Operation not permitted', true)).toBeUndefined() // timed out
+
+    expect(classifySandboxOutcome('bubblewrap', 1, 'bwrap: No permissions to creating new namespace', false)).toBe('runner_error')
+    expect(classifySandboxOutcome('bubblewrap', 1, 'touch: cannot touch \'/usr/foo\': Read-only file system', false)).toBe('denied')
+    // Cross-backend isolation: seatbelt phrase does not misclassify bubblewrap normal output
+    expect(classifySandboxOutcome('bubblewrap', 1, 'rg: pattern not found', false)).toBeUndefined()
+    expect(classifySandboxOutcome('bubblewrap', 0, 'bwrap: info line', false)).toBeUndefined()
   })
 })

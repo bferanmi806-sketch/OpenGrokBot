@@ -5,6 +5,16 @@ export function isMcpToolName(name: string): boolean {
   return name.startsWith('mcp__')
 }
 
+/** 按需加载 MCP 服务工具的唯一轻量入口名（保证 <= 64 字符）。 */
+export function mcpLoaderToolName(serverSlug: string): string {
+  const suffix = '__load_tools'
+  const full = `mcp__${serverSlug}${suffix}`
+  if (full.length <= 64) return full
+  const maxSlug = Math.max(1, 64 - 'mcp__'.length - suffix.length)
+  const stem = serverSlug.slice(0, maxSlug).replace(/_+$/, '') || 'srv'
+  return `mcp__${stem}${suffix}`
+}
+
 export function computeExposedToolNames(
   serverSlug: string,
   tools: readonly Pick<McpDiscoveredTool, 'name'>[],

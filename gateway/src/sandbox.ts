@@ -4,7 +4,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 // Seatbelt 和 bubblewrap 只在 macOS / Linux 上有：规则里的路径一律按 POSIX 写，在哪台机器上算都一样
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path/posix'
-import type { ShellResult } from './computer.js'
+import type { SandboxOutcome, ShellResult } from './computer.js'
 
 /**
  * 本机模式的命令行：命令跑在操作系统自带的沙箱里——macOS 的 Seatbelt（sandbox-exec），Linux 的 bubblewrap。
@@ -223,6 +223,29 @@ export function killActiveSandboxes(): void {
 process.once('exit', killActiveSandboxes)
 
 /**
+ * 按本机沙箱后端方言精确归因非零退出（借鉴 DeepSeek Harness Postmortem 0004）：
+ * 区分「沙箱运行器自身失败」「沙箱正常拦住了越权访问」与「业务命令普通非零退出（如 grep 返回 1）」。
+ * 绝不使用跨后端宽泛并集，避免误报。
+ */
+export function classifySandboxOutcome(
+  kind: SandboxKind,
+  exitCode: number,
+  stderr: string,
+  timedOut: boolean,
+): SandboxOutcome | undefined {
+  if (exitCode === 0 || timedOut || !stderr) return undefined
+  if (kind === 'seatbelt') {
+    if (/^sandbox-exec:/m.test(stderr)) return 'runner_error'
+    if (/\bOperation not permitted\b/i.test(stderr)) return 'denied'
+    return undefined
+  }
+  // bubblewrap: 先判 bwrap 自身启动/命名空间故障，再判只读根挂载拒绝
+  if (/^bwrap:/m.test(stderr)) return 'runner_error'
+  if (/\bRead-only file system\b/i.test(stderr)) return 'denied'
+  return undefined
+}
+
+/**
  * 和容器里 shim 的 runShell 同一套脾气：自己的进程组（超时/停止/结束整组杀，不让后台子进程脱离沙箱常驻）、
  * 输出封顶、bash 退出后留 300ms 收尾，后台进程占着管道也不卡。
  */
@@ -277,10 +300,14 @@ export function runSandboxed(cmd: string, opts: {
         stream?.resume()
       }
       const stderr = Buffer.concat(errOut).toString('utf8')
+      const exitCode = typeof code === 'number' ? code : 1
+      const sandboxOutcome = classifySandboxOutcome(opts.sandbox.kind, exitCode, stderr, timedOut)
       resolveShell({
         stdout: Buffer.concat(out).toString('utf8'),
         stderr: stderr || (timedOut ? 'command timed out' : ''),
-        exitCode: typeof code === 'number' ? code : 1,
+        exitCode,
+        ...(timedOut ? { timedOut: true } : {}),
+        ...(sandboxOutcome ? { sandboxOutcome } : {}),
       })
     }
     child.on('close', (code) => finish(code))

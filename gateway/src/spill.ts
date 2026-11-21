@@ -18,6 +18,18 @@ const SPILL_FILE = /^(\d+)-[0-9a-f]+-[a-z0-9_-]+\.txt$/
 
 const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff
 const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff
+const DETACH_SOURCE_THRESHOLD = 4_096
+
+/**
+ * 断开 V8 SlicedString 对超大父字符串的隐性引用（借鉴 DeepSeek Harness 防御规则）：
+ * 从数 MB 文件或命令输出里切出几百字摘要并长期留存在回合消息里时，直接 .slice() 会把整块父串钉在堆中无法 GC。
+ */
+export function detachSlice(slice: string, sourceLength: number): string {
+  if (sourceLength <= DETACH_SOURCE_THRESHOLD || slice.length === 0 || slice.length >= sourceLength) {
+    return slice
+  }
+  return Buffer.from(slice, 'utf16le').toString('utf16le')
+}
 
 /** 从头部切出不超过 maxChars 个 UTF-16 码元，且绝不把代理对（emoji / 生僻汉字）劈成两半。 */
 export function safeSliceHead(text: string, maxChars: number): string {
@@ -27,7 +39,7 @@ export function safeSliceHead(text: string, maxChars: number): string {
   if (end > 0 && isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))) {
     end--
   }
-  return text.slice(0, end)
+  return detachSlice(text.slice(0, end), text.length)
 }
 
 /** 从尾部切出不超过 maxChars 个 UTF-16 码元，且绝不把代理对劈成两半。 */
@@ -38,7 +50,7 @@ export function safeSliceTail(text: string, maxChars: number): string {
   if (start > 0 && isHighSurrogate(text.charCodeAt(start - 1)) && isLowSurrogate(text.charCodeAt(start))) {
     start++
   }
-  return text.slice(start)
+  return detachSlice(text.slice(start), text.length)
 }
 
 /** 代理对安全的首尾截断（无电脑或落盘失败时的优雅降级） */

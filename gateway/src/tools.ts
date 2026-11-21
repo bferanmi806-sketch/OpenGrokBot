@@ -106,7 +106,11 @@ const COMPUTER_TOOLS: ToolDef[] = [
       description: 'Write a UTF-8 text file into your workspace, creating parent directories as needed.',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string' }, content: { type: 'string' } },
+        properties: {
+          path: { type: 'string' },
+          content: { type: 'string' },
+          force: { type: 'boolean', description: 'Overwrite even if the file changed on disk since you last read it.' },
+        },
         required: ['path', 'content'],
       },
     },

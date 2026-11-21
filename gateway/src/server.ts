@@ -1184,17 +1184,27 @@ export function createApp(deps: AppDeps): GatewayApp {
       botMcpServers = listBotMcpServersAllStatuses(db, bot.id)
     }
     const enabledMcpServers = botMcpServers.filter((s) => s.enabled)
-    const { tools: mcpTools, readToolNames: mcpReadToolNames } = buildMcpToolSet(enabledMcpServers, {
+    const {
+      tools: mcpTools,
+      readToolNames: mcpReadToolNames,
+      loaders: mcpLoaders,
+      deferredTools: mcpDeferredTools,
+      promptCatalogs,
+    } = buildMcpToolSet(enabledMcpServers, {
       watch: readOnlyExternal,
     })
-    const promptMcpServers = botMcpServers.map((s) => ({
-      id: s.id,
-      name: s.name,
-      slug: s.slug,
-      enabled: s.enabled,
-      status: s.status,
-      toolCount: s.tools.length,
-    }))
+    const promptMcpServers = botMcpServers.map((s) => {
+      const catalog = promptCatalogs.get(s.id)
+      return {
+        id: s.id,
+        name: s.name,
+        slug: s.slug,
+        enabled: s.enabled,
+        status: s.status,
+        toolCount: s.tools.length,
+        ...(catalog ? { onDemandCatalog: catalog } : {}),
+      }
+    })
     const botVaultItems = listBotVaultItems(db, bot.id)
     const promptVaultItems = botVaultItems.map((v) => ({
       id: v.id,
@@ -1224,6 +1234,8 @@ export function createApp(deps: AppDeps): GatewayApp {
       mcpServers: promptMcpServers,
       mcpTools,
       mcpReadToolNames,
+      mcpLoaders,
+      mcpDeferredTools,
       vaultItems: promptVaultItems,
       redactVaultText: (itemIds, text) => vaultSecrets.redactText(itemIds, text),
       onPublishFeed: ({ args, ruleBlock }) => {

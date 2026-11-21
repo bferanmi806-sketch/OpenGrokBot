@@ -336,4 +336,59 @@ describe('KV cache stability, loop guard, and context overflow recovery', () => 
     expect(firstToolAfterPrune.content).toContain('earlier tool output pruned')
     expect(listMessages(db, threadId).at(-1)!.content).toBe('Recovered after pruning.')
   })
+
+  it('retries silent empty completions in place without polluting history, and errors if retries stay empty', async () => {
+    const { db, threadId, events } = setup()
+    let calls = 0
+    const llm: LLM = {
+      async chat() {
+        calls++
+        if (calls < 3) return { content: '   ', toolCalls: [], raw: { role: 'assistant', content: '' } }
+        return textTurn('Recovered on attempt 3.')
+      },
+    }
+    const outcome = await runTurn({ db, llm, bot, soul: '', threadId }, 'hello', events)
+    expect(outcome).toBe('replied')
+    expect(calls).toBe(3)
+    expect(listMessages(db, threadId).at(-1)!.content).toBe('Recovered on attempt 3.')
+
+    // Exhausting all empty retries reports an error instead of silently succeeding
+    let emptyCalls = 0
+    const alwaysEmpty: LLM = {
+      async chat() {
+        emptyCalls++
+        return { content: null, toolCalls: [], raw: { role: 'assistant', content: null } }
+      },
+    }
+    const failOutcome = await runTurn({ db, llm: alwaysEmpty, bot, soul: '', threadId }, 'again', events)
+    expect(failOutcome).toBe('error')
+    expect(emptyCalls).toBe(3)
+    expect(listMessages(db, threadId).at(-1)!.content).toMatch(/empty reply/i)
+  })
+
+  it('returns an actionable JSON error and skips executing the tool when tool arguments fail to parse', async () => {
+    const { db, threadId, events } = setup()
+    const comp = createFakeComputer()
+    const seen: ChatMsg[][] = []
+    let step = 0
+    const llm: LLM = {
+      async chat(messages) {
+        seen.push(messages.map((m) => ({ ...m })))
+        step++
+        if (step === 1) {
+          return {
+            content: null,
+            toolCalls: [{ id: 'bad-1', name: 'write_file', args: null, argsError: 'Unexpected end of JSON input' }],
+            raw: { role: 'assistant', content: null, tool_calls: [{ id: 'bad-1', type: 'function', function: { name: 'write_file', arguments: '{"path":' } }] },
+          }
+        }
+        return textTurn('Fixed it.')
+      },
+    }
+    const outcome = await runTurn({ db, llm, bot, soul: '', threadId, getComputer: async () => comp }, 'write a file', events)
+    expect(outcome).toBe('replied')
+    expect(comp.calls).toEqual([])
+    const feedback = seen[1]!.find((m) => m.role === 'tool' && m.tool_call_id === 'bad-1')!
+    expect(feedback.content).toContain('Invalid JSON arguments for write_file')
+  })
 })

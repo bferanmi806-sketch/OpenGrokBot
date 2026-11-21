@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createFakeComputer } from '../src/computer.js'
-import { pruneSpills, safeSliceHead, safeSliceTail, spillToolOutput } from '../src/spill.js'
+import { detachSlice, pruneSpills, safeSliceHead, safeSliceTail, spillToolOutput } from '../src/spill.js'
 
 const hasLoneSurrogate = (s: string) => /[\ud800-\udfff]/.test(s.replace(/[\ud800-\udbff][\udc00-\udfff]/g, ''))
 
@@ -18,6 +18,17 @@ describe('UTF-16 surrogate-safe slicing', () => {
     const tail = safeSliceTail(text, 2) // index 3..4 is 😀, index 5 is c -> start=4 is low surrogate
     expect(tail).toBe('c')
     expect(hasLoneSurrogate(tail)).toBe(false)
+  })
+
+  it('detaches slices taken from large strings while preserving UTF-16 content including CJK and emoji', () => {
+    const big = `中文头部😀${'a'.repeat(10_000)}尾部🚀`
+    const head = safeSliceHead(big, 8)
+    const tail = safeSliceTail(big, 4)
+    expect(head).toBe('中文头部😀aa')
+    expect(tail).toBe('尾部🚀')
+    expect(detachSlice(big.slice(0, 12), big.length)).toBe(big.slice(0, 12))
+    expect(detachSlice('', big.length)).toBe('')
+    expect(detachSlice('short', 5)).toBe('short')
   })
 })
 

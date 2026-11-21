@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { buildSystemPrompt, timeNote, withStableTimeNotes, withTimeNote } from '../src/prompts.js'
+import {
+  MAX_MANUAL_CHARS,
+  MAX_MEMORY_CHARS,
+  MAX_SKILL_DESC_CHARS,
+  MAX_SOUL_CHARS,
+  buildSystemPrompt,
+  timeNote,
+  withStableTimeNotes,
+  withTimeNote,
+} from '../src/prompts.js'
 
 const bot = { id: 'researcher', name: 'Scout', role: 'research briefs', emoji: '🔎', soul_path: '' }
 
@@ -65,6 +74,63 @@ describe('persona files', () => {
     expect(p.indexOf('## How you report work')).toBeLessThan(p.indexOf('SOUL-TEXT'))
     expect(p.indexOf('## Your computer')).toBeLessThan(p.indexOf('SOUL-TEXT'))
     expect(p.indexOf('SOUL-TEXT')).toBeLessThan(p.indexOf('MEMORY-RULE'))
+  })
+
+  it('enforces independent character budgets per instruction chain so a huge manual never crowds out memory', () => {
+    const hugeSoul = 'S'.repeat(MAX_SOUL_CHARS + 500)
+    const hugeManual = 'M'.repeat(MAX_MANUAL_CHARS + 1_000)
+    const hugeMemory = 'R'.repeat(MAX_MEMORY_CHARS + 500)
+    const longDesc = 'D'.repeat(MAX_SKILL_DESC_CHARS + 200)
+    const p = buildSystemPrompt(bot, hugeSoul, {
+      manual: hugeManual,
+      memory: hugeMemory,
+      skills: [{ name: 'triage', description: longDesc }],
+    })
+    expect(p).toContain('SOUL.md truncated')
+    expect(p).toContain('AGENTS.md truncated')
+    expect(p).toContain('MEMORY.md truncated')
+    expect(p).toContain('## Standing rules your operator gave you')
+    expect(p).toContain(`- triage — ${'D'.repeat(MAX_SKILL_DESC_CHARS)}…`)
+  })
+
+  it('produces byte-identical system prompts regardless of routine/connector/mcp/skill input ordering', () => {
+    const p1 = buildSystemPrompt(bot, 'soul', {
+      routines: [
+        { id: 5, name: 'B', human: 'daily', enabled: false },
+        { id: 2, name: 'A', human: 'hourly', enabled: true },
+      ],
+      connectors: [
+        { id: 'c2', app: 'slack', label: 'Team', status: 'active' },
+        { id: 'c1', app: 'gmail', label: 'Work', status: 'active' },
+      ],
+      mcpServers: [
+        { id: 'm2', name: 'Notion', slug: 'notion', enabled: true, status: 'connected', toolCount: 2 },
+        { id: 'm1', name: 'GitHub', slug: 'github', enabled: true, status: 'connected', toolCount: 3 },
+      ],
+      skills: [
+        { name: 'z-skill', description: 'Z' },
+        { name: 'a-skill', description: 'A' },
+      ],
+    })
+    const p2 = buildSystemPrompt(bot, 'soul', {
+      routines: [
+        { id: 2, name: 'A', human: 'hourly', enabled: true },
+        { id: 5, name: 'B', human: 'daily', enabled: false },
+      ],
+      connectors: [
+        { id: 'c1', app: 'gmail', label: 'Work', status: 'active' },
+        { id: 'c2', app: 'slack', label: 'Team', status: 'active' },
+      ],
+      mcpServers: [
+        { id: 'm1', name: 'GitHub', slug: 'github', enabled: true, status: 'connected', toolCount: 3 },
+        { id: 'm2', name: 'Notion', slug: 'notion', enabled: true, status: 'connected', toolCount: 2 },
+      ],
+      skills: [
+        { name: 'a-skill', description: 'A' },
+        { name: 'z-skill', description: 'Z' },
+      ],
+    })
+    expect(p1).toBe(p2)
   })
 })
 

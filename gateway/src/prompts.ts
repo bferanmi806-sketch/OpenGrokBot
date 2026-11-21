@@ -1,6 +1,18 @@
 import type { BotRow } from './db.js'
 import type { RoutineMode } from './routines.js'
 import { parseSoul } from './soul.js'
+import { safeSliceHead } from './spill.js'
+
+/** 指令链独立字符预算（借鉴 DeepSeek Harness 双链独立配额）：防止超大操作手册或记忆挤掉其它关键段。 */
+export const MAX_SOUL_CHARS = 16_000
+export const MAX_MANUAL_CHARS = 24_000
+export const MAX_MEMORY_CHARS = 16_000
+export const MAX_SKILL_DESC_CHARS = 500
+
+function boundInstruction(text: string, maxChars: number, label: string): string {
+  if (text.length <= maxChars) return text
+  return `${safeSliceHead(text, maxChars)}\n…(${label} truncated at ${maxChars} of ${text.length} characters)`
+}
 
 export const REPORT_GRAMMAR = `## How you report work
 
@@ -117,6 +129,11 @@ export type PromptMcpServer = {
   enabled: boolean
   status: string
   toolCount: number
+  /** 大 MCP 自动按需加载时的紧凑工具目录（仅列工具名 + 首行简介，不塞完整 JSON Schema） */
+  onDemandCatalog?: {
+    loaderName: string
+    tools: { name: string; summary: string; mode: 'read' | 'write' }[]
+  }
 }
 export type PromptVaultItem = {
   id: string
@@ -154,8 +171,9 @@ export const MAX_GOALS_PROMPT_CHARS = 2400
 export const MAX_SPACES_PROMPT_CHARS = 1200
 
 function connectorsSection(connectors: PromptConnector[]): string {
-  const active = connectors.filter((c) => c.status === 'active')
-  const broken = connectors.filter((c) => c.status === 'expired' || c.status === 'failed')
+  const byId = (a: PromptConnector, b: PromptConnector) => a.id.localeCompare(b.id)
+  const active = connectors.filter((c) => c.status === 'active').sort(byId)
+  const broken = connectors.filter((c) => c.status === 'expired' || c.status === 'failed').sort(byId)
   if (!active.length && !broken.length) return ''
   const lines = [
     ...active.map((c) => `- ${c.app}: ${c.label || c.id} [id: ${c.id}]`),
@@ -169,16 +187,27 @@ function connectorsSection(connectors: PromptConnector[]): string {
 
 function mcpServersSection(servers: PromptMcpServer[]): string {
   if (!servers.length) return ''
-  const lines = servers.map((s) => {
+  const ordered = [...servers].sort((a, b) => a.slug.localeCompare(b.slug) || a.id.localeCompare(b.id))
+  let hasOnDemand = false
+  const lines = ordered.map((s) => {
     if (!s.enabled) return `- ${s.name} (mcp__${s.slug}__*) — paused`
-    if (s.status === 'error') {
-      return `- ${s.name} (mcp__${s.slug}__*) — connection error (${s.toolCount} cached ${s.toolCount === 1 ? 'tool' : 'tools'}; ask your operator to check it in Connectors → MCP if calls fail)`
+    const statusSuffix = s.status === 'error'
+      ? `connection error (${s.toolCount} cached ${s.toolCount === 1 ? 'tool' : 'tools'}; ask your operator to check it in Connectors → MCP if calls fail)`
+      : `${s.status} (${s.toolCount} ${s.toolCount === 1 ? 'tool' : 'tools'})`
+    if (s.onDemandCatalog && s.onDemandCatalog.tools.length > 0) {
+      hasOnDemand = true
+      const catalogLines = s.onDemandCatalog.tools.map((t) =>
+        `  - ${t.name} [${t.mode}]${t.summary ? ` — ${t.summary}` : ''}`)
+      return `- ${s.name} (mcp__${s.slug}__*) — ${statusSuffix} · load schemas on demand via ${s.onDemandCatalog.loaderName}:\n${catalogLines.join('\n')}`
     }
-    return `- ${s.name} (mcp__${s.slug}__*) — ${s.status} (${s.toolCount} ${s.toolCount === 1 ? 'tool' : 'tools'})`
+    return `- ${s.name} (mcp__${s.slug}__*) — ${statusSuffix}`
   })
-  const hasEnabled = servers.some((s) => s.enabled)
+  const hasEnabled = ordered.some((s) => s.enabled)
+  const onDemandHint = hasOnDemand
+    ? ' For on-demand MCP servers, call their mcp__<slug>__load_tools tool with the needed tool names before calling those tools.'
+    : ''
   const footer = hasEnabled
-    ? '\n\nUse the matching mcp__<slug>__* tools for enabled MCP servers. MCP write tools are held by the gateway for operator approval automatically — call the MCP tool directly rather than wrapping it in hold_for_approval.'
+    ? `\n\nUse the matching mcp__<slug>__* tools for enabled MCP servers.${onDemandHint} MCP write tools are held by the gateway for operator approval automatically — call the MCP tool directly rather than wrapping it in hold_for_approval.`
     : ''
   return `## MCP servers\n\n${lines.join('\n')}${footer}`
 }
@@ -201,7 +230,12 @@ Never ask your operator for raw passwords or TOTP codes. Call browser_fill_secre
 
 function skillsSection(skills: { name: string; description: string }[]): string {
   if (!skills.length) return ''
-  const lines = skills.map((s) => `- ${s.name}${s.description ? ` — ${s.description}` : ''}`)
+  const ordered = [...skills].sort((a, b) => a.name.localeCompare(b.name))
+  const lines = ordered.map((s) => {
+    const desc = s.description.trim()
+    const bounded = desc.length > MAX_SKILL_DESC_CHARS ? `${safeSliceHead(desc, MAX_SKILL_DESC_CHARS)}…` : desc
+    return `- ${s.name}${bounded ? ` — ${bounded}` : ''}`
+  })
   return `## Shared skills
 
 Playbooks your operator wrote for every teammate. Before work one of them covers, call read_skill and follow it.
@@ -210,7 +244,8 @@ ${lines.join('\n')}`
 
 function routinesSection(routines: PromptRoutine[]): string {
   if (!routines.length) return ''
-  const lines = routines.map((r) => {
+  const ordered = [...routines].sort((a, b) => a.id - b.id)
+  const lines = ordered.map((r) => {
     const modeTag = r.mode === 'prepare'
       ? ' (prepare: pre-work briefing, can update wiki & workspace files)'
       : r.mode === 'watch' || r.watch
@@ -352,6 +387,7 @@ export function buildSystemPrompt(
 ): string {
   const memory = opts.memory?.trim()
   const manual = opts.manual?.trim()
+  const soulBody = parseSoul(soul).body.trim()
   // 共用且几乎不变的段落放前面，会变的（记忆、routine、群上下文）放后面：改一条记忆不该打穿整段前缀缓存
   return [
     `You are ${bot.name}, an always-on AI teammate in your operator's OpenSuperBot workspace. You speak in first person, stay terse, and never pad.`,
@@ -363,10 +399,10 @@ export function buildSystemPrompt(
     opts.canRelay ? RELAY_NOTE : '',
     opts.canBackgroundTasks && !opts.isBackgroundTask && !opts.isPipelineStep ? BACKGROUND_NOTE : '',
     opts.hasComputer ? computerBriefing(opts.computer) : NO_COMPUTER_NOTE,
-    parseSoul(soul).body.trim(),
-    manual ? `## Operating manual\n\n${manual}` : '',
+    soulBody ? boundInstruction(soulBody, MAX_SOUL_CHARS, 'SOUL.md') : '',
+    manual ? `## Operating manual\n\n${boundInstruction(manual, MAX_MANUAL_CHARS, 'AGENTS.md')}` : '',
     skillsSection(opts.skills ?? []),
-    memory ? `## Standing rules your operator gave you\n\n${memory}` : '',
+    memory ? `## Standing rules your operator gave you\n\n${boundInstruction(memory, MAX_MEMORY_CHARS, 'MEMORY.md')}` : '',
     connectorsSection(opts.connectors ?? []),
     mcpServersSection(opts.mcpServers ?? []),
     vaultSection(opts.vaultItems ?? []),

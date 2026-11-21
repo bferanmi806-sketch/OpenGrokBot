@@ -234,6 +234,17 @@ export function createLocalComputer(opts: LocalComputerOptions): BotComputer {
       if (info.size > MAX_FILE_BYTES) throw new Error('file too large')
       return readFile(full, 'utf8')
     },
+    async statFile(path) {
+      const full = await confined(opts.workspaceDir, path)
+      try {
+        const info = await stat(full)
+        if (!info.isFile()) return null
+        return { exists: true, version: `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}` }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { exists: false }
+        throw err
+      }
+    },
     async writeFile(path, content) {
       if (Buffer.byteLength(content, 'utf8') > MAX_FILE_BYTES) throw new Error('content too large')
       const full = await confined(opts.workspaceDir, path)
