@@ -146,6 +146,20 @@ schedulerBox.current = createScheduler({
 })
 schedulerBox.current.load(listRoutines(db))
 
+// Quiet Hours 结束后把积压的晨报投递到线程：启动时检查一次，之后每分钟检查一次
+const flushQuietDigests = () => {
+  try {
+    const res = gateway.flushQuietDigestsIfDue()
+    if (res.flushed) {
+      console.log(
+        `[gateway] delivered morning digest (${res.flushed} ${res.flushed === 1 ? 'update' : 'updates'} across ${res.threads.length} ${res.threads.length === 1 ? 'thread' : 'threads'})`,
+      )
+    }
+  } catch { /* 数据库关闭时不报错 */ }
+}
+flushQuietDigests()
+setInterval(flushQuietDigests, 60_000).unref()
+
 // 动作日志和截图证据留 90 天：启动时清一次，之后每天清一次
 const ACTION_LOG_DAYS = 90
 const pruneOldActions = () => {
