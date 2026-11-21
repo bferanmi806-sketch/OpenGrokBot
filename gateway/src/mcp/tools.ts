@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { ActionTrigger } from '../actions.js'
 import type { AgentEvents } from '../agent.js'
+import { buildMcpEditable, formatMcpWriteApprovalDetail } from '../approval-edit.js'
 import { blockText, canRemember, createApproval, rememberReason } from '../approvals.js'
 import { insertMessage, type Db } from '../db.js'
 import type { ToolDef } from '../llm.js'
@@ -19,7 +20,6 @@ import {
 } from './types.js'
 
 const MAX_MCP_RESULT_CHARS = 16_000
-const MAX_MCP_APPROVAL_DETAIL_CHARS = 1_200
 const MAX_MCP_WRITE_SUMMARY_CHARS = 2_000
 const TRUNCATED_MARKER = '\n[…truncated]'
 
@@ -31,15 +31,6 @@ function truncateBounded(text: string, maxChars: number): string {
     if (code >= 0xd800 && code <= 0xdbff) keep -= 1
   }
   return `${text.slice(0, keep)}${TRUNCATED_MARKER}`
-}
-
-function formatWriteApprovalDetail(args: Record<string, unknown>): string {
-  if (Object.keys(args).length === 0) return '(no arguments)'
-  try {
-    return truncateBounded(JSON.stringify(args, null, 2), MAX_MCP_APPROVAL_DETAIL_CHARS)
-  } catch {
-    return '(unserializable arguments)'
-  }
 }
 
 export type McpResolvedTool = {
@@ -229,7 +220,7 @@ export async function runMcpToolCall(input: {
     args: cleanArgs,
   }
   const action = `${server.name} · ${tool.name}`
-  const detail = formatWriteApprovalDetail(cleanArgs)
+  const detail = formatMcpWriteApprovalDetail(cleanArgs)
   const kind = 'other' as const
   const target = `mcp:${server.slug}/${tool.name}`
 
@@ -245,6 +236,7 @@ export async function runMcpToolCall(input: {
     now,
   })
   const reason = rememberReason({ kind, target })
+  const editable = buildMcpEditable(frozen, tool.inputSchema)
   events.onMessage(
     insertMessage(db, {
       threadId,
@@ -259,6 +251,7 @@ export async function runMcpToolCall(input: {
         status: 'pending',
         canRemember: canRemember({ kind, target }),
         ...(reason ? { rememberBlocked: blockText(reason), rememberReason: reason } : {}),
+        ...(editable ? { editable } : {}),
       },
     }),
   )

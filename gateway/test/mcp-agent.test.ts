@@ -878,4 +878,120 @@ describe('MCP dynamic tools, 3-tier policy, outside-data taint & gateway-execute
 
     await gw.stopAll()
   })
+
+  it('emits editable projection for MCP write approvals, executes edited args, marks edited: true, and rejects malformed MCP edits while keeping pending', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'osb-mcp-edit-'))
+    const db = openDb(':memory:')
+    upsertBot(db, { id: 'engineer', name: 'Builder', role: 'engineering', emoji: '🛠️', soul_path: '' })
+    const threadId = ensureDmThread(db, 'engineer')
+
+    const linear = createMcpServer(db, {
+      name: 'Linear',
+      transport: 'http',
+      url: 'https://mcp.linear.example/mcp',
+      enabled: true,
+      trustReadOnlyHint: true,
+      tools: SAMPLE_TOOLS,
+      status: 'connected',
+    })
+    setBotMcpServers(db, 'engineer', [linear.id])
+
+    const mcpManager = makeStubMcpManager(db, {
+      onCallTool: async (_sid, toolName, args) => ({
+        content: [{ type: 'text', text: `Created ${toolName}: ${String(args.title)} (${String(args.teamId)})` }],
+      }),
+    })
+
+    const llm = scriptedLlm([
+      { toolCalls: [{ id: 'w1', name: 'mcp__linear__create_issue', args: { title: 'Old Title', teamId: 'ENG' } }] },
+      { content: 'Held Linear issue.' },
+      { content: 'Confirmed edited issue.' },
+    ])
+
+    const gw = createApp({ db, llm, dataDir, mcpManager })
+    await gw.app.request(`http://127.0.0.1:4747/api/threads/${threadId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Create a Linear issue' }),
+    })
+
+    await vi.waitFor(() => {
+      expect(listMessages(db, threadId).filter((m) => m.kind === 'approval_request')).toHaveLength(1)
+    })
+
+    const chip = listMessages(db, threadId).find((m) => m.kind === 'approval_request')!
+    const approvalId = (chip.payload as { approvalId: number }).approvalId
+    expect((chip.payload as { editable?: unknown }).editable).toEqual({
+      kind: 'mcp',
+      serverName: 'Linear',
+      toolName: 'create_issue',
+      args: { title: 'Old Title', teamId: 'ENG' },
+      inputSchema: {
+        type: 'object',
+        properties: { title: { type: 'string' }, teamId: { type: 'string' } },
+        required: ['title', 'teamId'],
+      },
+    })
+
+    // Malformed MCP edits (array args, forbidden __proto__ key) return 400 and leave approval pending
+    const badArray = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${approvalId}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve', edit: { kind: 'mcp', args: ['not-an-object'] } }),
+    })
+    expect(badArray.status).toBe(400)
+    expect(await badArray.json()).toMatchObject({ code: 'invalid_edit' })
+    expect(getApproval(db, approvalId)!.status).toBe('pending')
+
+    const badProto = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${approvalId}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"decision":"approve","edit":{"kind":"mcp","args":{"__proto__":{"polluted":true}}}}',
+    })
+    expect(badProto.status).toBe(400)
+    expect(await badProto.json()).toMatchObject({ code: 'invalid_edit' })
+    expect(getApproval(db, approvalId)!.status).toBe('pending')
+    expect(mcpManager.calls).toHaveLength(0)
+
+    // Valid MCP edit executes updated args via callTool(..., { write: true })
+    const okRes = await gw.app.request(`http://127.0.0.1:4747/api/approvals/${approvalId}/decide`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        edit: { kind: 'mcp', args: { title: 'Edited Title', teamId: 'OPS', priority: 1 } },
+      }),
+    })
+    expect(okRes.status).toBe(202)
+    expect(mcpManager.calls).toEqual([
+      {
+        serverId: linear.id,
+        toolName: 'create_issue',
+        args: { title: 'Edited Title', teamId: 'OPS', priority: 1 },
+        write: true,
+      },
+    ])
+
+    const updatedChip = listMessages(db, threadId).find((m) => m.id === chip.id)!
+    expect(updatedChip.payload).toMatchObject({
+      status: 'approved',
+      edited: true,
+      executionStatus: 'succeeded',
+    })
+    expect(String((updatedChip.payload as { detail?: string }).detail)).toContain('Edited Title')
+
+    const resolved = listMessages(db, threadId).find(
+      (m) => m.kind === 'approval_resolved' && (m.payload as { approvalId?: number }).approvalId === approvalId,
+    )!
+    expect(resolved.payload).toMatchObject({ approvalId, decision: 'approve', edited: true })
+
+    const approvalAction = listActions(db, 'engineer', 20).find((a) => a.tool === 'approval')
+    expect(approvalAction?.summary).toContain('(edited by you)')
+
+    await vi.waitFor(() => {
+      expect(listMessages(db, threadId).some((m) => m.content === 'Confirmed edited issue.')).toBe(true)
+    })
+    const wakeup = llm.seenMessages.at(-1)!
+    expect(wakeup.some((m) => m.role === 'user' && String(m.content).includes('(edited by your operator)'))).toBe(true)
+  })
 })

@@ -1331,14 +1331,21 @@ export function createComposioDriver(opts: ComposioDriverOptions): ConnectorDriv
       }
 
       if (account.app === 'outlook') {
+        const existingId = input.draftId?.trim()
         const payload: JsonRecord = {
           subject: input.subject,
           body: { contentType: 'Text', content: input.body },
           toRecipients: toGraphRecipients(input.to),
-          ...(input.cc?.length ? { ccRecipients: toGraphRecipients(input.cc) } : {}),
-          ...(input.bcc?.length ? { bccRecipients: toGraphRecipients(input.bcc) } : {}),
+          ...(existingId
+            ? {
+                ...(input.cc !== undefined ? { ccRecipients: toGraphRecipients(input.cc) } : {}),
+                ...(input.bcc !== undefined ? { bccRecipients: toGraphRecipients(input.bcc) } : {}),
+              }
+            : {
+                ...(input.cc?.length ? { ccRecipients: toGraphRecipients(input.cc) } : {}),
+                ...(input.bcc?.length ? { bccRecipients: toGraphRecipients(input.bcc) } : {}),
+              }),
         }
-        const existingId = input.draftId?.trim()
         const data = existingId
           ? await proxyRead(
               account.remote_id,

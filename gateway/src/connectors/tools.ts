@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { recordAction, type ActionTrigger } from '../actions.js'
 import type { AgentEvents, RuleBlock, RuleGrant } from '../agent.js'
+import { buildConnectorEditable } from '../approval-edit.js'
 import {
   RULEABLE_KINDS,
   blockText,
@@ -28,6 +29,7 @@ import {
   type ConnectorWriteToolName,
   type FrozenExecution,
   type MailDetail,
+  type MailReplyMeta,
   type ResolvedDraftSnapshot,
   type WriteExecutionResult,
 } from './types.js'
@@ -548,6 +550,7 @@ type PreparedWrite =
       target: string
       frozenArgs: Record<string, unknown>
       resolvedDraftSnapshot?: ResolvedDraftSnapshot
+      replyMeta?: MailReplyMeta
     }
   | { ok: false; error: string }
 
@@ -671,16 +674,16 @@ async function prepareConnectorWrite(
         ...to.map(extractBareEmail).filter(Boolean),
         ...(selfBare ? [selfBare] : []),
       ])
-      const cc: string[] = []
-      if (replyAll) {
-        for (const addr of [...(fromTrimmed ? [fromTrimmed] : []), ...orig.to, ...(orig.cc ?? [])]) {
-          const bare = extractBareEmail(addr)
-          if (bare && !seen.has(bare)) {
-            seen.add(bare)
-            cc.push(addr)
-          }
+      const allCc: string[] = []
+      for (const addr of [...(fromTrimmed ? [fromTrimmed] : []), ...orig.to, ...(orig.cc ?? [])]) {
+        const trimmedAddr = addr.trim()
+        const bare = extractBareEmail(trimmedAddr)
+        if (bare && !seen.has(bare)) {
+          seen.add(bare)
+          allCc.push(trimmedAddr)
         }
       }
+      const cc = replyAll ? allCc : []
       const subject = /^re:/i.test(orig.subject) ? orig.subject : `Re: ${orig.subject || '(no subject)'}`
       const allRecipients = [...to, ...cc]
       const target =
@@ -701,6 +704,12 @@ async function prepareConnectorWrite(
         kind: 'email',
         target,
         frozenArgs: { messageId, body, ...(replyAll ? { replyAll: true } : {}) },
+        replyMeta: {
+          to,
+          allCc,
+          subject,
+          ...(orig.threadId ? { threadId: orig.threadId } : {}),
+        },
       }
     }
 
@@ -1039,6 +1048,7 @@ export async function runConnectorToolCall(
           tool: writeTool,
           args: prepared.frozenArgs,
           ...(prepared.resolvedDraftSnapshot ? { resolvedDraftSnapshot: prepared.resolvedDraftSnapshot } : {}),
+          ...(prepared.replyMeta ? { replyMeta: prepared.replyMeta } : {}),
           operationId,
         }
         const executionJson = JSON.stringify(frozen)
@@ -1062,6 +1072,7 @@ export async function runConnectorToolCall(
             ? destinationReason(prepared.kind, prepared.target)
             : null
           const blocked = reason ? blockText(reason) : null
+          const editable = buildConnectorEditable(frozen)
           events.onMessage(
             insertMessage(db, {
               threadId,
@@ -1077,6 +1088,7 @@ export async function runConnectorToolCall(
                 canRemember: canRemember({ kind: prepared.kind, target: prepared.target }),
                 ...(blocked ? { rememberBlocked: blocked, rememberReason: reason } : {}),
                 ...(match && ruleBlock ? { ruleHeld: ruleBlock } : {}),
+                ...(editable ? { editable } : {}),
               },
             }),
           )
