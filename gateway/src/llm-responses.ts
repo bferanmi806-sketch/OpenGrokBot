@@ -1,5 +1,5 @@
 import {
-  evictOldScreenshots, postJson, safeParseJson, type AssistantTurn, type ChatMsg, type LLM, type LlmTarget, type Sleep, type ToolCall, type ToolDef,
+  evictOldScreenshots, llmRouteKey, parseToolArgs, postJson, type AssistantTurn, type ChatMsg, type LLM, type LlmTarget, type Sleep, type ToolCall, type ToolDef,
 } from './llm.js'
 
 /**
@@ -34,7 +34,7 @@ function userContent(m: ChatMsg): string | WireItem[] {
 }
 
 /** OpenAI 格式的对话 → instructions + Responses 的 input 项 */
-export function toResponses(messages: ChatMsg[]): { instructions: string; input: WireItem[] } {
+export function toResponses(messages: ChatMsg[], targetRoute?: string): { instructions: string; input: WireItem[] } {
   const instructions = messages.filter((m) => m.role === 'system').map((m) => m.content ?? '').join('\n\n')
   const input: WireItem[] = []
   for (const m of evictOldScreenshots(messages)) {
@@ -43,7 +43,7 @@ export function toResponses(messages: ChatMsg[]): { instructions: string; input:
       input.push({ type: 'function_call_output', call_id: m.tool_call_id ?? '', output: m.content ?? '' })
     } else if (m.role === 'user') {
       input.push({ role: 'user', content: userContent(m) })
-    } else if (m.native?.api === 'responses') {
+    } else if (m.native?.api === 'responses' && (!m.native.route || !targetRoute || m.native.route === targetRoute)) {
       input.push(...(m.native.items as WireItem[]).filter(echoable))
     } else {
       if (m.content?.trim()) input.push({ role: 'assistant', content: m.content })
@@ -64,7 +64,7 @@ const toTool = (t: ToolDef): WireItem => ({
   strict: false,
 })
 
-export function fromResponses(data: WireResponse): AssistantTurn {
+export function fromResponses(data: WireResponse, route?: string): AssistantTurn {
   if (data.status === 'failed') throw new Error(`LLM API: ${data.error?.message ?? 'the response failed'}`)
   const output = data.output ?? []
   const text = output
@@ -75,7 +75,15 @@ export function fromResponses(data: WireResponse): AssistantTurn {
     .join('')
   const toolCalls: ToolCall[] = output
     .filter((item) => item.type === 'function_call')
-    .map((item) => ({ id: String(item.call_id ?? ''), name: String(item.name ?? ''), args: safeParseJson(item.arguments) }))
+    .map((item) => {
+      const parsed = parseToolArgs(item.arguments)
+      return {
+        id: String(item.call_id ?? ''),
+        name: String(item.name ?? ''),
+        args: parsed.args,
+        ...(parsed.argsError ? { argsError: parsed.argsError } : {}),
+      }
+    })
   // 没答完（撞上输出上限之类）：工具参数可能是半截的，没有文字的回复等于没回——都别当正常结束
   if (data.status === 'incomplete' && (!text.trim() || toolCalls.length)) {
     throw new Error(`LLM API: the reply was cut off (${data.incomplete_details?.reason ?? 'incomplete'}) before finishing this step`)
@@ -86,7 +94,7 @@ export function fromResponses(data: WireResponse): AssistantTurn {
     ...(toolCalls.length ? {
       tool_calls: toolCalls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) } })),
     } : {}),
-    native: { api: 'responses', items: output },
+    native: { api: 'responses', ...(route ? { route } : {}), items: output },
   }
   const u = data.usage
   return {
@@ -99,9 +107,10 @@ export function fromResponses(data: WireResponse): AssistantTurn {
 
 export function createResponsesLLM(target: LlmTarget, fetchImpl: typeof fetch, sleep: Sleep): LLM {
   const url = `${target.baseURL.replace(/\/$/, '')}/responses`
+  const route = llmRouteKey(target)
   return {
     async chat(messages, tools, opts = {}) {
-      const { instructions, input } = toResponses(messages)
+      const { instructions, input } = toResponses(messages, route)
       const body = JSON.stringify({
         store: false,
         include: ['reasoning.encrypted_content'],
@@ -112,7 +121,7 @@ export function createResponsesLLM(target: LlmTarget, fetchImpl: typeof fetch, s
         ...(tools.length ? { tools: tools.map(toTool) } : {}),
         ...(tools.length && opts.toolChoice ? { tool_choice: opts.toolChoice } : {}),
       })
-      return fromResponses(await postJson<WireResponse>(url, body, target, opts, fetchImpl, sleep))
+      return fromResponses(await postJson<WireResponse>(url, body, target, opts, fetchImpl, sleep), route)
     },
   }
 }

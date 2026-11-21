@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import type {
   BetaContentBlock, BetaContentBlockParam, BetaMessage, BetaMessageParam, BetaToolUnion, MessageCreateParamsNonStreaming,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages'
-import { EARLIER_SCREENSHOT, safeParseJson, type AssistantTurn, type ChatMsg, type LLM, type LlmTarget, type ToolCall, type ToolDef } from './llm.js'
+import { EARLIER_SCREENSHOT, llmRouteKey, safeParseJson, type AssistantTurn, type ChatMsg, type LLM, type LlmTarget, type ToolCall, type ToolDef } from './llm.js'
 import { isSubscriptionToken } from './settings.js'
 
 /**
@@ -101,8 +101,9 @@ function imageBlock(url: string): BetaContentBlockParam {
 
 type WireToolCall = { id?: string; function?: { name?: string; arguments?: string } }
 
-function assistantBlocks(m: ChatMsg): BetaContentBlockParam[] {
-  if (m.native?.api === 'anthropic') return m.native.items as BetaContentBlockParam[]
+function assistantBlocks(m: ChatMsg, targetRoute?: string): BetaContentBlockParam[] {
+  const routeMatches = !m.native?.route || !targetRoute || m.native.route === targetRoute
+  if (m.native?.api === 'anthropic' && routeMatches) return m.native.items as BetaContentBlockParam[]
   const blocks: BetaContentBlockParam[] = []
   if (m.content?.trim()) blocks.push({ type: 'text', text: m.content })
   for (const call of (m.tool_calls ?? []) as WireToolCall[]) {
@@ -118,7 +119,7 @@ function assistantBlocks(m: ChatMsg): BetaContentBlockParam[] {
 }
 
 /** OpenAI 格式的对话 → system + Claude 的 messages。相邻同角色的并成一条，工具结果排在最前面。hidden = 收掉了几张旧截图 */
-export function toAnthropic(messages: ChatMsg[]): { system: string; messages: BetaMessageParam[]; hidden: number } {
+export function toAnthropic(messages: ChatMsg[], targetRoute?: string): { system: string; messages: BetaMessageParam[]; hidden: number } {
   const system = messages.filter((m) => m.role === 'system').map((m) => m.content ?? '').join('\n\n')
   // 操作者这一回合发来的图不算截图：不计数、不收
   let toHide = screenshotsToHide(messages.filter((m) => m.images?.length && !m.keepImages).length)
@@ -141,7 +142,7 @@ export function toAnthropic(messages: ChatMsg[]): { system: string; messages: Be
   for (const m of messages) {
     if (m.role === 'system') continue
     if (m.role === 'assistant') {
-      push('assistant', assistantBlocks(m))
+      push('assistant', assistantBlocks(m, targetRoute))
     } else if (m.role === 'tool') {
       push('user', [{ type: 'tool_result', tool_use_id: toolId(m.tool_call_id ?? ''), content: m.content || '(no output)' }])
     } else {
@@ -179,7 +180,7 @@ export function echoBlocks(content: BetaContentBlock[]): BetaContentBlock[] {
   return content.filter((b, i) => i >= boundary || !dropBefore.has(b.type))
 }
 
-export function fromAnthropic(res: BetaMessage): AssistantTurn {
+export function fromAnthropic(res: BetaMessage, route?: string): AssistantTurn {
   if (res.stop_reason === 'refusal') {
     const category = res.stop_details?.category
     throw new Error(`Claude declined this request${category ? ` (${category})` : ''}. Rephrase it, or give this teammate another model.`)
@@ -202,7 +203,7 @@ export function fromAnthropic(res: BetaMessage): AssistantTurn {
     ...(toolCalls.length ? {
       tool_calls: toolCalls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args) } })),
     } : {}),
-    native: { api: 'anthropic', items: blocks },
+    native: { api: 'anthropic', ...(route ? { route } : {}), items: blocks },
   }
   const u = res.usage
   return {
@@ -231,12 +232,13 @@ export function anthropicError(err: unknown, timeoutMs: number): Error {
 export function createAnthropicLLM(target: LlmTarget, fetchImpl: typeof fetch): LLM {
   const official = isOfficialApi(target.baseURL)
   const fallback = official && FALLBACK_MODELS.has(target.model)
+  const route = llmRouteKey(target)
   let client: Anthropic | undefined
   return {
     async chat(messages, tools, opts = {}) {
       // key 有问题就在回合里报出来（同事的对话里看得见），不在造客户端时炸
       client ??= anthropicClient(target, fetchImpl)
-      const { system, messages: wire, hidden } = toAnthropic(messages)
+      const { system, messages: wire, hidden } = toAnthropic(messages, route)
       // 收过旧截图或本回合剪枝过旧工具输出：在官方 API 上声明丢掉对不上的思考块，免得整个请求 400（第三方兼容口不认这个字段）
       const dropBlocks = (hidden > 0 || opts.prefixModified === true) && official && ADAPTIVE_MODELS.has(target.model)
       const betas = [...(fallback ? [FALLBACK_BETA] : []), ...(dropBlocks ? [BINDING_BETA] : [])]
@@ -256,7 +258,7 @@ export function createAnthropicLLM(target: LlmTarget, fetchImpl: typeof fetch): 
       }
       try {
         const res = await client.beta.messages.create(params, opts.signal ? { signal: opts.signal } : undefined)
-        return fromAnthropic(res)
+        return fromAnthropic(res, route)
       } catch (err) {
         if (opts.signal?.aborted) throw err // 操作者按了停止
         throw anthropicError(err, target.llmTimeoutMs)

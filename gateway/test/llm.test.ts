@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { loadConfig, type Config } from '../src/config.js'
 import {
-  EARLIER_SCREENSHOT, MAX_KEPT_SCREENSHOTS, createLLM, createLiveLLM, evictOldScreenshots, screenshotsToEvict,
-  type ChatMsg, type ToolDef,
+  EARLIER_SCREENSHOT, MAX_KEPT_SCREENSHOTS, createLLM, createLiveLLM, evictOldScreenshots, jitteredBackoffMs,
+  parseToolArgs, screenshotsToEvict, type ChatMsg, type ToolDef,
 } from '../src/llm.js'
 
 const toolDefs: ToolDef[] = [{ type: 'function', function: { name: 'message_user', parameters: {} } }]
@@ -234,6 +234,33 @@ describe('createLLM resilience', () => {
         { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
       ],
     })
+  })
+
+  it('applies bounded ±15% symmetric jitter to exponential retry backoff', () => {
+    expect(jitteredBackoffMs(0, () => 0)).toBe(850)
+    expect(jitteredBackoffMs(0, () => 0.5)).toBe(1000)
+    expect(jitteredBackoffMs(0, () => 1)).toBe(1150)
+    expect(jitteredBackoffMs(10, () => 0.5)).toBe(30_000)
+  })
+
+  it('flags malformed or non-object tool arguments with argsError instead of silently passing null', async () => {
+    expect(parseToolArgs('')).toEqual({ args: {} })
+    expect(parseToolArgs('{"a":1}')).toEqual({ args: { a: 1 } })
+    expect(parseToolArgs('[1,2]').argsError).toMatch(/JSON object/)
+    expect(parseToolArgs('{"broken"').argsError).toBeTruthy()
+
+    const fakeFetch = (async () => new Response(JSON.stringify({
+      choices: [{
+        message: {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: 'c1', type: 'function', function: { name: 'write_file', arguments: '{"path":' } }],
+        },
+      }],
+    }))) as typeof fetch
+    const llm = createLLM(loadConfig({}), fakeFetch)
+    const turn = await llm.chat(hi, [])
+    expect(turn.toolCalls[0]!.argsError).toBeTruthy()
   })
 })
 

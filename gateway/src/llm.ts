@@ -18,14 +18,14 @@ export type ChatMsg = {
    */
   keepImages?: boolean
   /**
-   * 原生接口回的原样内容（Claude 的 content 块、Responses 的 output 项）。同一回合里原样发回去：
-   * 思考块、推理项和它们的签名要一字不改才认；换了一家接口就按 content / tool_calls 重新拼。
+   * 原生接口回的原样内容（Claude 的 content 块、Responses 的 output 项）。同一路由里原样发回去：
+   * 思考块、推理项和它们的签名要一字不改才认；换了接口或换了模型路由就按 content / tool_calls 重新拼。
    */
-  native?: { api: Exclude<LlmApi, 'chat'>; items: unknown[] }
+  native?: { api: Exclude<LlmApi, 'chat'>; route?: string; items: unknown[] }
 }
 
 export type ToolDef = { type: 'function'; function: { name: string; description?: string; parameters: unknown } }
-export type ToolCall = { id: string; name: string; args: unknown }
+export type ToolCall = { id: string; name: string; args: unknown; argsError?: string }
 export type Usage = { prompt: number; completion: number; cached: number }
 export type AssistantTurn = { content: string | null; toolCalls: ToolCall[]; raw: ChatMsg; usage?: Usage }
 export type ChatOptions = {
@@ -85,7 +85,20 @@ async function waitToRetry(ms: number, sleep: Sleep, signal: AbortSignal | undef
 
 /** 这些状态码是「服务端忙/网络抖」：等一等再试有意义；4xx 里的其余错误重试也不会变。 */
 const RETRYABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504])
-const backoffMs = (attempt: number) => 1000 * 2 ** attempt
+const MAX_BACKOFF_MS = 30_000
+const BACKOFF_JITTER_RATIO = 0.15
+
+/** 指数退避叠加 ±15% 对称抖动（防多同事并发撞 429/503 惊群），封顶 30s。 */
+export function jitteredBackoffMs(attempt: number, random: () => number = Math.random): number {
+  const base = Math.min(1000 * 2 ** attempt, MAX_BACKOFF_MS)
+  const factor = 1 + (random() * 2 - 1) * BACKOFF_JITTER_RATIO
+  return Math.max(100, Math.round(base * factor))
+}
+
+/** 构造用于校验 native 重放归属的路由指纹：同协议跨供应商或热切模型时自动降级避免 400。 */
+export function llmRouteKey(target: Pick<LlmTarget, 'baseURL' | 'model'>): string {
+  return `${target.baseURL.replace(/\/+$/, '')}|${target.model}`
+}
 
 class ProviderError extends Error {}
 
@@ -128,7 +141,7 @@ export async function postJson<T>(
       if (!res.ok) {
         const detail = (await res.text().catch(() => '')).slice(0, 300)
         if (RETRYABLE.has(res.status) && canRetry) {
-          await waitToRetry(retryAfterMs(res) ?? backoffMs(attempt), sleep, opts.signal)
+          await waitToRetry(retryAfterMs(res) ?? jitteredBackoffMs(attempt), sleep, opts.signal)
           continue
         }
         throw new ProviderError(`LLM API ${res.status}: ${detail}`)
@@ -138,7 +151,7 @@ export async function postJson<T>(
       if (err instanceof ProviderError) throw err
       if (opts.signal?.aborted) throw err // 操作者按了停止：立刻收手，不重试
       if (canRetry) {
-        await waitToRetry(backoffMs(attempt), sleep, opts.signal)
+        await waitToRetry(jitteredBackoffMs(attempt), sleep, opts.signal)
         continue
       }
       if (timeout.aborted) throw new Error(`LLM API timed out after ${target.llmTimeoutMs / 1000}s`)
@@ -249,11 +262,15 @@ function createChatLLM(target: LlmTarget, fetchImpl: typeof fetch, sleep: Sleep)
       }
       return {
         content: msg.content ?? null,
-        toolCalls: (msg.tool_calls ?? []).map((t) => ({
-          id: t.id,
-          name: t.function?.name ?? '',
-          args: safeParseJson(t.function?.arguments),
-        })),
+        toolCalls: (msg.tool_calls ?? []).map((t) => {
+          const parsed = parseToolArgs(t.function?.arguments)
+          return {
+            id: t.id,
+            name: t.function?.name ?? '',
+            args: parsed.args,
+            ...(parsed.argsError ? { argsError: parsed.argsError } : {}),
+          }
+        }),
         // 原样留着：Gemini 的 thought_signature 之类挂在 tool_calls 上的字段，下一步要原样带回去
         raw: msg as ChatMsg,
         ...(data.usage ? {
@@ -290,6 +307,29 @@ export function createLiveLLM<C extends LlmTarget>(current: () => C, make: (c: C
 export function safeParseJson(s: unknown): unknown {
   if (typeof s !== 'string') return null
   try { return JSON.parse(s) } catch { return null }
+}
+
+/**
+ * 解析工具参数 JSON：空串/缺失按 {} 处理；
+ * 非法 JSON 或顶层非对象（数组/原始值）显式返回 argsError，避免静默传 {} 去盲目执行工具。
+ */
+export function parseToolArgs(raw: unknown): { args: unknown; argsError?: string } {
+  if (raw === undefined || raw === null) return { args: {} }
+  if (typeof raw !== 'string') {
+    if (typeof raw === 'object' && !Array.isArray(raw)) return { args: raw }
+    return { args: null, argsError: 'arguments must be a JSON object' }
+  }
+  const trimmed = raw.trim()
+  if (!trimmed) return { args: {} }
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { args: null, argsError: 'arguments must be a JSON object' }
+    }
+    return { args: parsed }
+  } catch (err) {
+    return { args: null, argsError: err instanceof Error ? err.message : 'invalid JSON' }
+  }
 }
 
 function stubToolTurn(name: string, args: unknown): AssistantTurn {

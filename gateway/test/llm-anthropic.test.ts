@@ -222,6 +222,35 @@ describe('Claude: long browsing turns', () => {
     expect(sent[0]!.headers.get('anthropic-beta')).toContain('thinking-binding-controls-2026-08-01')
   })
 
+  it('degrades native thinking blocks to neutral text/tool_use when replaying across a different model route', () => {
+    const history: ChatMsg[] = [
+      { role: 'user', content: 'check' },
+      {
+        role: 'assistant',
+        content: 'On it.',
+        tool_calls: [{ id: 'toolu_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a.txt"}' } }],
+        native: {
+          api: 'anthropic',
+          route: 'https://api.anthropic.com|claude-opus-5-5',
+          items: [
+            { type: 'thinking', thinking: 'secret', signature: 'sig-opus' },
+            { type: 'text', text: 'On it.' },
+            { type: 'tool_use', id: 'toolu_1', name: 'read_file', input: { path: 'a.txt' } },
+          ],
+        },
+      },
+    ]
+    const sameRoute = toAnthropic(history, 'https://api.anthropic.com|claude-opus-5-5')
+    expect((sameRoute.messages[1]!.content as { type: string }[]).some((b) => b.type === 'thinking')).toBe(true)
+
+    const diffRoute = toAnthropic(history, 'https://api.anthropic.com|claude-sonnet-5-5')
+    expect((diffRoute.messages[1]!.content as { type: string }[]).some((b) => b.type === 'thinking')).toBe(false)
+    expect(diffRoute.messages[1]!.content).toEqual([
+      { type: 'text', text: 'On it.' },
+      { type: 'tool_use', id: 'toolu_1', name: 'read_file', input: { path: 'a.txt' } },
+    ])
+  })
+
   it('does not treat a reply cut off at the output limit as a finished step', async () => {
     const { fetchImpl } = fakeAnthropic([message([
       { type: 'thinking', thinking: '', signature: 's' },

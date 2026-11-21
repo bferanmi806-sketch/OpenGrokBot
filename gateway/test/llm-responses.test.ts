@@ -135,4 +135,29 @@ describe('OpenAI Responses API', () => {
     const { fetchImpl } = fakeResponses([{ status: 'failed', error: { message: 'server overloaded' } }])
     await expect(createLLM(target, fetchImpl).chat([{ role: 'user', content: 'go' }], [])).rejects.toThrow(/server overloaded/)
   })
+
+  it('degrades native Responses reasoning items to neutral messages when switching provider/model route', () => {
+    const history: ChatMsg[] = [
+      { role: 'user', content: 'hi' },
+      {
+        role: 'assistant',
+        content: 'Working.',
+        tool_calls: [{ id: 'fc_1', type: 'function', function: { name: 'browser_goto', arguments: '{"url":"https://a.test"}' } }],
+        native: {
+          api: 'responses',
+          route: 'https://api.openai.com/v1|gpt-6',
+          items: [
+            { id: 'rs_1', type: 'reasoning', encrypted_content: 'enc-openai' },
+            { id: 'fc_1', type: 'function_call', call_id: 'fc_1', name: 'browser_goto', arguments: '{"url":"https://a.test"}' },
+          ],
+        },
+      },
+    ]
+    const same = toResponses(history, 'https://api.openai.com/v1|gpt-6')
+    expect(same.input.some((i) => i.type === 'reasoning')).toBe(true)
+
+    const switched = toResponses(history, 'https://api.x.ai/v1|grok-4')
+    expect(switched.input.some((i) => i.type === 'reasoning')).toBe(false)
+    expect(switched.input.some((i) => i.type === 'function_call')).toBe(true)
+  })
 })
