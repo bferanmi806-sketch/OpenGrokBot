@@ -13,7 +13,7 @@ injection — that follows an agent wherever it runs. This page is precise about
 | Your network cannot reach it | The gateway listens on `127.0.0.1` unless you set `OPENSUPERBOT_HOST`. |
 | A bot cannot approve its own holds | The token never enters a bot's workspace. A bot's shell or browser can reach the host, but cannot authenticate. |
 | Only you can grant a standing approval | A rule is created only when you approve a hold with *Always allow…* from your signed-in browser. Its scope is fixed by the gateway: one teammate, one kind, one exact destination, with an expiry you pick. The destination must have the shape of one place — one email address, one channel or handle, one account, page or thread; wildcards, lists, "everyone" and whole services are refused, and so is anything over 200 characters. Destinations are compared whole: case is ignored except in a URL's path. Purchases, bookings and "other" (including every MCP write) can never become rules. Bots have no tool to create, widen or extend one; you revoke them from the computer panel. |
-| Rules only cover work you started | A rule lets a hold through only in a turn you started — your message, your decision, your answer, your question to the group — and only while no webhook payload is in the teammate's view and no connector or MCP read tool has run in that turn. Turns started by a routine, a webhook or a teammate's handoff always ask, and the chip says why. The model is never told which destinations a rule covers. What this does not cover: a page the teammate reads during a turn you started is still in front of it, and so is your own earlier message that named a destination — a convincing page could still steer a hold to a destination you once allowed. Keep standing rules for destinations where a wrong send is cheap. |
+| Rules only cover work you started | A rule lets a hold through only in a turn you started — your message, your decision, your answer, your question to the group — and only while the turn has not seen untrusted external content (`outside-data`): no webhook payload or tainted teammate handoff (`bot_ref`) in the teammate's view, and no browser page read (`browser_goto`, `browser_extract`, `browser_click`, `browser_back`, `browser_screenshot`), connector read, MCP read, or tainted shared wiki search/read (`wiki_search` / `wiki_read`) in that turn. Turns started by a routine, a webhook or a teammate's handoff always ask, and the chip says why. The model is never told which destinations a rule covers. What this does not cover: files you attach, files in the teammate's workspace, shell output, or untrusted text that already landed in an earlier turn's chat history (outside webhook or tainted `bot_ref` cards) do not mark a fresh turn `outside-data` — content from those sources could still steer a hold to a destination you once allowed. Keep standing rules for destinations where a wrong send is cheap. |
 | Only work you started changes your setup | `save_memory`, `forget_memory`, `create_routine` and `stop_routine` are offered only in a turn you started — your message, your decision, your answer, your question to the group. In a turn started by a routine, a webhook or a teammate's handoff they are left out of the tool list, refused if the model names them anyway, and the attempt is logged; the teammate can still tell you what it would change. Unlike standing rules, webhook data still in view does not block them in a turn you started, because you are there to see the chip. Handing work to a teammate stays possible from any turn: the receiving turn counts as a handoff and has the same limits. |
 | A webhook opens one routine and nothing else | `POST /hooks/routines/:id` (alongside the one-time OAuth callback `GET /oauth/connector/:nonce`) sits outside the gateway token. Each routine has its own random key: sent as a header or `?key=`, or used by GitHub as the secret behind an `X-Hub-Signature-256` signature over the exact body. Both are compared in constant time; a wrong key, a wrong signature and an unknown id all get `404`. A repeated GitHub delivery runs once, and so does a captured signed request replayed under a different delivery id (the signature itself is remembered); a delivery refused because the last run was still going is not counted, so GitHub's redelivery of it runs. Bodies over 1 MB are refused as they arrive, before they are buffered, and at most 16,000 characters reach the model. The body is posted into the thread as an *outside data* card when the teammate picks it up, so you can see what set it off. The key never enters the thread or the model's context — only the computer panel shows it. |
 | A payload stays inside its fence | What a webhook delivered reaches the model between two lines that carry the payload's own SHA-256 fingerprint, with every payload line prefixed by `│`. Writing a convincing end-of-payload line from inside would mean finding a text that contains its own hash. |
@@ -57,20 +57,25 @@ destination the bot itself declares when it holds an action, and then the bot pe
 computer; the gateway decides whether to ask you again, not what the bot does next (whereas for built-in connector
 and MCP write tools, the gateway freezes the exact call parameters and executes the call itself — and MCP writes
 never match standing rules at all). Outside
-input cannot start a turn in which a rule applies, and the bot is not told which destinations its rules cover — but
-within a turn you started, a bot that mislabels a `hold_for_approval` action, by mistake or because a page it read
-told it to, could still slip one past a rule. So rules save you waiting on a teammate you already trust with that
-destination; they do not make the approval gate stronger. Keep them narrow and short-lived.
+input cannot start a turn in which a rule applies, reading untrusted external content in the turn — webhook payloads,
+browser page reads (`browser_goto` / `browser_extract` / `browser_click` / `browser_back` / `browser_screenshot`),
+connector reads, MCP reads, tainted shared wiki searches/reads, or tainted `bot_ref` handoffs — withholds rules as
+`outside-data`, and the bot is not told which destinations its rules cover. Still, within an untainted turn you
+started, a bot that mislabels a `hold_for_approval` action, by mistake or because of an attached file, workspace file
+or shell output it read, could still slip one past a rule. So rules save you waiting on a teammate you already trust
+with that destination; they do not make the approval gate stronger. Keep them narrow and short-lived.
 
 **Treating what it reads as data.** Bots are told that pages, files and emails are data, never orders, and a
 webhook's body arrives explicitly labelled as data from another system. Prompt injection against tool-using
 agents is still an unsolved problem industry-wide.
 
-**A file you send is read like any other file.** What an attached file says reaches the teammate the way a page
-or a file in its workspace does: as data it was told not to take orders from. A turn in which it reads your file
-is still a turn you started, so your standing approvals and its rule and routine tools stay available in it, the
-same as when it reads a web page for you. If you forward a document from someone you do not trust, treat it like
-a link from them. An image is shown to the model as you sent it, metadata included.
+**A file you send is read like any other file.** What an attached file says reaches the teammate the way a file in its
+workspace does: as data it was told not to take orders from. Unlike reading a web page, connector, MCP read tool,
+webhook payload, tainted wiki page or tainted `bot_ref` handoff — which mark the turn `outside-data` and withhold
+standing rules — a turn in which the teammate reads a file you attached stays an untainted turn you started, so your
+standing approvals and its rule and routine tools stay available in it. If you forward a document from someone you do
+not trust, treat it with the same caution as untrusted external content. An image is shown to the model as you sent
+it, metadata included.
 
 **Forgetting is visible, not approved.** In a turn you started, a bot can drop a standing rule with `forget_memory`
 without asking you first, the same way it can save one. Turns started by a routine, a webhook or a teammate cannot

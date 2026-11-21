@@ -679,4 +679,59 @@ describe('wiki store CRUD, FTS5 matching, taint rules, revisions, revert, archiv
     expect(revertWikiPage(db, 'client', 'acme-corp', 1, { editedBy: 'operator', dataDir })).toBeNull()
     db.close()
   })
+
+  it('guards Windows reserved device stems in mirror filenames while keeping logical id/slug unchanged', () => {
+    const db = openDb(':memory:')
+    const dataDir = makeTempDir()
+
+    expect(wikiPageFilePath(dataDir, 'topic', 'con')).toBe(join(dataDir, 'wiki', 'topic', '_con.md'))
+    expect(wikiPageFilePath(dataDir, 'topic', 'nul')).toBe(join(dataDir, 'wiki', 'topic', '_nul.md'))
+    expect(wikiPageFilePath(dataDir, 'topic', 'prn')).toBe(join(dataDir, 'wiki', 'topic', '_prn.md'))
+    expect(wikiPageFilePath(dataDir, 'topic', 'aux')).toBe(join(dataDir, 'wiki', 'topic', '_aux.md'))
+    expect(wikiPageFilePath(dataDir, 'topic', 'com1')).toBe(join(dataDir, 'wiki', 'topic', '_com1.md'))
+    expect(wikiPageFilePath(dataDir, 'topic', 'lpt9')).toBe(join(dataDir, 'wiki', 'topic', '_lpt9.md'))
+    expect(wikiPageFilePath(dataDir, 'topic', 'console')).toBe(join(dataDir, 'wiki', 'topic', 'console.md'))
+    expect(wikiPageFilePath(dataDir, 'topic', 'con-notes')).toBe(join(dataDir, 'wiki', 'topic', 'con-notes.md'))
+
+    const conPage = upsertWikiPage(
+      db,
+      {
+        kind: 'topic',
+        slug: 'con',
+        title: 'Con',
+        body: 'Safe mirror for con.',
+        editedBy: 'operator',
+      },
+      { dataDir, now: 1000 },
+    )
+    const nulPage = upsertWikiPage(
+      db,
+      {
+        kind: 'topic',
+        slug: 'nul',
+        title: 'Nul',
+        body: 'Safe mirror for nul.',
+        editedBy: 'operator',
+      },
+      { dataDir, now: 2000 },
+    )
+
+    expect(conPage.page.id).toBe('topic/con')
+    expect(conPage.page.slug).toBe('con')
+    expect(nulPage.page.id).toBe('topic/nul')
+    expect(nulPage.page.slug).toBe('nul')
+
+    const files = readdirSync(join(dataDir, 'wiki', 'topic')).sort()
+    expect(files).toEqual(['_con.md', '_nul.md'])
+
+    const conDisk = readFileSync(join(dataDir, 'wiki', 'topic', '_con.md'), 'utf8')
+    expect(conDisk).toContain('id: "topic/con"')
+    expect(conDisk).toContain('slug: "con"')
+    expect(conDisk).toContain('Safe mirror for con.')
+
+    // Archiving removes the guarded _con.md file cleanly
+    expect(archiveWikiPage(db, 'topic', 'con', { dataDir, now: 3000 })).toBe(true)
+    expect(readdirSync(join(dataDir, 'wiki', 'topic'))).toEqual(['_nul.md'])
+    db.close()
+  })
 })

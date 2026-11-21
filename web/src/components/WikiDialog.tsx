@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import {
   ApiError,
   SignedOut,
@@ -53,10 +53,12 @@ function wikiErrorMessage(t: T, err: unknown, fallbackKey?: MessageKey): string 
 
 function resolveEditorName(updatedBy: string, roster: WikiRoster, t: T): string {
   if (updatedBy === 'operator') return t('wiki.byOperator')
+  const lookupId = updatedBy.startsWith('bot:') ? updatedBy.slice(4) : updatedBy
   if (Array.isArray(roster)) {
-    return roster.find((b) => b.id === updatedBy)?.name ?? updatedBy
+    return roster.find((b) => b.id === lookupId)?.name ?? updatedBy
   }
-  return (roster as Record<string, { name: string; emoji?: string }>)[updatedBy]?.name ?? updatedBy
+  const map = roster as Record<string, { name: string; emoji?: string }>
+  return Object.hasOwn(map, lookupId) ? (map[lookupId]?.name ?? updatedBy) : updatedBy
 }
 
 function parseTags(raw: string): string[] {
@@ -95,6 +97,7 @@ export function WikiDialog({
   onSignedOut?: () => void
 }) {
   const t = useT()
+  const slugHintId = useId()
   const tRef = useRef(t)
   tRef.current = t
   const onSignedOutRef = useRef(onSignedOut)
@@ -130,8 +133,11 @@ export function WikiDialog({
   const [revertingVersion, setRevertingVersion] = useState<number | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<WikiPageDetail | null>(null)
   const [confirmRevert, setConfirmRevert] = useState<{ page: WikiPageDetail; version: number } | null>(null)
+  const busy = saving || deleting || revertingVersion !== null
 
   const mountedRef = useRef(true)
+  const mutatingRef = useRef(false)
+  const detailStaleRef = useRef(false)
   const listSeqRef = useRef(0)
   const pageSeqRef = useRef(0)
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -166,6 +172,7 @@ export function WikiDialog({
       const res = await fetchWiki({
         ...(trimmed ? { q: trimmed } : {}),
         ...(kind !== 'all' ? { kind } : {}),
+        limit: 200,
       })
       if (!mountedRef.current || seq !== listSeqRef.current) return
       setPages(res.pages)
@@ -191,6 +198,7 @@ export function WikiDialog({
     try {
       const res = await fetchWikiPage(kind, slug)
       if (!mountedRef.current || seq !== pageSeqRef.current) return
+      detailStaleRef.current = false
       setDetail(res.page)
       setRevisions(res.revisions)
     } catch (err) {
@@ -200,8 +208,12 @@ export function WikiDialog({
         return
       }
       if (err instanceof ApiError && err.status === 404) {
+        selectedKeyRef.current = null
+        setSelectedKey(null)
         setDetail(null)
         setRevisions([])
+        setHistoryOpen(false)
+        detailStaleRef.current = false
       }
       setPageError(wikiErrorMessage(tRef.current, err, 'wiki.error.loadFailed'))
     } finally {
@@ -220,6 +232,11 @@ export function WikiDialog({
     if (refreshTick === prevTickRef.current) return
     prevTickRef.current = refreshTick
     void loadList(queryRef.current, kindRef.current, { silent: true })
+    if (mutatingRef.current) return
+    if (modeRef.current === 'edit') {
+      if (selectedKeyRef.current) detailStaleRef.current = true
+      return
+    }
     if (modeRef.current === 'view' && selectedKeyRef.current) {
       void loadPage(selectedKeyRef.current.kind, selectedKeyRef.current.slug, { silent: true })
     }
@@ -227,9 +244,14 @@ export function WikiDialog({
 
   const cancelForm = useCallback(() => {
     if (saving) return
+    const target = modeRef.current === 'edit' && detailStaleRef.current ? selectedKeyRef.current : null
+    detailStaleRef.current = false
     setMode('view')
     setFormError(null)
-  }, [saving])
+    if (target) {
+      void loadPage(target.kind, target.slug, { silent: true })
+    }
+  }, [saving, loadPage])
 
   useEscape(mode !== 'view' ? cancelForm : onClose)
 
@@ -239,13 +261,14 @@ export function WikiDialog({
       clearTimeout(debounceTimerRef.current)
       debounceTimerRef.current = undefined
     }
-    if (!next.trim()) {
+    const trimmed = next.trim()
+    if (!trimmed) {
       setActiveQuery('')
       return
     }
     debounceTimerRef.current = setTimeout(() => {
       debounceTimerRef.current = undefined
-      setActiveQuery(next)
+      setActiveQuery(trimmed)
     }, 200)
   }
 
@@ -255,15 +278,18 @@ export function WikiDialog({
       clearTimeout(debounceTimerRef.current)
       debounceTimerRef.current = undefined
     }
-    if (activeQuery !== queryInput) {
-      setActiveQuery(queryInput)
+    const trimmed = queryInput.trim()
+    if (activeQuery !== trimmed) {
+      setActiveQuery(trimmed)
     } else {
-      void loadList(queryInput, kindFilter)
+      void loadList(trimmed, kindFilter)
     }
   }
 
   const selectPage = (page: WikiPageSummary) => {
+    if (busy || mutatingRef.current) return
     const switching = selectedKey?.id !== page.id
+    detailStaleRef.current = false
     setSelectedKey({ id: page.id, kind: page.kind, slug: page.slug })
     if (switching) {
       setDetail(null)
@@ -277,6 +303,8 @@ export function WikiDialog({
   }
 
   const openCreate = () => {
+    if (busy) return
+    detailStaleRef.current = false
     setMode('create')
     setFormKind(kindFilter === 'all' ? 'topic' : kindFilter)
     setFormTitle('')
@@ -289,6 +317,8 @@ export function WikiDialog({
   }
 
   const openEdit = (page: WikiPageDetail) => {
+    if (busy) return
+    detailStaleRef.current = false
     setMode('edit')
     setFormKind(page.kind)
     setFormTitle(page.title)
@@ -302,9 +332,12 @@ export function WikiDialog({
 
   const handleSave = async (e: FormEvent) => {
     e.preventDefault()
+    if (mutatingRef.current) return
     const title = formTitle.trim()
     if (!title || !formBody.trim()) return
+    if (mode !== 'create' && !detail) return
 
+    mutatingRef.current = true
     setSaving(true)
     setFormError(null)
     try {
@@ -326,7 +359,6 @@ export function WikiDialog({
         }
         res = await createWikiPage(input)
       } else {
-        if (!detail) return
         const input: WikiSaveInput = {
           title,
           summary,
@@ -334,11 +366,12 @@ export function WikiDialog({
           body: formBody,
           ...(note ? { note } : {}),
         }
-        res = await saveWikiPage(detail.kind, detail.slug, input)
+        res = await saveWikiPage(detail!.kind, detail!.slug, input)
       }
 
       if (!mountedRef.current) return
       pageSeqRef.current += 1
+      detailStaleRef.current = false
       setDetail(res.page)
       setRevisions(res.revisions)
       setSelectedKey({ id: res.page.id, kind: res.page.kind, slug: res.page.slug })
@@ -354,22 +387,28 @@ export function WikiDialog({
       }
       setFormError(wikiErrorMessage(tRef.current, err))
     } finally {
+      mutatingRef.current = false
       if (mountedRef.current) setSaving(false)
     }
   }
 
   const handleDelete = async (page: WikiPageDetail) => {
+    if (mutatingRef.current) return
+    mutatingRef.current = true
     setDeleting(true)
     setPageError(null)
     try {
       await deleteWikiPage(page.kind, page.slug)
       if (!mountedRef.current) return
       pageSeqRef.current += 1
+      detailStaleRef.current = false
+      selectedKeyRef.current = null
       setSelectedKey(null)
       setDetail(null)
       setRevisions([])
       setHistoryOpen(false)
       setMode('view')
+      setPageError(null)
       setPages((prev) => prev.filter((item) => item.id !== page.id))
       setTotal((prev) => Math.max(0, prev - 1))
       void loadList(queryRef.current, kindRef.current, { silent: true })
@@ -381,21 +420,26 @@ export function WikiDialog({
       }
       setPageError(wikiErrorMessage(tRef.current, err))
     } finally {
+      mutatingRef.current = false
       if (mountedRef.current) setDeleting(false)
     }
   }
 
   const handleRevert = async (page: WikiPageDetail, version: number) => {
+    if (mutatingRef.current) return
+    mutatingRef.current = true
     setRevertingVersion(version)
     setPageError(null)
     try {
       const res = await revertWikiPage(page.kind, page.slug, version)
       if (!mountedRef.current) return
       pageSeqRef.current += 1
+      detailStaleRef.current = false
       setDetail(res.page)
       setRevisions(res.revisions)
       setSelectedKey({ id: res.page.id, kind: res.page.kind, slug: res.page.slug })
       setMode('view')
+      setPageError(null)
       void loadList(queryRef.current, kindRef.current, { silent: true })
     } catch (err) {
       if (!mountedRef.current) return
@@ -405,11 +449,11 @@ export function WikiDialog({
       }
       setPageError(wikiErrorMessage(tRef.current, err))
     } finally {
+      mutatingRef.current = false
       if (mountedRef.current) setRevertingVersion(null)
     }
   }
 
-  const busy = saving || deleting || revertingVersion !== null
   const hasFilterOrSearch = Boolean(activeQuery.trim()) || kindFilter !== 'all'
   const countLabel = total === 1 ? t('wiki.countOne') : t('wiki.count', { count: total })
 
@@ -508,6 +552,7 @@ export function WikiDialog({
                       type="button"
                       className={`wiki-item${active ? ' active' : ''}`}
                       aria-current={active ? 'true' : undefined}
+                      disabled={busy}
                       onClick={() => selectPage(page)}
                     >
                       <div className="wiki-item-head">
@@ -571,12 +616,14 @@ export function WikiDialog({
                         <input
                           type="text"
                           value={formSlug}
+                          maxLength={64}
                           disabled={saving}
                           spellCheck={false}
+                          aria-describedby={slugHintId}
                           onChange={(e) => setFormSlug(e.target.value)}
                         />
                       </label>
-                      <span className="wiki-form-hint">{t('wiki.field.slugHint')}</span>
+                      <span id={slugHintId} className="wiki-form-hint">{t('wiki.field.slugHint')}</span>
                     </div>
                   </div>
                 ) : null}
@@ -587,6 +634,7 @@ export function WikiDialog({
                     type="text"
                     required
                     value={formTitle}
+                    maxLength={160}
                     disabled={saving}
                     onChange={(e) => setFormTitle(e.target.value)}
                   />
@@ -597,6 +645,7 @@ export function WikiDialog({
                   <input
                     type="text"
                     value={formSummary}
+                    maxLength={300}
                     disabled={saving}
                     onChange={(e) => setFormSummary(e.target.value)}
                   />
@@ -620,6 +669,7 @@ export function WikiDialog({
                     required
                     rows={9}
                     value={formBody}
+                    maxLength={64000}
                     disabled={saving}
                     onChange={(e) => setFormBody(e.target.value)}
                   />
@@ -630,6 +680,7 @@ export function WikiDialog({
                   <input
                     type="text"
                     value={formNote}
+                    maxLength={200}
                     disabled={saving}
                     placeholder={t('wiki.field.notePlaceholder')}
                     onChange={(e) => setFormNote(e.target.value)}

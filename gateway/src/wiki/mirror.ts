@@ -3,6 +3,8 @@ import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { isWikiKind, isWikiSlug, type WikiKind, type WikiPageDetail } from './types.js'
 
+const WINDOWS_RESERVED_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+
 export function wikiRootDir(dataDir: string): string {
   return join(dataDir, 'wiki')
 }
@@ -14,7 +16,8 @@ export function wikiPageFilePath(dataDir: string, kind: WikiKind, slug: string):
   if (!isWikiSlug(slug)) {
     throw new Error(`Invalid wiki slug: ${String(slug)}`)
   }
-  return join(wikiRootDir(dataDir), kind, `${slug}.md`)
+  const fileName = WINDOWS_RESERVED_RE.test(slug) ? `_${slug}.md` : `${slug}.md`
+  return join(wikiRootDir(dataDir), kind, fileName)
 }
 
 export function renderWikiMarkdown(page: WikiPageDetail): string {

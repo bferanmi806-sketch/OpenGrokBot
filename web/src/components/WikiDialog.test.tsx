@@ -114,18 +114,18 @@ describe('WikiDialog', () => {
     vi.stubGlobal('fetch', vi.fn((input: string | URL) => {
       const url = String(input)
       calls.push(url)
-      if (url === '/api/wiki') {
+      if (url === '/api/wiki?limit=200') {
         return Promise.resolve(jsonResponse({ pages: [acmeSummary, linSummary], total: 2 }))
       }
-      if (url === '/api/wiki?kind=client') {
+      if (url === '/api/wiki?kind=client&limit=200') {
         return Promise.resolve(jsonResponse({ pages: [acmeSummary], total: 1 }))
       }
-      if (url === '/api/wiki?q=slow&kind=client') {
+      if (url === '/api/wiki?q=slow&kind=client&limit=200') {
         return new Promise<Response>((resolve) => {
           resolveSlow = resolve
         })
       }
-      if (url === '/api/wiki?q=fast&kind=client') {
+      if (url === '/api/wiki?q=fast&kind=client&limit=200') {
         return Promise.resolve(jsonResponse({
           pages: [{ ...acmeSummary, title: 'Fast Client Match', snippet: 'Matched fast query' }],
           total: 1,
@@ -143,7 +143,7 @@ describe('WikiDialog', () => {
 
     // Filter by Clients
     await userEvent.click(screen.getByRole('button', { name: 'Clients' }))
-    await waitFor(() => expect(calls).toContain('/api/wiki?kind=client'))
+    await waitFor(() => expect(calls).toContain('/api/wiki?kind=client&limit=200'))
     expect(screen.getByText('1 page')).toBeInTheDocument()
     expect(screen.queryByText('Lin Chen')).toBeNull()
 
@@ -179,7 +179,7 @@ describe('WikiDialog', () => {
       const body = init?.body ? JSON.parse(String(init.body)) : undefined
       calls.push({ method, url, body })
 
-      if (method === 'GET' && url === '/api/wiki') {
+      if (method === 'GET' && url === '/api/wiki?limit=200') {
         return jsonResponse({
           pages: [
             { ...acmeSummary, sourceTainted: currentAcme.sourceTainted, version: currentAcme.version },
@@ -281,7 +281,7 @@ describe('WikiDialog', () => {
       const body = init?.body ? JSON.parse(String(init.body)) : undefined
       calls.push({ method, url, body })
 
-      if (method === 'GET' && url === '/api/wiki') {
+      if (method === 'GET' && url === '/api/wiki?limit=200') {
         return jsonResponse({ pages: createdPage ? [createdPage] : [], total: createdPage ? 1 : 0 })
       }
       if (method === 'POST' && url === '/api/wiki') {
@@ -327,9 +327,19 @@ describe('WikiDialog', () => {
     expect(await screen.findByText(/No wiki pages yet/)).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: 'New page' }))
+    const slugField = screen.getByLabelText('Slug (optional)')
+    expect(slugField).toHaveAttribute('maxlength', '64')
+    const describedBy = slugField.getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    expect(document.getElementById(describedBy!)).toHaveClass('wiki-form-hint')
+    expect(screen.getByLabelText('Title')).toHaveAttribute('maxlength', '160')
+    expect(screen.getByLabelText('Summary')).toHaveAttribute('maxlength', '300')
+    expect(screen.getByLabelText('Markdown content')).toHaveAttribute('maxlength', '64000')
+    expect(screen.getByLabelText('Change note (optional)')).toHaveAttribute('maxlength', '200')
+
     await userEvent.selectOptions(screen.getByLabelText('Type'), 'project')
     await userEvent.type(screen.getByLabelText('Title'), 'Project Apollo')
-    await userEvent.type(screen.getByLabelText('Slug (optional)'), 'apollo')
+    await userEvent.type(slugField, 'apollo')
     await userEvent.type(screen.getByLabelText('Summary'), 'Q4 launch plan')
     await userEvent.type(screen.getByLabelText('Tags'), 'launch, q4')
     await userEvent.type(screen.getByLabelText('Markdown content'), 'Milestone 1 ready.')
@@ -364,7 +374,7 @@ describe('WikiDialog', () => {
       const body = init?.body ? JSON.parse(String(init.body)) : undefined
       calls.push({ method, url, body })
 
-      if (method === 'GET' && url === '/api/wiki') {
+      if (method === 'GET' && url === '/api/wiki?limit=200') {
         return jsonResponse({ pages: deleted ? [] : [page], total: deleted ? 0 : 1 })
       }
       if (method === 'GET' && url === '/api/wiki/client/acme-corp') {
@@ -453,7 +463,7 @@ describe('WikiDialog', () => {
 
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
       const url = String(input)
-      if (url === '/api/wiki') {
+      if (url === '/api/wiki?limit=200') {
         return jsonResponse({
           pages: [{ ...linSummary, version: remoteVersion, title: remoteVersion === 1 ? 'Lin Chen' : 'Lin Chen (Updated)' }],
           total: 1,
@@ -536,5 +546,351 @@ describe('WikiDialog', () => {
       </I18nProvider>,
     )
     await waitFor(() => expect(onSignedOut).toHaveBeenCalledTimes(1))
+  })
+
+  it('does not show a stale 404 alert when refreshTick races with an in-flight delete', async () => {
+    let deletedOnServer = false
+    let resolveDelete!: (res: Response) => void
+    let acmeGetCount = 0
+
+    vi.stubGlobal('fetch', vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (method === 'GET' && url === '/api/wiki?limit=200') {
+        return Promise.resolve(jsonResponse({
+          pages: deletedOnServer ? [linSummary] : [acmeSummary, linSummary],
+          total: deletedOnServer ? 1 : 2,
+        }))
+      }
+      if (method === 'GET' && url === '/api/wiki/client/acme-corp') {
+        acmeGetCount += 1
+        if (deletedOnServer) {
+          return Promise.resolve(jsonResponse({ error: 'Not found', code: 'not_found' }, 404))
+        }
+        return Promise.resolve(jsonResponse({ page: acmeDetailTainted, revisions: acmeRevisions }))
+      }
+      if (method === 'DELETE' && url === '/api/wiki/client/acme-corp') {
+        deletedOnServer = true
+        return new Promise<Response>((resolve) => {
+          resolveDelete = resolve
+        })
+      }
+      return Promise.resolve(jsonResponse({ error: 'not found', code: 'not_found' }, 404))
+    }))
+
+    const { rerender } = render(<WikiDialog roster={rosterArray} refreshTick={0} onClose={() => {}} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /Acme Corp/ }))
+    expect(await screen.findByText('v2 · Updated by Scout')).toBeInTheDocument()
+    const getsBeforeDelete = acmeGetCount
+
+    await userEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    const deleteDialog = screen.getByRole('alertdialog')
+    await userEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(resolveDelete).toBeTypeOf('function'))
+
+    // Simulated wiki_changed WS event arrives while DELETE is still in flight
+    rerender(<WikiDialog roster={rosterArray} refreshTick={1} onClose={() => {}} />)
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Acme Corp/ })).toBeNull())
+    expect(acmeGetCount).toBe(getsBeforeDelete)
+
+    await act(async () => {
+      resolveDelete(jsonResponse({ ok: true }))
+    })
+
+    expect(await screen.findByText('Select a page to read or edit, or create a new one.')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('clears selectedKey on 404 so subsequent refreshTick events do not re-fetch the deleted page', async () => {
+    let deletedOnServer = false
+    let acmeGetCount = 0
+    let listGetCount = 0
+
+    vi.stubGlobal('fetch', vi.fn((input: string | URL) => {
+      const url = String(input)
+      if (url === '/api/wiki?limit=200') {
+        listGetCount += 1
+        return Promise.resolve(jsonResponse({
+          pages: deletedOnServer ? [linSummary] : [acmeSummary, linSummary],
+          total: deletedOnServer ? 1 : 2,
+        }))
+      }
+      if (url === '/api/wiki/client/acme-corp') {
+        acmeGetCount += 1
+        if (deletedOnServer) {
+          return Promise.resolve(jsonResponse({ error: 'Not found', code: 'not_found' }, 404))
+        }
+        return Promise.resolve(jsonResponse({ page: acmeDetailTainted, revisions: acmeRevisions }))
+      }
+      return Promise.resolve(jsonResponse({ error: 'not found', code: 'not_found' }, 404))
+    }))
+
+    const { rerender } = render(<WikiDialog roster={rosterArray} refreshTick={0} onClose={() => {}} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /Acme Corp/ }))
+    expect(await screen.findByText('v2 · Updated by Scout')).toBeInTheDocument()
+
+    // Another client deletes Acme Corp; first refreshTick gets 404 and clears selectedKey
+    deletedOnServer = true
+    rerender(<WikiDialog roster={rosterArray} refreshTick={1} onClose={() => {}} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('This wiki page could not be found.')
+    const getsAfter404 = acmeGetCount
+    const listGetsBeforeSecondTick = listGetCount
+
+    // Subsequent refreshTick updates the list but must NOT re-fetch the deleted page
+    rerender(<WikiDialog roster={rosterArray} refreshTick={2} onClose={() => {}} />)
+    await waitFor(() => expect(listGetCount).toBeGreaterThan(listGetsBeforeSecondTick))
+    expect(acmeGetCount).toBe(getsAfter404)
+  })
+
+  it('resolves bot:operator to the bot display name and ignores prototype keys like constructor', async () => {
+    const botOpSummary: WikiPageSummary = {
+      id: 'topic/bot-op',
+      kind: 'topic',
+      slug: 'bot-op',
+      title: 'Ops Notes',
+      summary: 'Authored by bot whose id is operator',
+      tags: [],
+      sourceTainted: false,
+      updatedBy: 'bot:operator',
+      version: 2,
+      createdAt: 100,
+      updatedAt: 200,
+    }
+    const protoSummary: WikiPageSummary = {
+      id: 'topic/proto-key',
+      kind: 'topic',
+      slug: 'proto-key',
+      title: 'Prototype Guard',
+      summary: 'Has constructor as updatedBy',
+      tags: [],
+      sourceTainted: false,
+      updatedBy: 'constructor',
+      version: 1,
+      createdAt: 100,
+      updatedAt: 100,
+    }
+    const botOpDetail: WikiPageDetail = { ...botOpSummary, body: 'Bot operator content.' }
+    const botOpRevs: WikiRevision[] = [
+      {
+        id: 20,
+        pageId: 'topic/bot-op',
+        version: 2,
+        title: 'Ops Notes',
+        summary: 'Authored by bot whose id is operator',
+        tags: [],
+        body: 'Bot operator content.',
+        editedBy: 'bot:operator',
+        note: 'Bot edit',
+        sourceTainted: false,
+        createdAt: 200,
+      },
+      {
+        id: 19,
+        pageId: 'topic/bot-op',
+        version: 1,
+        title: 'Ops Notes',
+        summary: 'Initial',
+        tags: [],
+        body: 'Initial',
+        editedBy: 'operator',
+        note: 'Human edit',
+        sourceTainted: false,
+        createdAt: 100,
+      },
+    ]
+    const protoDetail: WikiPageDetail = { ...protoSummary, body: 'Prototype test.' }
+    const protoRevs: WikiRevision[] = [
+      {
+        id: 21,
+        pageId: 'topic/proto-key',
+        version: 1,
+        title: 'Prototype Guard',
+        summary: 'Has constructor as updatedBy',
+        tags: [],
+        body: 'Prototype test.',
+        editedBy: 'constructor',
+        note: '',
+        sourceTainted: false,
+        createdAt: 100,
+      },
+    ]
+
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      const url = String(input)
+      if (url === '/api/wiki?limit=200') {
+        return jsonResponse({ pages: [botOpSummary, protoSummary], total: 2 })
+      }
+      if (url === '/api/wiki/topic/bot-op') {
+        return jsonResponse({ page: botOpDetail, revisions: botOpRevs })
+      }
+      if (url === '/api/wiki/topic/proto-key') {
+        return jsonResponse({ page: protoDetail, revisions: protoRevs })
+      }
+      return jsonResponse({ error: 'not found', code: 'not_found' }, 404)
+    }))
+
+    render(
+      <WikiDialog
+        roster={{ operator: { name: 'Ops Bot' }, researcher: { name: 'Scout' } }}
+        onClose={() => {}}
+      />,
+    )
+
+    // bot:operator resolves to bot's display name (not "bot:operator" and not "you")
+    await userEvent.click(await screen.findByRole('button', { name: /Ops Notes/ }))
+    expect(await screen.findByText('v2 · Updated by Ops Bot')).toBeInTheDocument()
+    expect(screen.queryByText(/bot:operator/)).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'History (2)' }))
+    expect(screen.getByText('Ops Bot')).toBeInTheDocument()
+    expect(screen.getByText('you')).toBeInTheDocument()
+
+    // Prototype key "constructor" must NOT resolve to "Object"
+    await userEvent.click(screen.getByRole('button', { name: /Prototype Guard/ }))
+    expect(await screen.findByText('v1 · Updated by constructor')).toBeInTheDocument()
+    expect(screen.queryByText(/Updated by Object/)).toBeNull()
+  })
+
+  it('disables sidebar wiki-item buttons while save, revert, or delete is in flight', async () => {
+    let resolveSave!: (res: Response) => void
+    let resolveRevert!: (res: Response) => void
+    let resolveDelete!: (res: Response) => void
+    let linFetches = 0
+    let currentAcme = acmeDetailTainted
+    let deleted = false
+
+    vi.stubGlobal('fetch', vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (method === 'GET' && url === '/api/wiki?limit=200') {
+        return Promise.resolve(jsonResponse({
+          pages: deleted ? [linSummary] : [acmeSummary, linSummary],
+          total: deleted ? 1 : 2,
+        }))
+      }
+      if (method === 'GET' && url === '/api/wiki/client/acme-corp') {
+        return Promise.resolve(jsonResponse({ page: currentAcme, revisions: acmeRevisions }))
+      }
+      if (method === 'GET' && url === '/api/wiki/contact/lin-chen') {
+        linFetches += 1
+        return Promise.resolve(jsonResponse({ page: linDetail, revisions: linRevisions }))
+      }
+      if (method === 'PUT' && url === '/api/wiki/client/acme-corp') {
+        currentAcme = { ...currentAcme, version: 3, updatedBy: 'operator', sourceTainted: false }
+        return new Promise<Response>((resolve) => {
+          resolveSave = resolve
+        })
+      }
+      if (method === 'POST' && url === '/api/wiki/client/acme-corp/revert') {
+        currentAcme = { ...currentAcme, version: 4, updatedBy: 'operator', sourceTainted: false }
+        return new Promise<Response>((resolve) => {
+          resolveRevert = resolve
+        })
+      }
+      if (method === 'DELETE' && url === '/api/wiki/client/acme-corp') {
+        deleted = true
+        return new Promise<Response>((resolve) => {
+          resolveDelete = resolve
+        })
+      }
+      return Promise.resolve(jsonResponse({ error: 'not found' }, 404))
+    }))
+
+    render(<WikiDialog roster={rosterArray} onClose={() => {}} />)
+    await userEvent.click(await screen.findByRole('button', { name: /Acme Corp/ }))
+    expect(await screen.findByText('v2 · Updated by Scout')).toBeInTheDocument()
+
+    // 1. Save in flight disables .wiki-item buttons and blocks switching
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Save & verify' }))
+    await waitFor(() => expect(resolveSave).toBeTypeOf('function'))
+    const linBtnDuringSave = screen.getByRole('button', { name: /Lin Chen/ })
+    expect(linBtnDuringSave).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Acme Corp/ })).toBeDisabled()
+    fireEvent.click(linBtnDuringSave)
+    expect(linFetches).toBe(0)
+
+    await act(async () => {
+      resolveSave(jsonResponse({ page: currentAcme, revisions: acmeRevisions }))
+    })
+    await waitFor(() => expect(screen.getByRole('button', { name: /Lin Chen/ })).toBeEnabled())
+
+    // 2. Revert in flight disables .wiki-item buttons
+    await userEvent.click(screen.getByRole('button', { name: 'History (2)' }))
+    await userEvent.click(screen.getAllByRole('button', { name: 'Revert' })[0]!)
+    await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Revert' }))
+    await waitFor(() => expect(resolveRevert).toBeTypeOf('function'))
+    expect(screen.getByRole('button', { name: /Lin Chen/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Acme Corp/ })).toBeDisabled()
+
+    await act(async () => {
+      resolveRevert(jsonResponse({ page: currentAcme, revisions: acmeRevisions }))
+    })
+    await waitFor(() => expect(screen.getByRole('button', { name: /Lin Chen/ })).toBeEnabled())
+
+    // 3. Delete in flight disables .wiki-item buttons
+    await userEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(resolveDelete).toBeTypeOf('function'))
+    expect(screen.getByRole('button', { name: /Lin Chen/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Acme Corp/ })).toBeDisabled()
+
+    await act(async () => {
+      resolveDelete(jsonResponse({ ok: true }))
+    })
+    await waitFor(() => expect(screen.getByRole('button', { name: /Lin Chen/ })).toBeEnabled())
+  })
+
+  it('silently reloads the updated page in View mode when cancelling Edit after refreshTick arrived mid-edit', async () => {
+    let remoteVersion = 1
+    let remoteBody = 'Server body v1'
+    let detailFetches = 0
+
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      const url = String(input)
+      if (url === '/api/wiki?limit=200') {
+        return jsonResponse({
+          pages: [{ ...linSummary, version: remoteVersion }],
+          total: 1,
+        })
+      }
+      if (url === '/api/wiki/contact/lin-chen') {
+        detailFetches += 1
+        return jsonResponse({
+          page: { ...linDetail, version: remoteVersion, body: remoteBody },
+          revisions: linRevisions,
+        })
+      }
+      return jsonResponse({ error: 'not found' }, 404)
+    }))
+
+    const { rerender } = render(<WikiDialog roster={{}} refreshTick={0} onClose={() => {}} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /Lin Chen/ }))
+    expect(await screen.findByText('Server body v1')).toBeInTheDocument()
+
+    // Enter Edit mode and modify draft
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const bodyInput = screen.getByLabelText('Markdown content')
+    await userEvent.clear(bodyInput)
+    await userEvent.type(bodyInput, 'Discarded local edit')
+
+    const fetchesWhileEditing = detailFetches
+    remoteVersion = 2
+    remoteBody = 'Fresh server body v2'
+    rerender(<WikiDialog roster={{}} refreshTick={1} onClose={() => {}} />)
+
+    // Sidebar updates to v2, active edit draft stays intact and detail isn't fetched yet
+    await waitFor(() => expect(screen.getByText('v2')).toBeInTheDocument())
+    expect(screen.getByLabelText('Markdown content')).toHaveValue('Discarded local edit')
+    expect(detailFetches).toBe(fetchesWhileEditing)
+
+    // Cancel returns to View mode and silently reloads v2 so both panes match
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByText('Fresh server body v2')).toBeInTheDocument()
+    expect(screen.getByText('v2 · Updated by you')).toBeInTheDocument()
+    expect(detailFetches).toBe(fetchesWhileEditing + 1)
   })
 })

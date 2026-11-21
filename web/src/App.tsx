@@ -324,6 +324,7 @@ function Workspace({
         setStatuses((s) => applyHello(s, e.statuses))
         void resync()
         if (panelFor.current) void loadPanel(panelFor.current)
+        setWikiRefreshTick((n) => n + 1)
         return
       }
       if (e.type === 'status') {

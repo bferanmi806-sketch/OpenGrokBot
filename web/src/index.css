@@ -1993,9 +1993,13 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   cursor: pointer;
   transition: background var(--t-fast), border-color var(--t-fast);
 }
-.wiki-item:hover {
+.wiki-item:hover:not(:disabled) {
   background: var(--bg-hover);
   border-color: var(--border-strong);
+}
+.wiki-item:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .wiki-item.active {
   background: var(--bg-active);
@@ -2229,6 +2233,12 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   border-radius: var(--r-md);
   background: var(--bg-raised);
   font-size: 13px;
+}
+.wiki-body pre,
+.wiki-body th,
+.wiki-body.markdown pre,
+.wiki-body.markdown th {
+  background: var(--bg-card);
 }
 .wiki-empty-body {
   margin: 0;
