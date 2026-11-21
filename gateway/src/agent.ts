@@ -1165,7 +1165,10 @@ function quietDigestForModel(payload: unknown): string {
     const item = (raw && typeof raw === 'object' ? raw : {}) as { routineName?: unknown; summary?: unknown }
     return { routineName: item.routineName ?? '', summary: item.summary ?? '' }
   })
-  return JSON.stringify({ itemCount: typeof p.itemCount === 'number' ? p.itemCount : items.length, items })
+  return JSON.stringify({
+    itemCount: typeof p.itemCount === 'number' && Number.isFinite(p.itemCount) ? p.itemCount : items.length,
+    items,
+  })
 }
 
 function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): ChatMsg {

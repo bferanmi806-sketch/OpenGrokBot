@@ -1182,7 +1182,11 @@ export function createApp(deps: AppDeps): GatewayApp {
     }
 
     if (decision === 'discard' && dataDir) {
-      await maybeProposeRuleFromDiscard(db, { approval, dataDir, hub, now: at })
+      try {
+        await maybeProposeRuleFromDiscard(db, { approval, dataDir, hub, now: at })
+      } catch (err) {
+        console.warn('[gateway] discard rule-proposal check failed:', err)
+      }
     }
 
     const bot = botById(approval.bot_id)
@@ -2248,8 +2252,27 @@ export function createApp(deps: AppDeps): GatewayApp {
   )
 
   app.post('/api/quiet-digest/flush', async (c) => {
-    const body = (await c.req.json().catch(() => null)) as { botId?: unknown } | null
-    const botId = typeof body?.botId === 'string' && body.botId.trim() ? body.botId.trim() : undefined
+    const raw = (await c.req.text()).trim()
+    let parsed: unknown = {}
+    if (raw !== '') {
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        return c.json({ error: 'invalid_body' }, 400)
+      }
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return c.json({ error: 'invalid_body' }, 400)
+    }
+    const body = parsed as { botId?: unknown }
+    let botId: string | undefined
+    if (body.botId !== undefined) {
+      if (typeof body.botId !== 'string' || body.botId.trim().length === 0) {
+        return c.json({ error: 'invalid_bot_id' }, 400)
+      }
+      botId = body.botId.trim()
+      if (!botById(botId)) return c.json({ error: 'unknown bot' }, 404)
+    }
     const { flushed, threads } = flushQuietDigestsNow({ ...(botId ? { botId } : {}), manual: true })
     return c.json({ flushed, threads })
   })
@@ -2278,8 +2301,13 @@ export function createApp(deps: AppDeps): GatewayApp {
     if (body?.decision !== 'accept' && body?.decision !== 'dismiss') {
       return c.json({ error: 'decision must be "accept" or "dismiss"', code: 'invalid_decision' }, 400)
     }
-    if (body.rule !== undefined && typeof body.rule !== 'string') {
-      return c.json({ error: 'rule must be a string', code: 'invalid_rule' }, 400)
+    if (body.rule !== undefined) {
+      if (body.decision === 'dismiss') {
+        return c.json({ error: 'rule can only be provided when accepting', code: 'invalid_rule' }, 400)
+      }
+      if (typeof body.rule !== 'string') {
+        return c.json({ error: 'rule must be a string', code: 'invalid_rule' }, 400)
+      }
     }
     const result = await resolveRuleProposal(db, {
       id,
