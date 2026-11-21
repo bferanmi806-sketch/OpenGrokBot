@@ -93,6 +93,12 @@ describe('multi-query RRF wiki search (rrf.ts)', () => {
     const duped = searchWikiRrf(db, { queries: ['Aurora', 'aurora', '  AURORA  ', '   ', '***'], now })
     expect(duped.map((h) => [h.id, h.score])).toEqual(single.map((h) => [h.id, h.score]))
 
+    // Reordered identical token sets ("aurora client" vs "client aurora") also deduplicate
+    const ordered = searchWikiRrf(db, { queries: ['aurora client'], now })
+    const reordered = searchWikiRrf(db, { queries: ['aurora client', 'client aurora', 'Client Aurora'], now })
+    expect(ordered).toHaveLength(1)
+    expect(reordered.map((h) => [h.id, h.score])).toEqual(ordered.map((h) => [h.id, h.score]))
+
     // Blank / punctuation-only queries return []
     expect(searchWikiRrf(db, { queries: ['', '   ', '*** ---'], now })).toEqual([])
     expect(searchWikiRrf(db, { queries: [], now })).toEqual([])
@@ -314,6 +320,81 @@ describe('multi-query RRF wiki search (rrf.ts)', () => {
       'Summary line',
     )
     expect(extractWikiSnippet({ title: 'Fallback   Title', summary: '', body: '' }, ['title'])).toBe('Fallback Title')
+    expect(extractWikiSnippet({ title: '', summary: '', body: '' }, ['anything'])).toBe('')
+
+    // Mixed-case & accented direct tokens match case-insensitively
+    expect(
+      extractWikiSnippet(
+        {
+          title: 'Mixed Case',
+          summary: '',
+          body: `${enPrefix}Target aurora milestone${enSuffix}`,
+        },
+        ['AuRoRa'],
+      ),
+    ).toContain('Target aurora milestone')
+    expect(
+      extractWikiSnippet(
+        {
+          title: 'ASCII Body',
+          summary: '',
+          body: `${enPrefix}Regional cafe hub${enSuffix}`,
+        },
+        ['CAFÉ'],
+      ),
+    ).toContain('Regional cafe hub')
+    expect(
+      extractWikiSnippet(
+        {
+          title: 'Accented Body',
+          summary: '',
+          body: `${enPrefix}Regional Café hub${enSuffix}`,
+        },
+        ['CAFE'],
+      ),
+    ).toContain('Regional Café hub')
+
+    // Emoji / UTF-16 surrogate pairs at slice boundaries and maxChars = 1 never emit lone surrogates
+    const hasLoneSurrogate = (s: string): boolean => {
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i)
+        if (c >= 0xd800 && c <= 0xdbff) {
+          const next = s.charCodeAt(i + 1)
+          if (!(next >= 0xdc00 && next <= 0xdfff)) return true
+          i += 1
+        } else if (c >= 0xdc00 && c <= 0xdfff) {
+          return true
+        }
+      }
+      return false
+    }
+    const emojiBody = `${'🚀'.repeat(120)}Aurora${'🎉'.repeat(120)}`
+    const emojiCentered = extractWikiSnippet({ title: '', summary: '', body: emojiBody }, ['aurora'])
+    expect(emojiCentered.length).toBeLessThanOrEqual(WIKI_SNIPPET_MAX_CHARS)
+    expect(emojiCentered).toContain('Aurora')
+    expect(hasLoneSurrogate(emojiCentered)).toBe(false)
+
+    const emojiNoMatch = extractWikiSnippet({ title: '', summary: '', body: '🚀'.repeat(150) }, ['nomatch'])
+    expect(emojiNoMatch.length).toBeLessThanOrEqual(WIKI_SNIPPET_MAX_CHARS)
+    expect(hasLoneSurrogate(emojiNoMatch)).toBe(false)
+
+    const emojiTiny = extractWikiSnippet({ title: '', summary: '', body: '🚀abc' }, ['nomatch'], 1)
+    expect(emojiTiny).toBe('')
+    expect(hasLoneSurrogate(emojiTiny)).toBe(false)
+
+    // >220-char spaceless token in body and as direct match token stays strictly bounded
+    const longSpaceless = `${'x'.repeat(140)}TARGET${'y'.repeat(140)}`
+    const spacelessCentered = extractWikiSnippet({ title: '', summary: '', body: longSpaceless }, ['target'])
+    expect(spacelessCentered.length).toBeLessThanOrEqual(WIKI_SNIPPET_MAX_CHARS)
+    expect(spacelessCentered).toContain('TARGET')
+
+    const hugeToken = 'z'.repeat(250)
+    const hugeTokenSnippet = extractWikiSnippet(
+      { title: '', summary: '', body: `prefix_${hugeToken}_suffix` },
+      [hugeToken],
+    )
+    expect(hugeTokenSnippet.length).toBeLessThanOrEqual(WIKI_SNIPPET_MAX_CHARS)
+    expect(hugeTokenSnippet).toContain('z'.repeat(100))
   })
 })
 
@@ -373,13 +454,15 @@ describe('/api/wiki REST API integration', () => {
     expect(badKindPost.status).toBe(400)
     expect(((await badKindPost.json()) as { code: string }).code).toBe('invalid_kind')
 
-    const badSlugPost = await app.request('/api/wiki', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ kind: 'client', slug: '../evil', title: 'Evil', body: 'x' }),
-    })
-    expect(badSlugPost.status).toBe(400)
-    expect(((await badSlugPost.json()) as { code: string }).code).toBe('invalid_wiki')
+    for (const badSlug of ['../evil', 'Acme Corp', 'UPPER', 'bad_slug', 123]) {
+      const badSlugPost = await app.request('/api/wiki', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'client', slug: badSlug, title: 'Evil', body: 'x' }),
+      })
+      expect(badSlugPost.status).toBe(400)
+      expect(((await badSlugPost.json()) as { code: string }).code).toBe('invalid_slug')
+    }
 
     const badTagsPost = await app.request('/api/wiki', {
       method: 'POST',
@@ -581,7 +664,99 @@ describe('/api/wiki REST API integration', () => {
     db.close()
   })
 
-  it('inherits gateway bearer auth protection on /api/wiki routes when token is configured', async () => {
+  it('enforces create-only 409 already_exists on POST /api/wiki, allows re-creating archived slugs, and supports search limit > 20', async () => {
+    const db = openDb(':memory:')
+    const dataDir = makeTempDir()
+    const hub = createHub()
+    const events: Array<{ type: string }> = []
+    hub.add({ send: (raw) => events.push(JSON.parse(raw) as { type: string }) })
+
+    let clockMs = Date.UTC(2026, 10, 20, 12, 0, 0)
+    const { app } = createApp({ db, llm: okLlm, dataDir, hub, now: () => new Date(clockMs) })
+
+    // Create explicit slug -> 201
+    const first = await app.request('/api/wiki', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'client', slug: 'acme-corp', title: 'Acme Corp', body: 'Initial' }),
+    })
+    expect(first.status).toBe(201)
+    expect(events).toHaveLength(1)
+
+    // Duplicate explicit slug on active page -> 409 already_exists (and no broadcast)
+    const dupSlug = await app.request('/api/wiki', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'client', slug: 'acme-corp', title: 'Different Title', body: 'Overwrite?' }),
+    })
+    expect(dupSlug.status).toBe(409)
+    expect(((await dupSlug.json()) as { code: string }).code).toBe('already_exists')
+    expect(events).toHaveLength(1)
+
+    // Create without slug -> 201; repeating same title without slug -> 409 already_exists
+    const cnFirst = await app.request('/api/wiki', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'project', title: '极光项目', body: 'Aurora' }),
+    })
+    expect(cnFirst.status).toBe(201)
+    const cnSlug = ((await cnFirst.json()) as { page: { slug: string } }).page.slug
+
+    const cnDup = await app.request('/api/wiki', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'project', title: '  极光项目  ', body: 'Duplicate?' }),
+    })
+    expect(cnDup.status).toBe(409)
+    expect(((await cnDup.json()) as { code: string }).code).toBe('already_exists')
+
+    // Archiving allows POST /api/wiki to re-create both explicit slug and omitted-slug title
+    expect((await app.request('/api/wiki/client/acme-corp', { method: 'DELETE' })).status).toBe(200)
+    expect((await app.request(`/api/wiki/project/${cnSlug}`, { method: 'DELETE' })).status).toBe(200)
+
+    clockMs += 5_000
+    const recreateExplicit = await app.request('/api/wiki', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'client', slug: 'acme-corp', title: 'Acme Reborn', body: 'Fresh' }),
+    })
+    expect(recreateExplicit.status).toBe(201)
+    const recreateExplicitJson = (await recreateExplicit.json()) as { page: { version: number; title: string } }
+    expect(recreateExplicitJson.page.version).toBe(2)
+    expect(recreateExplicitJson.page.title).toBe('Acme Reborn')
+
+    const recreateCn = await app.request('/api/wiki', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'project', title: '极光项目', body: 'Aurora Reborn' }),
+    })
+    expect(recreateCn.status).toBe(201)
+    expect(((await recreateCn.json()) as { page: { slug: string } }).page.slug).toBe(cnSlug)
+
+    // GET /api/wiki?q=...&limit=25 returns > 20 hits (up to MAX_LIST_LIMIT = 200)
+    for (let i = 1; i <= 30; i++) {
+      upsertWikiPage(
+        db,
+        {
+          kind: 'topic',
+          slug: `bulk-${String(i).padStart(2, '0')}`,
+          title: `Bulk Entry ${i}`,
+          body: 'sharedbulkterm across thirty pages',
+          editedBy: 'operator',
+        },
+        { now: clockMs + i },
+      )
+    }
+    const wideSearch = await app.request('/api/wiki?q=sharedbulkterm&limit=25')
+    expect(wideSearch.status).toBe(200)
+    const wideJson = (await wideSearch.json()) as { pages: WikiSearchHit[]; total: number }
+    expect(wideJson.pages).toHaveLength(25)
+    expect(wideJson.total).toBe(25)
+
+    db.close()
+  })
+
+  it('inherits gateway bearer auth and CSRF (Origin + Content-Type) protection on /api/wiki routes when token is configured', async () => {
     const db = openDb(':memory:')
     const { app } = createApp({ db, llm: okLlm, token: 'wiki-secret-token' })
 
@@ -593,6 +768,73 @@ describe('/api/wiki REST API integration', () => {
     })
     expect(authed.status).toBe(200)
     expect(await authed.json()).toEqual({ pages: [], total: 0 })
+
+    // Cross-origin mutation refused -> 403
+    const badOriginPost = await app.request('http://127.0.0.1:3000/api/wiki', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer wiki-secret-token',
+        Origin: 'http://evil.example',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ kind: 'client', slug: 'acme', title: 'Acme', body: 'x' }),
+    })
+    expect(badOriginPost.status).toBe(403)
+
+    const badOriginPut = await app.request('http://127.0.0.1:3000/api/wiki/client/acme', {
+      method: 'PUT',
+      headers: {
+        Authorization: 'Bearer wiki-secret-token',
+        Origin: 'http://evil.example',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ title: 'Acme', body: 'x' }),
+    })
+    expect(badOriginPut.status).toBe(403)
+
+    const badOriginDelete = await app.request('http://127.0.0.1:3000/api/wiki/client/acme', {
+      method: 'DELETE',
+      headers: {
+        Authorization: 'Bearer wiki-secret-token',
+        Origin: 'http://evil.example',
+      },
+    })
+    expect(badOriginDelete.status).toBe(403)
+
+    // Non-JSON Content-Type on POST/PUT refused -> 415
+    const badContentTypePost = await app.request('http://127.0.0.1:3000/api/wiki', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer wiki-secret-token',
+        Origin: 'http://127.0.0.1:3000',
+        'Content-Type': 'text/plain',
+      },
+      body: JSON.stringify({ kind: 'client', slug: 'acme', title: 'Acme', body: 'x' }),
+    })
+    expect(badContentTypePost.status).toBe(415)
+
+    const badContentTypePut = await app.request('http://127.0.0.1:3000/api/wiki/client/acme', {
+      method: 'PUT',
+      headers: {
+        Authorization: 'Bearer wiki-secret-token',
+        Origin: 'http://127.0.0.1:3000',
+        'Content-Type': 'text/plain',
+      },
+      body: JSON.stringify({ title: 'Acme', body: 'x' }),
+    })
+    expect(badContentTypePut.status).toBe(415)
+
+    // Same-origin JSON with valid token succeeds -> 201
+    const okPost = await app.request('http://127.0.0.1:3000/api/wiki', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer wiki-secret-token',
+        Origin: 'http://127.0.0.1:3000',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ kind: 'client', slug: 'acme', title: 'Acme', body: 'x' }),
+    })
+    expect(okPost.status).toBe(201)
 
     db.close()
   })

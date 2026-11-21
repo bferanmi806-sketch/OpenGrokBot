@@ -14,6 +14,7 @@ import {
   MAX_WIKI_TAGS,
   MAX_WIKI_TITLE_CHARS,
   parseWikiPageId,
+  WikiConflictError,
   WikiValidationError,
   type WikiKind,
   type WikiPageDetail,
@@ -245,7 +246,7 @@ export function allocateWikiSlug(
 export function upsertWikiPage(
   db: Db,
   input: WikiUpsertInput,
-  opts: { dataDir?: string; now?: number } = {},
+  opts: { dataDir?: string; now?: number; createOnly?: boolean } = {},
 ): { page: WikiPageDetail; created: boolean } {
   if (!isWikiKind(input.kind)) {
     throw new WikiValidationError(`Invalid wiki kind: ${String(input.kind)}`)
@@ -293,6 +294,10 @@ export function upsertWikiPage(
     const slug = allocateWikiSlug(db, input.kind, input.slug, title)
     const id = `${input.kind}/${slug}`
     const existing = db.prepare('SELECT * FROM wiki_pages WHERE id = ?').get(id) as RawWikiPageRow | undefined
+
+    if (opts.createOnly && existing && existing.archived_at === null) {
+      throw new WikiConflictError(`Wiki page already exists: ${id}`)
+    }
 
     const created = !existing || existing.archived_at !== null
     const nextVersion = existing ? existing.version + 1 : 1

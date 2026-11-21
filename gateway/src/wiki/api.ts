@@ -13,6 +13,7 @@ import {
 import {
   isWikiKind,
   isWikiSlug,
+  WikiConflictError,
   WikiValidationError,
   type WikiKind,
 } from './types.js'
@@ -82,14 +83,19 @@ export function mountWiki(app: Hono, deps: WikiApiDeps): void {
     let requestedSlug: string | undefined
     if (body.slug !== undefined) {
       if (typeof body.slug !== 'string') {
-        return c.json({ error: 'Wiki slug must be a string', code: 'invalid_wiki' }, 400)
+        return c.json({ error: 'Wiki slug must be a string', code: 'invalid_slug' }, 400)
       }
       const trimmed = body.slug.trim()
-      if (trimmed) requestedSlug = trimmed
+      if (trimmed) {
+        if (!isWikiSlug(trimmed)) {
+          return c.json({ error: `Invalid wiki slug: ${trimmed}`, code: 'invalid_slug' }, 400)
+        }
+        requestedSlug = trimmed
+      }
     }
 
     try {
-      const { page, created } = upsertWikiPage(
+      const { page } = upsertWikiPage(
         db,
         {
           kind: body.kind,
@@ -102,12 +108,15 @@ export function mountWiki(app: Hono, deps: WikiApiDeps): void {
           editedBy: 'operator',
           sourceTainted: false,
         },
-        { dataDir, now: clock() },
+        { dataDir, now: clock(), createOnly: true },
       )
       hub?.broadcast({ type: 'wiki_changed' })
       const revisions = listWikiRevisions(db, page.id)
-      return c.json({ page, revisions }, created ? 201 : 200)
+      return c.json({ page, revisions }, 201)
     } catch (err) {
+      if (err instanceof WikiConflictError) {
+        return c.json({ error: err.message, code: 'already_exists' }, 409)
+      }
       if (err instanceof WikiValidationError) {
         return c.json({ error: err.message, code: 'invalid_wiki' }, 400)
       }

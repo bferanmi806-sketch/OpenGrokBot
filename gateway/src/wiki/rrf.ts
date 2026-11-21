@@ -53,14 +53,25 @@ function isLowSurrogate(code: number): boolean {
   return code >= 0xdc00 && code <= 0xdfff
 }
 
+function foldUnicode(text: string): string {
+  return text
+    .normalize('NFKC')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+}
+
 function findFirstMatch(text: string, tokens: readonly string[]): { index: number; length: number } | null {
   if (!text || tokens.length === 0) return null
 
   const lower = text.toLowerCase()
   let bestIdx = -1
   let bestLen = 0
-  for (const tok of tokens) {
-    if (!tok) continue
+  let hasNonAsciiToken = false
+  for (const rawTok of tokens) {
+    if (!rawTok) continue
+    if (/[^\x00-\x7f]/.test(rawTok)) hasNonAsciiToken = true
+    const tok = rawTok.toLowerCase()
     const idx = lower.indexOf(tok)
     if (idx !== -1 && (bestIdx === -1 || idx < bestIdx || (idx === bestIdx && tok.length > bestLen))) {
       bestIdx = idx
@@ -71,19 +82,44 @@ function findFirstMatch(text: string, tokens: readonly string[]): { index: numbe
     return { index: bestIdx, length: bestLen }
   }
 
+  const textIsAscii = !/[^\x00-\x7f]/.test(text)
+  if (textIsAscii && !hasNonAsciiToken) return null
+
+  const foldedTokens: string[] = []
+  for (const rawTok of tokens) {
+    if (!rawTok) continue
+    const foldedTok = /[^\x00-\x7f]/.test(rawTok) ? foldUnicode(rawTok) : rawTok.toLowerCase()
+    if (foldedTok) foldedTokens.push(foldedTok)
+  }
+  if (foldedTokens.length === 0) return null
+
+  // Pure ASCII text needs no char-by-char Unicode folding even when tokens contain diacritics
+  if (textIsAscii) {
+    for (const tok of foldedTokens) {
+      const idx = lower.indexOf(tok)
+      if (idx !== -1 && (bestIdx === -1 || idx < bestIdx || (idx === bestIdx && tok.length > bestLen))) {
+        bestIdx = idx
+        bestLen = tok.length
+      }
+    }
+    return bestIdx !== -1 ? { index: bestIdx, length: bestLen } : null
+  }
+
   // Diacritic / NFKC fallback (e.g. matching "cafe" against "Café" or fullwidth Latin)
   let folded = ''
   const origStart: number[] = []
   const origEnd: number[] = []
   for (let i = 0; i < text.length; ) {
     const cp = text.codePointAt(i)!
+    if (cp < 0x80) {
+      folded += String.fromCharCode(cp >= 0x41 && cp <= 0x5a ? cp + 32 : cp)
+      origStart.push(i)
+      origEnd.push(i + 1)
+      i += 1
+      continue
+    }
     const charLen = cp > 0xffff ? 2 : 1
-    const piece = text
-      .slice(i, i + charLen)
-      .normalize('NFKC')
-      .normalize('NFKD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase()
+    const piece = foldUnicode(text.slice(i, i + charLen))
     for (let j = 0; j < piece.length; j++) {
       folded += piece[j]
       origStart.push(i)
@@ -92,8 +128,7 @@ function findFirstMatch(text: string, tokens: readonly string[]): { index: numbe
     i += charLen
   }
 
-  for (const tok of tokens) {
-    if (!tok) continue
+  for (const tok of foldedTokens) {
     const fIdx = folded.indexOf(tok)
     if (fIdx !== -1) {
       const start = origStart[fIdx]!
@@ -116,7 +151,10 @@ function sliceCenteredSnippet(
 ): string {
   if (!clean) return ''
   if (clean.length <= maxChars) return clean
-  if (maxChars <= 1) return clean.slice(0, Math.max(0, maxChars))
+  if (maxChars <= 1) {
+    if (maxChars <= 0) return ''
+    return isHighSurrogate(clean.charCodeAt(0)) ? '' : clean.slice(0, 1)
+  }
 
   if (!match) {
     let end = maxChars - 1
@@ -223,8 +261,9 @@ export function searchWikiRrf(
 
     const andQuery = buildFtsQuery(trimmed, 'and')
     if (!andQuery) continue
-    if (seenMatch.has(andQuery.match)) continue
-    seenMatch.add(andQuery.match)
+    const tokenSetKey = [...andQuery.tokens].sort().join('\0')
+    if (seenMatch.has(tokenSetKey)) continue
+    seenMatch.add(tokenSetKey)
 
     preparedQueries.push({ raw: trimmed, andMatch: andQuery.match, tokens: andQuery.tokens })
     if (preparedQueries.length >= MAX_RRF_QUERIES) break

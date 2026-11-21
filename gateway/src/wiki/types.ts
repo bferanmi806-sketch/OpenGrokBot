@@ -41,6 +41,13 @@ export class WikiValidationError extends Error {
   }
 }
 
+export class WikiConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'WikiConflictError'
+  }
+}
+
 export type WikiPageSummary = {
   id: string
   kind: WikiKind
