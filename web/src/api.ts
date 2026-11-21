@@ -2,7 +2,8 @@ import { fileToBase64 } from './attachments'
 import type {
   AboutInfo, AppKey, ApprovalEditInput, AttachmentPayload, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
   Conversation, CreateMcpServerInput, FieldError, GatewayEvent, ImportMcpServersInput, ImportMcpServersResult, McpServersSnapshot,
-  McpServerView, Message, ProviderPreset, RoutineAction, RuleDuration, ServerEvent, SettingsView, SetupInfo, UpdateMcpServerPatch,
+  McpServerView, Message, ProviderPreset, QuietDigestBotSummary, QuietDigestFlushResponse, QuietDigestSummary, ResolveRuleProposalResponse,
+  RoutineAction, RuleDuration, RuleProposalStatus, RuleProposalView, ServerEvent, SettingsView, SetupInfo, UpdateMcpServerPatch,
   WikiCreateInput, WikiKind, WikiListResponse, WikiPageResponse, WikiSaveInput,
 } from './types'
 
@@ -12,6 +13,12 @@ export type {
   GatewayEvent,
   ImportMcpServersInput,
   ImportMcpServersResult,
+  QuietDigestBotSummary,
+  QuietDigestFlushResponse,
+  QuietDigestSummary,
+  ResolveRuleProposalResponse,
+  RuleProposalStatus,
+  RuleProposalView,
   ServerEvent,
   UpdateMcpServerPatch,
   WikiCreateInput,
@@ -353,6 +360,41 @@ export async function revertWikiPage(kind: WikiKind, slug: string, version: numb
 
 export async function deleteWikiPage(kind: WikiKind, slug: string): Promise<void> {
   await send('DELETE', `/api/wiki/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}`, undefined, { strict: true })
+}
+
+/** 免打扰晨报摘要与待投递数量 */
+export function fetchQuietDigest(): Promise<QuietDigestSummary> {
+  return getApiJson<QuietDigestSummary>('/api/quiet-digest')
+}
+
+/** 立即投递免打扰期间暂存的晨报更新（可按同事筛选） */
+export async function flushQuietDigest(botId?: string): Promise<QuietDigestFlushResponse> {
+  const res = await send('POST', '/api/quiet-digest/flush', botId ? { botId } : {}, { strict: true })
+  return res.json() as Promise<QuietDigestFlushResponse>
+}
+
+/** 查询规矩提议列表（可按同事或状态筛选） */
+export function fetchRuleProposals(opts?: {
+  botId?: string
+  status?: RuleProposalStatus
+}): Promise<{ proposals: RuleProposalView[] }> {
+  const params = new URLSearchParams()
+  const botId = opts?.botId?.trim()
+  if (botId) params.set('botId', botId)
+  if (opts?.status) params.set('status', opts.status)
+  const qs = params.toString()
+  return getApiJson<{ proposals: RuleProposalView[] }>(qs ? `/api/rule-proposals?${qs}` : '/api/rule-proposals')
+}
+
+/** 接受（可内联编辑规矩文本）或忽略一条规矩提议 */
+export async function resolveRuleProposal(
+  id: number,
+  decision: 'accept' | 'dismiss',
+  rule?: string,
+): Promise<ResolveRuleProposalResponse> {
+  const body = decision === 'accept' && rule !== undefined ? { decision, rule } : { decision }
+  const res = await send('POST', `/api/rule-proposals/${id}`, body, { strict: true })
+  return res.json() as Promise<ResolveRuleProposalResponse>
 }
 
 /** 首次启动要不要出向导；老网关没有这个路由（或出了错）就当不用，绝不因此挡住界面 */

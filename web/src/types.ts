@@ -246,7 +246,7 @@ export type ApprovalResolvedPayload = {
   edited?: boolean
 }
 export type MemoryPayload = { rule: string; diff: string; total: number; removed?: boolean; by?: 'operator' }
-export type RoutineMode = 'act' | 'watch'
+export type RoutineMode = 'act' | 'watch' | 'prepare'
 export type RoutinePayload = {
   routineId: number
   name: string
@@ -371,6 +371,8 @@ export type MessageKind =
   | 'question'
   | 'webhook'
   | 'attachment'
+  | 'quiet_digest'
+  | 'rule_proposal'
 
 export type Message = {
   id: number
@@ -392,6 +394,8 @@ export type Message = {
     | WebhookPayload
     | AttachmentPayload
     | NoticePayload
+    | QuietDigestPayload
+    | RuleProposalPayload
     | null
   created_at: number
 }
@@ -432,6 +436,7 @@ export type GatewayEvent =
   | { type: 'connectors_changed' }
   | { type: 'mcp_changed' }
   | { type: 'wiki_changed' }
+  | { type: 'quiet_digest_changed' }
 
 export type ServerEvent = GatewayEvent
 
@@ -479,6 +484,9 @@ export type SettingsView = {
     computers: 'auto' | 'docker' | 'local'
     browserMirror: string
     checkUpdates: boolean
+    quietHoursEnabled?: boolean
+    quietHoursStart?: string
+    quietHoursEnd?: string
   }
   sources: Record<string, 'env' | 'saved' | 'default'>
   apiKey: { set: boolean; masked: string; source: 'env' | 'file' | 'none' }
@@ -745,4 +753,79 @@ export type WikiSaveInput = {
 export type WikiCreateInput = WikiSaveInput & {
   kind: WikiKind
   slug?: string
+}
+
+export type QuietDigestEntry = {
+  id: number
+  routineId: number | null
+  routineName: string
+  routineMode: RoutineMode
+  kind: 'report' | 'text'
+  summary: string
+  report?: ReportPayload
+  text?: string
+  createdAt: number
+}
+
+export type QuietDigestPayload = {
+  windowStart: string
+  windowEnd: string
+  itemCount: number
+  items: QuietDigestEntry[]
+  flushedManually?: boolean
+}
+
+export type QuietDigestBotSummary = {
+  botId: string
+  count: number
+  latestAt: number
+}
+
+export type QuietDigestSummary = {
+  enabled: boolean
+  active: boolean
+  start: string
+  end: string
+  timeZone: string
+  pendingCount: number
+  byBot: QuietDigestBotSummary[]
+}
+
+export type QuietDigestFlushResponse = {
+  flushed: number
+  threads: string[]
+}
+
+export type RuleProposalSource = 'agent' | 'discard_pattern'
+export type RuleProposalStatus = 'pending' | 'accepted' | 'dismissed'
+
+export type RuleProposalPayload = {
+  proposalId: number
+  rule: string
+  reason: string
+  source: RuleProposalSource
+  sourceTainted: boolean
+  status: RuleProposalStatus
+  edited?: boolean
+  resolvedAt?: number
+}
+
+export type RuleProposalView = {
+  id: number
+  botId: string
+  threadId: string
+  rule: string
+  reason: string
+  source: RuleProposalSource
+  sourceTainted: boolean
+  status: RuleProposalStatus
+  messageId: number | null
+  createdAt: number
+  resolvedAt: number | null
+}
+
+export type ResolveRuleProposalResponse = {
+  ok: true
+  proposal: RuleProposalView
+  memoryUpdated: boolean
 }

@@ -8,10 +8,14 @@ import {
   deleteMcpServer,
   deleteWikiPage,
   fetchMcpServers,
+  fetchQuietDigest,
+  fetchRuleProposals,
   fetchWiki,
   fetchWikiPage,
+  flushQuietDigest,
   importMcpServers,
   resolveApproval,
+  resolveRuleProposal,
   revertWikiPage,
   saveWikiPage,
   setBotMcpServers,
@@ -24,6 +28,15 @@ import type {
   BotRefPayload,
   GatewayEvent,
   McpServerView,
+  Message,
+  QuietDigestFlushResponse,
+  QuietDigestPayload,
+  QuietDigestSummary,
+  ResolveRuleProposalResponse,
+  RoutineMode,
+  RuleProposalPayload,
+  RuleProposalView,
+  SettingsView,
   WikiListResponse,
   WikiPageDetail,
   WikiPageResponse,
@@ -362,6 +375,80 @@ describe('the Chinese dictionary', () => {
     expect(translate('zh-CN', 'wiki.confirmRevert', { title: '极光科技', version: 2 })).toBe('确定将「极光科技」回滚到 v2？')
     expect(translate('en', 'wiki.history', { count: 4 })).toBe('History (4)')
     expect(translate('zh-CN', 'wiki.history', { count: 4 })).toBe('历史版本（4）')
+  })
+
+  it('includes proactive prepare mode, rule proposal, quiet digest, Quiet Hours settings, and sidebar preview keys in both languages with placeholder parity', () => {
+    const requiredProactiveKeys: MessageKey[] = [
+      'routine.createdPrepare',
+      'routine.prepareHint',
+      'panel.prepareTag',
+      'panel.trigger.prepare',
+      'ruleProposal.title',
+      'ruleProposal.sourceDiscard',
+      'ruleProposal.sourceAgent',
+      'ruleProposal.taintedBadge',
+      'ruleProposal.ruleLabel',
+      'ruleProposal.rulePlaceholder',
+      'ruleProposal.accept',
+      'ruleProposal.saving',
+      'ruleProposal.dismiss',
+      'ruleProposal.dismissing',
+      'ruleProposal.accepted',
+      'ruleProposal.acceptedEdited',
+      'ruleProposal.dismissed',
+      'ruleProposal.emptyError',
+      'ruleProposal.tooLongError',
+      'ruleProposal.failed',
+      'ruleProposal.hint',
+      'quietDigest.titleOne',
+      'quietDigest.titleMany',
+      'quietDigest.window',
+      'quietDigest.deliveredEarly',
+      'quietDigest.routineFallback',
+      'settings.quietHours.title',
+      'settings.quietHours.enable',
+      'settings.quietHours.hint',
+      'settings.quietHours.start',
+      'settings.quietHours.end',
+      'settings.quietHours.timezone',
+      'settings.quietHours.sameTimeWarning',
+      'settings.quietHours.activeNow',
+      'settings.quietHours.pendingOne',
+      'settings.quietHours.pendingMany',
+      'settings.quietHours.pendingNone',
+      'settings.quietHours.deliverNow',
+      'settings.quietHours.delivering',
+      'settings.quietHours.delivered',
+      'settings.quietHours.deliverFailed',
+      'sidebar.preview.ruleProposal',
+      'sidebar.preview.quietDigestOne',
+      'sidebar.preview.quietDigestMany',
+    ]
+    for (const key of requiredProactiveKeys) {
+      expect(en[key]).toBeTruthy()
+      expect(zhCN[key]).toBeTruthy()
+      expect({ key, names: placeholders(zhCN[key]) }).toEqual({ key, names: placeholders(en[key]) })
+    }
+    expect(en['routine.createdPrepare']).toBe('Prepare routine created')
+    expect(zhCN['routine.createdPrepare']).toBe('已创建备料任务')
+    expect(en['panel.prepareTag']).toBe('prepare')
+    expect(zhCN['panel.prepareTag']).toBe('备料')
+    expect(en['ruleProposal.taintedBadge']).toBe('External source — review carefully')
+    expect(zhCN['ruleProposal.taintedBadge']).toBe('来自外部内容，请仔细核对')
+    expect(translate('en', 'ruleProposal.tooLongError', { max: 300 })).toBe('Rule must be 300 characters or fewer.')
+    expect(translate('zh-CN', 'ruleProposal.tooLongError', { max: 300 })).toBe('规矩不能超过 300 个字符。')
+    expect(translate('en', 'quietDigest.titleMany', { count: 3 })).toBe('Morning digest · 3 updates')
+    expect(translate('zh-CN', 'quietDigest.titleMany', { count: 3 })).toBe('晨报汇总 · 3 条更新')
+    expect(translate('en', 'quietDigest.window', { start: '22:00', end: '08:00' })).toBe('Held during Quiet Hours (22:00–08:00)')
+    expect(translate('zh-CN', 'quietDigest.window', { start: '22:00', end: '08:00' })).toBe('免打扰时段（22:00–08:00）暂存')
+    expect(translate('en', 'settings.quietHours.timezone', { tz: 'Asia/Shanghai' })).toBe('Timezone: Asia/Shanghai')
+    expect(translate('zh-CN', 'settings.quietHours.timezone', { tz: 'Asia/Shanghai' })).toBe('时区：Asia/Shanghai')
+    expect(translate('en', 'settings.quietHours.pendingMany', { count: 4 })).toBe('4 updates waiting for the morning digest')
+    expect(translate('zh-CN', 'settings.quietHours.pendingMany', { count: 4 })).toBe('4 条更新正等待晨报投递')
+    expect(translate('en', 'settings.quietHours.delivered', { count: 2 })).toBe('Delivered 2 buffered updates.')
+    expect(translate('zh-CN', 'settings.quietHours.delivered', { count: 2 })).toBe('已投递 2 条暂存更新。')
+    expect(translate('en', 'sidebar.preview.quietDigestMany', { count: 5 })).toBe('Morning digest (5 updates)')
+    expect(translate('zh-CN', 'sidebar.preview.quietDigestMany', { count: 5 })).toBe('晨报汇总（5 条更新）')
   })
 })
 
@@ -766,5 +853,210 @@ describe('Wiki API client', () => {
     const ref: BotRefPayload = { from: 'researcher', fromName: 'Researcher', content: 'Summary', tainted: true }
     expect(ev.type).toBe('wiki_changed')
     expect(ref.tainted).toBe(true)
+  })
+})
+
+describe('Proactive Quiet Digest & Rule Proposals API client', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  const sampleSummary: QuietDigestSummary = {
+    enabled: true,
+    active: true,
+    start: '22:00',
+    end: '08:00',
+    timeZone: 'Asia/Shanghai',
+    pendingCount: 2,
+    byBot: [{ botId: 'chief', count: 2, latestAt: 1700000000000 }],
+  }
+
+  const sampleFlush: QuietDigestFlushResponse = {
+    flushed: 2,
+    threads: ['dm:chief'],
+  }
+
+  const sampleProposal: RuleProposalView = {
+    id: 7,
+    botId: 'chief',
+    threadId: 'dm:chief',
+    rule: 'Do not send emails to promos@example.com unless explicitly asked',
+    reason: 'You discarded 2 similar email requests for promos@example.com in the past 14 days.',
+    source: 'discard_pattern',
+    sourceTainted: false,
+    status: 'pending',
+    messageId: 91,
+    createdAt: 1700000000000,
+    resolvedAt: null,
+  }
+
+  it('fetches and flushes quiet digests, handling botId filter, ApiError, and SignedOut', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(sampleSummary), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'not found' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(sampleFlush), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(sampleFlush), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'unknown bot' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(await fetchQuietDigest()).toEqual(sampleSummary)
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/quiet-digest')
+
+    const summaryErr = await fetchQuietDigest().catch((e: unknown) => e)
+    expect(summaryErr).toBeInstanceOf(ApiError)
+    expect(summaryErr).toMatchObject({ status: 404, message: 'not found' })
+
+    await expect(fetchQuietDigest()).rejects.toBeInstanceOf(SignedOut)
+
+    expect(await flushQuietDigest()).toEqual(sampleFlush)
+    expect(fetchMock.mock.calls[3]![0]).toBe('/api/quiet-digest/flush')
+    expect((fetchMock.mock.calls[3]![1] as RequestInit).method).toBe('POST')
+    expect(JSON.parse(String((fetchMock.mock.calls[3]![1] as RequestInit).body))).toEqual({})
+
+    expect(await flushQuietDigest('chief')).toEqual(sampleFlush)
+    expect(fetchMock.mock.calls[4]![0]).toBe('/api/quiet-digest/flush')
+    expect(JSON.parse(String((fetchMock.mock.calls[4]![1] as RequestInit).body))).toEqual({ botId: 'chief' })
+
+    const flushErr = await flushQuietDigest('missing').catch((e: unknown) => e)
+    expect(flushErr).toBeInstanceOf(ApiError)
+    expect(flushErr).toMatchObject({ status: 404, message: 'unknown bot' })
+
+    await expect(flushQuietDigest()).rejects.toBeInstanceOf(SignedOut)
+  })
+
+  it('lists and resolves rule proposals with query params, optional edited rule, ApiError codes, and SignedOut', async () => {
+    const acceptedResponse: ResolveRuleProposalResponse = {
+      ok: true,
+      proposal: { ...sampleProposal, status: 'accepted', rule: 'Edited standing rule', resolvedAt: 1700000100000 },
+      memoryUpdated: true,
+    }
+    const dismissedResponse: ResolveRuleProposalResponse = {
+      ok: true,
+      proposal: { ...sampleProposal, status: 'dismissed', resolvedAt: 1700000200000 },
+      memoryUpdated: false,
+    }
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ proposals: [sampleProposal] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ proposals: [sampleProposal] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ proposals: [sampleProposal] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'invalid status' }), { status: 400 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(acceptedResponse), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(acceptedResponse), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(dismissedResponse), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'rule proposal already resolved', code: 'settled' }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'invalid rule', code: 'invalid_rule' }), { status: 400 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(await fetchRuleProposals()).toEqual({ proposals: [sampleProposal] })
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/rule-proposals')
+
+    expect(await fetchRuleProposals({ botId: '   ' })).toEqual({ proposals: [sampleProposal] })
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/rule-proposals')
+
+    expect(await fetchRuleProposals({ botId: 'chief', status: 'pending' })).toEqual({ proposals: [sampleProposal] })
+    const url = new URL(String(fetchMock.mock.calls[2]![0]), 'http://localhost')
+    expect(url.pathname).toBe('/api/rule-proposals')
+    expect(url.searchParams.get('botId')).toBe('chief')
+    expect(url.searchParams.get('status')).toBe('pending')
+
+    const listErr = await fetchRuleProposals().catch((e: unknown) => e)
+    expect(listErr).toBeInstanceOf(ApiError)
+    expect(listErr).toMatchObject({ status: 400, message: 'invalid status' })
+
+    await expect(fetchRuleProposals()).rejects.toBeInstanceOf(SignedOut)
+
+    expect(await resolveRuleProposal(7, 'accept')).toEqual(acceptedResponse)
+    expect(fetchMock.mock.calls[5]![0]).toBe('/api/rule-proposals/7')
+    expect((fetchMock.mock.calls[5]![1] as RequestInit).method).toBe('POST')
+    expect(JSON.parse(String((fetchMock.mock.calls[5]![1] as RequestInit).body))).toEqual({ decision: 'accept' })
+
+    expect(await resolveRuleProposal(7, 'accept', 'Edited standing rule')).toEqual(acceptedResponse)
+    expect(JSON.parse(String((fetchMock.mock.calls[6]![1] as RequestInit).body))).toEqual({
+      decision: 'accept',
+      rule: 'Edited standing rule',
+    })
+
+    // Dismiss must omit rule even if a caller passes one
+    expect(await resolveRuleProposal(7, 'dismiss', 'ignored text')).toEqual(dismissedResponse)
+    expect(JSON.parse(String((fetchMock.mock.calls[7]![1] as RequestInit).body))).toEqual({ decision: 'dismiss' })
+
+    const settledErr = await resolveRuleProposal(7, 'accept').catch((e: unknown) => e)
+    expect(settledErr).toBeInstanceOf(ApiError)
+    expect(settledErr).toMatchObject({ status: 409, code: 'settled' })
+
+    const invalidErr = await resolveRuleProposal(7, 'accept', '').catch((e: unknown) => e)
+    expect(invalidErr).toBeInstanceOf(ApiError)
+    expect(invalidErr).toMatchObject({ status: 400, code: 'invalid_rule' })
+
+    await expect(resolveRuleProposal(7, 'dismiss')).rejects.toBeInstanceOf(SignedOut)
+
+    // Verify Phase 5 extended types compile and match gateway shapes
+    const mode: RoutineMode = 'prepare'
+    const digestPayload: QuietDigestPayload = {
+      windowStart: '22:00',
+      windowEnd: '08:00',
+      itemCount: 1,
+      items: [{
+        id: 1,
+        routineId: 10,
+        routineName: 'Morning prep',
+        routineMode: mode,
+        kind: 'text',
+        summary: 'Brief ready',
+        text: 'Brief ready',
+        createdAt: 1700000000000,
+      }],
+      flushedManually: true,
+    }
+    const proposalPayload: RuleProposalPayload = {
+      proposalId: 7,
+      rule: sampleProposal.rule,
+      reason: sampleProposal.reason,
+      source: 'agent',
+      sourceTainted: true,
+      status: 'pending',
+    }
+    const digestMsg: Message = {
+      id: 100,
+      thread_id: 'dm:chief',
+      sender: 'chief',
+      kind: 'quiet_digest',
+      content: '',
+      payload: digestPayload,
+      created_at: 1700000000000,
+    }
+    const proposalMsg: Message = {
+      id: 101,
+      thread_id: 'dm:chief',
+      sender: 'chief',
+      kind: 'rule_proposal',
+      content: '',
+      payload: proposalPayload,
+      created_at: 1700000000000,
+    }
+    const ev: GatewayEvent = { type: 'quiet_digest_changed' }
+    const settingsMinimal: SettingsView['values'] = {
+      provider: 'openai',
+      baseURL: 'https://api.openai.com/v1',
+      model: 'gpt-5',
+      vision: true,
+      language: 'en',
+      computers: 'auto',
+      browserMirror: '',
+      checkUpdates: true,
+    }
+    const settingsQuiet: SettingsView['values'] = {
+      ...settingsMinimal,
+      quietHoursEnabled: true,
+      quietHoursStart: '22:00',
+      quietHoursEnd: '08:00',
+    }
+    expect(digestMsg.kind).toBe('quiet_digest')
+    expect(proposalMsg.kind).toBe('rule_proposal')
+    expect(ev.type).toBe('quiet_digest_changed')
+    expect(settingsQuiet.quietHoursEnabled).toBe(true)
   })
 })
