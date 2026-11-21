@@ -23,6 +23,7 @@
 | group / room | 群聊 / 群 | |
 | mention (@) | 点名 | 群里打 @ 叫某位同事；不说「提及」「艾特」 |
 | thread | 对话 | 不说「线程」「会话」 |
+| thread (Slack) | 话题串 | Slack 频道里的 thread；OpenSuperBot 自己的 thread 仍叫「对话」 |
 | AI models | AI 模型 | 设置里管服务商和 key 的那一块 |
 | (model) connection | 连接 | 一家服务商 + 一个 key + 默认模型；没选过的同事用「默认连接」 |
 | connector | 连接器 | Gmail、Outlook、Notion、Slack 这些外部应用的连接；总弹窗分「应用」和「MCP 服务」两栏 |
@@ -44,6 +45,9 @@
 | approval | 审批 | 「等你审批」 |
 | read-only / needs approval | 只读 / 需审批 | MCP 工具的调用权限（只读直接跑，需审批先问你） |
 | approve / discard | 批准 / 驳回 | discard 不说「丢弃」 |
+| approve edited | 按修改批准 | 在审批卡片里修改内容后按修改结果批准 |
+| edited by you | 你已修改 | 操作者在审批卡片里修改后批准的标记（对话记录行内简写为「已修改」） |
+| reset (edit form) | 还原 | 审批编辑表单里恢复成同事原始草稿的按钮；不说「重置」 |
 | always allow | 一直放行 | 点了就存一条放行规矩 |
 | revoke | 撤销 | |
 | standing rule (memory) | 长期规矩 | 同事记在 MEMORY.md 里的；不说「规则」，免得和放行规矩混 |
