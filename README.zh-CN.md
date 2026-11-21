@@ -24,18 +24,28 @@ Docker 时，就是你 Mac、Linux 或 Windows 机器上它自己的浏览器和
 后面接你选的模型：Claude、OpenAI、Gemini、Grok、DeepSeek、Kimi、通义、智谱、MiniMax、本地 Ollama，或任何
 OpenAI 兼容的模型。
 
-![同事的线程：它汇报干了什么、把要出门的动作扣住、把看到的画面贴回来](assets/screenshot-thread.png)
+![同事的线程：统一格式汇报、支持内联改草稿的审批卡片、写入 MEMORY.md 前的规矩提议，以及可随时纠偏的实时后台任务](assets/screenshot-thread.png)
 
 <table>
 <tr>
-<td width="33%"><img src="assets/screenshot-group.png" alt="群线程：每位同事各报各的，幕僚长最后发分派表"></td>
-<td width="33%"><img src="assets/screenshot-panel.png" alt="电脑面板：同事的实时屏幕、连接器与 MCP 授权开关，以及它排了哪些 routine"></td>
-<td width="33%"><img src="assets/screenshot-connectors.png" alt="连接器与 MCP：OAuth 应用账号，以及带逐工具读写审批策略的 stdio 与 Streamable HTTP MCP 服务"></td>
+<td width="33%"><img src="assets/screenshot-today.png" alt="今日工作台（浅色主题）：持续自定义网络动态流，带实时主题、精选简报与来源链接"></td>
+<td width="33%"><img src="assets/screenshot-spaces.png" alt="声明式实时空间（浅色主题）：KPI 指标卡、柱状图、可筛选表格、快捷同事动作与按同事授权角色"></td>
+<td width="33%"><img src="assets/screenshot-group.png" alt="群聊线程：共享团队章程（team.md）与幕僚长生成的多阶段 DAG 协作调度管线"></td>
 </tr>
 <tr>
-<td>在群里问一句——每位只报自己那摊，幕僚长收口发 <code>✓ 事项 → @谁 · 期限</code>。</td>
-<td>它的电脑：可接管的实时屏幕、沙箱命令开关、按同事勾选的连接器与 MCP 授权，以及定时任务。</td>
-<td>连接器与 MCP：OAuth 应用账号加 <code>stdio</code> / <code>Streamable HTTP</code> 服务，逐工具管控只读与写操作审批。</td>
+<td><strong>今日 · 网络动态</strong>（浅色主题）——prompt 驱动后台联网追踪、直达原文来源，顶栏串联动态 / 灵感 / 待办与目标 / 空间。</td>
+<td><strong>今日 · 实时空间</strong>（浅色主题）——零 JS 指标卡、图表、表格与快捷同事动作，按同事配置 <code>viewer</code> / <code>editor</code> 权限。</td>
+<td><strong>群聊 · DAG 调度管线</strong>——共享 <code>team.md</code> 团队章程，支持多阶段并行推进、查看上游产出与遇审批自动暂停续跑。</td>
+</tr>
+<tr>
+<td width="33%"><img src="assets/screenshot-panel.png" alt="电脑面板：可接管实时屏幕、沙箱命令开关、运行中后台任务实时纠偏，以及连接器、MCP、凭证库与空间授权"></td>
+<td width="33%"><img src="assets/screenshot-connectors.png" alt="连接器与 MCP：原生 OAuth 2.1 Polery 文档，以及 Gmail、日历、Notion、Slack 与 stdio / Streamable HTTP MCP 服务"></td>
+<td width="33%"><img src="assets/screenshot-wiki.png" alt="团队知识库（Team Wiki）：零向量库依赖，基于 SQLite FTS5 的实体页面、修订历史与外部来源核验警示"></td>
+</tr>
+<tr>
+<td><strong>电脑面板</strong>——可接管实时屏幕、沙箱命令行开关、运行中后台任务纠偏，以及连接器 / MCP / 凭证库 / 空间授权。</td>
+<td><strong>连接器与 MCP</strong>——原生 OAuth 2.1 <strong>Polery 文档</strong>（免 Composio key）、Gmail / 日历 / Notion / Slack，加 <code>stdio</code> / <code>Streamable HTTP</code> MCP。</td>
+<td><strong>团队知识库（Team Wiki）</strong>——零向量库实体页面（<code>project</code> / <code>client</code> / <code>contact</code> / <code>topic</code>），带 FTS5 检索、修订历史与外部来源核验。</td>
 </tr>
 </table>
 
@@ -44,7 +54,7 @@ OpenAI 兼容的模型。
 一个文件夹（`SOUL.md` 写它是谁，`AGENTS.md` 写它怎么干活、硬边界在哪）、侧栏里的一条线程，外加一台自己的电脑。
 用 Docker 时，这台电脑是一个容器：
 
-![架构图：桌面端或浏览器连一个 gateway 进程，按同事接入各自的 AI 模型与受控应用连接器 / MCP 服务，并驱动每个同事各自的 Docker 容器或本机沙箱电脑](assets/architecture.svg)
+![架构图：桌面端或浏览器经 Host 与 CSRF 校验连一个本机 gateway 进程，将今日工作台、团队知识库、凭证库、team.md 章程、审批、MCP 与 Polery OAuth 令牌及 MEMORY.md 隔离在同事电脑之外，按本地 P0-P3 优先级队列接入各自 AI 模型并驱动每个同事独立的 Docker 容器或本机沙箱电脑](assets/architecture.svg)
 
 不用 Docker 时，换成一台「本机电脑」：你机器上一个在后台运行、有独立 profile 的浏览器，加上它自己的文件夹（见
 [docs/local-computers.md](docs/local-computers.md)）。两种情况下，凭证都只存在**它的**浏览器 profile 里。gateway
@@ -235,6 +245,7 @@ Linux 用 bubblewrap），只能写这位同事自己的文件夹。Windows 没�
 | `OPENSUPERBOT_UPLOADS_MAX_MB` | `2048` | 你发给同事的文件总共最多占多少磁盘；`0` 不限 |
 | `OPENSUPERBOT_COMPOSIO_API_KEY` | — | 「连接器 → 应用」可选的 Composio API key；界面保存的 key 存进 `<数据目录>/composio-key`（权限 `0600`） |
 | `OPENSUPERBOT_POLERY_ORIGIN` | `https://docs.polery.com` | 可选，自定义原生 Polery 文档 OAuth/MCP 连接器的服务地址 |
+| `OPENSUPERBOT_LOCAL_LLM_CONCURRENCY` | `1` | 本地模型端点（`localhost` / Ollama / 局域网）在 `P0–P3` 优先级队列下的最大并发数 |
 | `OPENSUPERBOT_CONTEXT_WINDOW` | `0`（自动） | 可选，覆盖上下文窗口预算与检查点压缩阈值（为 `0` 时按模型家族自动推断） |
 
 其余设置——监听地址、闲置停机、单台电脑的资源上限、超时——见
@@ -295,6 +306,8 @@ Build 驱动你本机的 `grok` 命令行——会话按项目分组，Markdown�
 - [x] **带首次启动向导的桌面 App**（macOS 和 Linux）——试用不需要 Docker、Node 和终端，支持菜单栏/托盘常驻、开机自启与
       中英双语界面（v0.6.0，见 [docs/desktop.md](docs/desktop.md)）
 - [x] **应用连接器与原生 MCP 客户端**——支持 Gmail、Outlook、Google 与 Outlook 日历、Notion、Slack 多账号 OAuth 接入，以及零依赖 `stdio` / `Streamable HTTP` MCP 服务、Claude Desktop / Cursor JSON 批量导入、按同事显式授权与网关代码级冻结写操作审批（v0.7.0，见 [docs/security.md](docs/security.md)）
+- [x] **主动式团队协作、后台任务与 DAG 调度管线**——审批卡片内联改草稿、零向量库**团队共享知识库（Team Wiki）**（SQLite FTS5 + RRF + 修订历史 + 外部来源核验）、免打扰晨报与 `prepare` 备料模式、受控学习规矩提议、本地模型 `P0–P3` 优先级信号量队列、带浏览器租约锁的可纠偏后台任务（Meta / AlterEgo），以及群聊 `team.md` 团队章程与多阶段 DAG 协作流水线（v0.8.0）
+- [x] **统一「今日」工作台、凭证库、原生 Polery 文档与长会话上下文护栏**——持续自定义网络 **Feed**、对话自动整理的**灵感 / 待办 / 目标**、零 JS 声明式**实时空间（Live Spaces）**、本机 `0600` **凭证保险箱（Vault）**（TOTP + HTTPS 域名白名单 + `${vault:...}` 引用）、原生 OAuth 2.1 **Polery 文档**、深浅主题切换，以及自动上下文窗口压缩、大结果落盘、循环保护与 FTS5 历史检索（v0.8.1）
 - [ ] **macOS 26 上的 Apple container 后端**（免 Docker 的轻量虚拟机隔离）与 Windows 桌面安装包。计划见
       [docs/local-computers.md](docs/local-computers.md)
 - [ ] Telegram 作为离开电脑时的通知 / 审批补位渠道

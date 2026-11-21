@@ -24,18 +24,28 @@ Docker container, or without Docker a browser and a folder on your Mac, Linux or
 dense web client that reads like a workbench, and a model of your choice behind each teammate — Claude, OpenAI, Gemini, Grok, DeepSeek, Kimi,
 Qwen, GLM, MiniMax, a local Ollama, or anything OpenAI-compatible.
 
-![A teammate's thread: it reports what it did, holds what would go out, and shows you what it saw](assets/screenshot-thread.png)
+![A teammate's thread: structured reports, inline-editable draft approvals, rule proposals for MEMORY.md, and live steerable background tasks](assets/screenshot-thread.png)
 
 <table>
 <tr>
-<td width="33%"><img src="assets/screenshot-group.png" alt="A group thread: every teammate reports, the chief of staff closes with a dispatch table"></td>
-<td width="33%"><img src="assets/screenshot-panel.png" alt="The computer panel: a teammate's live screen, connector and MCP grants, and the routines it runs"></td>
-<td width="33%"><img src="assets/screenshot-connectors.png" alt="Connectors and MCP: OAuth app accounts plus stdio and Streamable HTTP MCP servers with per-tool read and approval policies"></td>
+<td width="33%"><img src="assets/screenshot-today.png" alt="Today workspace (Light theme): continuous custom web Feed with live topics, curated briefings, and source links"></td>
+<td width="33%"><img src="assets/screenshot-spaces.png" alt="Declarative Live Spaces (Light theme): KPI metrics, breakdown chart, filterable table, quick teammate actions, and per-teammate access roles"></td>
+<td width="33%"><img src="assets/screenshot-group.png" alt="Group room with Team charter (team.md) and Chief's live multi-stage DAG dispatch pipeline"></td>
 </tr>
 <tr>
-<td>Ask the room — everyone answers for their own patch, the chief of staff closes with <code>✓ item → @bot · when</code>.</td>
-<td>Its computer: live screen, sandboxed commands, per-teammate connector &amp; MCP grants, and scheduled routines.</td>
-<td>Connectors &amp; MCP: OAuth apps plus <code>stdio</code> and <code>Streamable HTTP</code> servers with per-tool read/write gates.</td>
+<td><strong>Today · Web Feed</strong> (Light theme) — prompt-driven background web topics, source links, and unified Feed / Ideas / Goals / Spaces tabs.</td>
+<td><strong>Today · Live Spaces</strong> (Light theme) — zero-JS metrics, charts, tables, and quick teammate actions with per-bot <code>viewer</code> / <code>editor</code> roles.</td>
+<td><strong>Group room · DAG Pipeline</strong> — shared <code>team.md</code> charter plus parallel-wave dispatch stages with expandable upstream outputs.</td>
+</tr>
+<tr>
+<td width="33%"><img src="assets/screenshot-panel.png" alt="Computer panel: live takeover screen, sandboxed commands, active background tasks with steering, and connector, MCP, Vault, and Space grants"></td>
+<td width="33%"><img src="assets/screenshot-connectors.png" alt="Connectors and MCP: native OAuth 2.1 Polery Docs plus Gmail, Calendar, Notion, Slack, and stdio or Streamable HTTP MCP servers"></td>
+<td width="33%"><img src="assets/screenshot-wiki.png" alt="Team Wiki: zero-vector-DB entity pages with SQLite FTS5 search, Markdown tables, revision history, and external-source verification"></td>
+</tr>
+<tr>
+<td><strong>Computer panel</strong> — live CDP/noVNC screen, sandboxed shell, steerable background tasks, and Connector / MCP / Vault / Space grants.</td>
+<td><strong>Connectors &amp; MCP</strong> — native OAuth 2.1 <strong>Polery Docs</strong> (no Composio key), Gmail / Calendar / Notion / Slack, plus <code>stdio</code> &amp; <code>Streamable HTTP</code> MCP.</td>
+<td><strong>Team Wiki</strong> — zero-vector-DB entity pages (<code>project</code> / <code>client</code> / <code>contact</code> / <code>topic</code>) with FTS5 search, history, and <em>Review &amp; verify</em> taint tracking.</td>
 </tr>
 </table>
 
@@ -44,7 +54,7 @@ Qwen, GLM, MiniMax, a local Ollama, or anything OpenAI-compatible.
 A folder with a `SOUL.md` (who it is) and an `AGENTS.md` (how it works, with its hard boundaries), a thread in
 the sidebar, and a computer of its own. With Docker, that computer is a container:
 
-![Architecture: your desktop app or browser talks to one gateway process, which connects each teammate to its own AI model and gated app connectors or MCP servers, and drives one Docker container or local sandbox per teammate](assets/architecture.svg)
+![Architecture: your desktop app or browser talks to one gateway process on 127.0.0.1:4747 with Host/CSRF guards, keeping Today workspaces, Team Wiki, Credential Vault, team.md charters, approvals, MCP and Polery OAuth tokens, and MEMORY.md outside bot computers, routing each teammate to its own AI model via a local P0-P3 priority queue and driving one Docker container or local sandbox per teammate](assets/architecture.svg)
 
 Without Docker, a *local computer* takes the container's place: a background browser with its own profile and a
 folder of its own, on your machine ([docs/local-computers.md](docs/local-computers.md)). Either way, the bot's
@@ -276,6 +286,7 @@ pnpm start` and the launchd / systemd / Windows Task Scheduler templates in [doc
 | `OPENSUPERBOT_UPLOADS_MAX_MB` | `2048` | Disk the files you send to teammates may use in all; `0` no limit |
 | `OPENSUPERBOT_COMPOSIO_API_KEY` | — | Optional Composio API key for **Connectors → Apps**; saved keys live in `<data>/composio-key` (`0600`) |
 | `OPENSUPERBOT_POLERY_ORIGIN` | `https://docs.polery.com` | Optional custom origin for the native Polery Docs OAuth/MCP connector |
+| `OPENSUPERBOT_LOCAL_LLM_CONCURRENCY` | `1` | Max concurrent requests to a local LLM endpoint (`localhost` / Ollama / LAN) under the `P0–P3` priority queue |
 | `OPENSUPERBOT_CONTEXT_WINDOW` | `0` (auto) | Optional override for context-window budgeting & checkpoint compaction (auto-inferred by model family when `0`) |
 
 Every other setting — listen address, idle stop, per-computer limits, timeouts — is in
@@ -345,6 +356,16 @@ official xAI product. [Download the latest release](https://github.com/wolfqing/
 - [x] **App connectors & native MCP client** — Gmail, Outlook, Google & Outlook Calendar, Notion and Slack via
       Composio OAuth plus zero-dependency `stdio` / `Streamable HTTP` MCP servers, Claude Desktop / Cursor JSON
       import, per-teammate grants, and code-enforced frozen write approvals (v0.7.0; [docs/security.md](docs/security.md))
+- [x] **Proactive teamwork, Background Tasks & DAG Pipelines** — inline-editable approvals, zero-vector-DB **Team
+      Wiki** (SQLite FTS5 + RRF + revision history + taint verification), Quiet Hours & Morning Digest, `prepare`
+      routines, controlled-dreaming rule proposals, local LLM `P0–P3` priority queue, steerable Meta/AlterEgo
+      background tasks with per-bot browser leases, and group `team.md` charters + multi-wave DAG dispatch pipelines
+      (v0.8.0)
+- [x] **Unified Today workspace, Credential Vault, Native Polery Docs & Context Guardrails** — continuous custom Web
+      **Feed**, auto-distilled **Ideas / To-dos / Tracking & Goals**, zero-JS declarative **Live Spaces**, local
+      `0600` **Credential Vault** (TOTP + HTTPS domain allowlists + `${vault:...}` refs), native OAuth 2.1 **Polery
+      Docs**, Dark/Light theme switcher, and automatic context-window compaction, spill, loop guards & FTS5 history
+      search (v0.8.1)
 - [ ] **Apple container backend** on macOS 26 for VM isolation without Docker, and a Windows desktop installer.
       Plan in [docs/local-computers.md](docs/local-computers.md)
 - [ ] Telegram as a notification / approval surface for when you are away from the desk
