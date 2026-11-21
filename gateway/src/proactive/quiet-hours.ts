@@ -222,11 +222,12 @@ function parseDigestEntry(row: QuietDigestItemRow): QuietDigestEntry {
       ?? (parsed && typeof parsed === 'object' ? validateReportPayload((parsed as { report?: unknown }).report) : null)
     if (report) entry.report = report
   } else {
-    const text = parsed && typeof parsed === 'object' && typeof (parsed as { text?: unknown }).text === 'string'
+    const rawText = parsed && typeof parsed === 'object' && typeof (parsed as { text?: unknown }).text === 'string'
       ? (parsed as { text: string }).text
       : typeof parsed === 'string'
         ? parsed
-        : row.summary
+        : ''
+    const text = rawText.trim() ? rawText : row.summary
     if (text) entry.text = text
   }
   return entry

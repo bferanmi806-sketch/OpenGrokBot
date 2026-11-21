@@ -81,7 +81,7 @@ export type ResolveRuleProposalInput = {
 
 export type ResolveRuleProposalResult =
   | { ok: true; proposal: RuleProposalView; memoryUpdated: boolean }
-  | { ok: false; code: 'gone' | 'settled' | 'invalid_rule' | 'memory_unavailable' }
+  | { ok: false; code: 'gone' | 'settled' | 'invalid_rule' | 'memory_unavailable' | 'invalid_decision' }
 
 /**
  * Sanitize a single-line standing rule safe to append to MEMORY.md as `- <rule>`.
@@ -158,7 +158,8 @@ export function listRuleProposals(
     params.push(opts.status)
   }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-  const limit = Math.max(1, Math.min(opts.limit ?? 100, 500))
+  const rawLimit = opts.limit !== undefined && Number.isFinite(opts.limit) ? Math.trunc(opts.limit) : 100
+  const limit = Math.max(1, Math.min(rawLimit, 500))
   params.push(limit)
   const rows = db.prepare(
     `SELECT * FROM rule_proposals ${where} ORDER BY id DESC LIMIT ?`,
@@ -277,10 +278,11 @@ function buildTargetDiscardRule(kind: ApprovalKind, target: string, action: stri
     case 'booking':
       return `Do not make bookings with ${displayTarget} unless explicitly asked`
     case 'other': {
-      const displayAction = clampDisplay(action, 100)
+      const otherTarget = clampDisplay(target, 160)
+      const displayAction = clampDisplay(action, 80)
       return displayAction
-        ? `Do not "${displayAction}" for ${displayTarget} unless explicitly asked`
-        : `Do not act on ${displayTarget} unless explicitly asked`
+        ? `Do not "${displayAction}" for ${otherTarget} unless explicitly asked`
+        : `Do not act on ${otherTarget} unless explicitly asked`
     }
   }
 }
@@ -358,11 +360,10 @@ function patchProposalMessage(
   db: Db,
   existing: RuleProposalRow,
   patch: { status: RuleProposalStatus; rule?: string; edited?: boolean; resolvedAt: number },
-  hub?: Hub,
-): void {
-  if (existing.message_id === null) return
+): MessageRow | null {
+  if (existing.message_id === null) return null
   const msg = getMessage(db, existing.message_id)
-  if (!msg || msg.kind !== 'rule_proposal') return
+  if (!msg || msg.kind !== 'rule_proposal') return null
   const prev = (msg.payload && typeof msg.payload === 'object' ? msg.payload : {}) as Partial<RuleProposalPayload>
   const nextPayload: RuleProposalPayload = {
     proposalId: existing.id,
@@ -375,14 +376,16 @@ function patchProposalMessage(
     resolvedAt: patch.resolvedAt,
   }
   updateMessagePayload(db, msg.id, nextPayload)
-  const updated = getMessage(db, msg.id)
-  if (updated) hub?.broadcast({ type: 'message', threadId: updated.thread_id, message: updated })
+  return getMessage(db, msg.id)
 }
 
 export async function resolveRuleProposal(
   db: Db,
   input: ResolveRuleProposalInput,
 ): Promise<ResolveRuleProposalResult> {
+  if (input.decision !== 'accept' && input.decision !== 'dismiss') {
+    return { ok: false, code: 'invalid_decision' }
+  }
   const existing = getProposalRow(db, input.id)
   if (!existing) return { ok: false, code: 'gone' }
   if (existing.status !== 'pending') return { ok: false, code: 'settled' }
@@ -411,47 +414,62 @@ export async function resolveRuleProposal(
     }
 
     const edited = finalRule !== existing.rule
-    patchProposalMessage(db, existing, { status: 'accepted', rule: finalRule, edited, resolvedAt: at }, input.hub)
+    const { updated, toBroadcast } = db.transaction(() => {
+      const messages: MessageRow[] = []
+      const patched = patchProposalMessage(db, existing, { status: 'accepted', rule: finalRule, edited, resolvedAt: at })
+      if (patched) messages.push(patched)
 
-    if (saved.diff) {
-      const memMsg = insertMessage(db, {
+      if (saved.diff) {
+        const memMsg = insertMessage(db, {
+          threadId: existing.thread_id,
+          sender: existing.bot_id,
+          kind: 'memory_updated',
+          payload: { rule: saved.rule, diff: saved.diff, total: saved.total, by: 'operator' },
+        })
+        messages.push(memMsg)
+      }
+
+      recordAction(db, {
+        botId: existing.bot_id,
         threadId: existing.thread_id,
-        sender: existing.bot_id,
-        kind: 'memory_updated',
-        payload: { rule: saved.rule, diff: saved.diff, total: saved.total, by: 'operator' },
+        trigger: 'you',
+        tool: 'rule_proposal',
+        summary: `accepted rule proposal: ${finalRule}`,
+        at,
       })
-      input.hub?.broadcast({ type: 'message', threadId: memMsg.thread_id, message: memMsg })
+
+      return { updated: getProposalRow(db, existing.id)!, toBroadcast: messages }
+    })()
+
+    for (const msg of toBroadcast) {
+      input.hub?.broadcast({ type: 'message', threadId: msg.thread_id, message: msg })
     }
+    return { ok: true, proposal: formatProposalView(updated), memoryUpdated: Boolean(saved.diff) }
+  }
+
+  const outcome = db.transaction(() => {
+    const claimed = db.prepare(
+      `UPDATE rule_proposals SET status = 'dismissed', resolved_at = ? WHERE id = ? AND status = 'pending'`,
+    ).run(at, existing.id)
+    if (claimed.changes === 0) return null
+
+    const patched = patchProposalMessage(db, existing, { status: 'dismissed', resolvedAt: at })
 
     recordAction(db, {
       botId: existing.bot_id,
       threadId: existing.thread_id,
       trigger: 'you',
       tool: 'rule_proposal',
-      summary: `accepted rule proposal: ${finalRule}`,
+      summary: `dismissed rule proposal: ${existing.rule}`,
       at,
     })
 
-    const updated = getProposalRow(db, existing.id)!
-    return { ok: true, proposal: formatProposalView(updated), memoryUpdated: Boolean(saved.diff) }
+    return { updated: getProposalRow(db, existing.id)!, patched }
+  })()
+
+  if (!outcome) return { ok: false, code: 'settled' }
+  if (outcome.patched) {
+    input.hub?.broadcast({ type: 'message', threadId: outcome.patched.thread_id, message: outcome.patched })
   }
-
-  const claimed = db.prepare(
-    `UPDATE rule_proposals SET status = 'dismissed', resolved_at = ? WHERE id = ? AND status = 'pending'`,
-  ).run(at, existing.id)
-  if (claimed.changes === 0) return { ok: false, code: 'settled' }
-
-  patchProposalMessage(db, existing, { status: 'dismissed', resolvedAt: at }, input.hub)
-
-  recordAction(db, {
-    botId: existing.bot_id,
-    threadId: existing.thread_id,
-    trigger: 'you',
-    tool: 'rule_proposal',
-    summary: `dismissed rule proposal: ${existing.rule}`,
-    at,
-  })
-
-  const updated = getProposalRow(db, existing.id)!
-  return { ok: true, proposal: formatProposalView(updated), memoryUpdated: false }
+  return { ok: true, proposal: formatProposalView(outcome.updated), memoryUpdated: false }
 }

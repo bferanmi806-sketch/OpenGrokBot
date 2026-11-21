@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Hono } from 'hono'
@@ -8,6 +8,7 @@ import { createApproval, resolveApproval } from '../src/approvals.js'
 import { loadConfig } from '../src/config.js'
 import {
   ensureDmThread,
+  ensureGroupThread,
   getMessage,
   insertMessage,
   listMessages,
@@ -483,6 +484,53 @@ describe('quiet digest store & flushing', () => {
     expect(listPendingDigestItems(db).map((r) => r.bot_id)).toEqual(['ops'])
     db.close()
   })
+
+  it('groups one bot across two threads separately and falls back to summary on whitespace payload.text', () => {
+    const db = openDb(':memory:')
+    const { hub, events } = setupHub()
+    const dmThread = seedBot(db, 'scout', 'Scout')
+    const groupThread = ensureGroupThread(db, 'group:morning', 'Morning Crew', ['scout'])
+
+    enqueueQuietDigestItem(db, {
+      botId: 'scout',
+      threadId: dmThread,
+      routineName: 'DM watch',
+      routineMode: 'watch',
+      kind: 'text',
+      summary: 'DM summary fallback',
+      payload: { text: '   ' },
+      now: 100,
+    })
+    enqueueQuietDigestItem(db, {
+      botId: 'scout',
+      threadId: groupThread,
+      routineName: 'Group prepare',
+      routineMode: 'prepare',
+      kind: 'text',
+      summary: 'Group summary fallback',
+      payload: '',
+      now: 200,
+    })
+
+    const res = flushQuietDigests(db, {
+      hub,
+      now: 300,
+      windowStart: '22:00',
+      windowEnd: '08:00',
+    })
+    expect(res.flushed).toBe(2)
+    expect(res.threads).toEqual([dmThread, groupThread])
+    expect(res.messages).toHaveLength(2)
+
+    const dmPayload = listMessages(db, dmThread)[0]!.payload as QuietDigestPayload
+    const groupPayload = listMessages(db, groupThread)[0]!.payload as QuietDigestPayload
+    expect(dmPayload.items[0]!.text).toBe('DM summary fallback')
+    expect(groupPayload.items[0]!.text).toBe('Group summary fallback')
+    expect(events.filter((e) => e.type === 'message')).toHaveLength(2)
+    expect(events.filter((e) => e.type === 'quiet_digest_changed')).toHaveLength(1)
+
+    db.close()
+  })
 })
 
 describe('rule proposals engine', () => {
@@ -916,6 +964,246 @@ describe('rule proposals engine', () => {
       .toEqual({ ok: false, code: 'settled' })
     expect(await resolveRuleProposal(db, { id: p3.proposal.id, decision: 'accept', dataDir }))
       .toEqual({ ok: false, code: 'settled' })
+
+    db.close()
+  })
+
+  it('rolls back accept cleanly when appendMemoryRule fails and succeeds on retry', async () => {
+    const db = openDb(':memory:')
+    const validDataDir = makeTempDir('osb-rollback-ok-')
+    const brokenParent = makeTempDir('osb-rollback-bad-')
+    const regularFileAsDataDir = join(brokenParent, 'not-a-dir')
+    writeFileSync(regularFileAsDataDir, 'blocker', 'utf8')
+    const { hub, events } = setupHub()
+    const threadId = seedBot(db, 'scout')
+
+    const created = await createRuleProposal(db, {
+      botId: 'scout',
+      threadId,
+      rule: 'Never send drafts at night',
+      reason: 'Keep evenings quiet',
+      source: 'agent',
+      existingMemoryRules: [],
+      hub,
+      now: 1000,
+    })
+    expect(created.created).toBe(true)
+    if (!created.created) return
+
+    events.length = 0
+    await expect(resolveRuleProposal(db, {
+      id: created.proposal.id,
+      decision: 'accept',
+      rule: 'Never send drafts after 8pm',
+      dataDir: regularFileAsDataDir,
+      hub,
+      now: 2000,
+    })).rejects.toThrow()
+
+    // Restored to pending with original rule, no side effects or broadcasts
+    const rolledBack = getRuleProposal(db, created.proposal.id)!
+    expect(rolledBack).toMatchObject({
+      status: 'pending',
+      rule: 'Never send drafts at night',
+      resolvedAt: null,
+    })
+    expect((getMessage(db, created.message.id)!.payload as RuleProposalPayload)).toMatchObject({
+      status: 'pending',
+      rule: 'Never send drafts at night',
+    })
+    expect(listMessages(db, threadId).filter((m) => m.kind === 'memory_updated')).toHaveLength(0)
+    expect(listActions(db, 'scout')).toHaveLength(0)
+    expect(events).toHaveLength(0)
+
+    // Subsequent retry with valid dataDir succeeds cleanly
+    const retried = await resolveRuleProposal(db, {
+      id: created.proposal.id,
+      decision: 'accept',
+      rule: 'Never send drafts after 8pm',
+      dataDir: validDataDir,
+      hub,
+      now: 3000,
+    })
+    expect(retried).toMatchObject({
+      ok: true,
+      memoryUpdated: true,
+      proposal: { status: 'accepted', rule: 'Never send drafts after 8pm', resolvedAt: 3000 },
+    })
+    expect(await listMemoryRules(validDataDir, 'scout')).toEqual(['Never send drafts after 8pm'])
+    expect(events).toHaveLength(2)
+
+    db.close()
+  })
+
+  it('handles concurrent Promise.all double-resolve, invalid decisions, and non-finite list limits', async () => {
+    const db = openDb(':memory:')
+    const dataDir = makeTempDir('osb-concurrent-')
+    const { hub } = setupHub()
+    const threadId = seedBot(db, 'scout')
+
+    const p1 = await createRuleProposal(db, {
+      botId: 'scout',
+      threadId,
+      rule: 'Always preview CSV exports first',
+      reason: 'Avoid schema mismatch',
+      source: 'agent',
+      dataDir,
+      now: 1000,
+    })
+    expect(p1.created).toBe(true)
+    if (!p1.created) return
+
+    // Unknown runtime decision is rejected without mutating pending row
+    const invalid = await resolveRuleProposal(db, {
+      id: p1.proposal.id,
+      decision: 'approve' as 'accept',
+      dataDir,
+      hub,
+      now: 1500,
+    })
+    expect(invalid).toEqual({ ok: false, code: 'invalid_decision' })
+    expect(getRuleProposal(db, p1.proposal.id)?.status).toBe('pending')
+
+    // Concurrent accept + accept: exactly one succeeds, one gets settled
+    const [a1, a2] = await Promise.all([
+      resolveRuleProposal(db, { id: p1.proposal.id, decision: 'accept', dataDir, hub, now: 2000 }),
+      resolveRuleProposal(db, { id: p1.proposal.id, decision: 'accept', dataDir, hub, now: 2001 }),
+    ])
+    const acceptResults = [a1, a2]
+    expect(acceptResults.filter((r) => r.ok)).toHaveLength(1)
+    expect(acceptResults.filter((r) => !r.ok)).toEqual([{ ok: false, code: 'settled' }])
+    expect(listMessages(db, threadId).filter((m) => m.kind === 'memory_updated')).toHaveLength(1)
+
+    // Concurrent accept + dismiss: exactly one succeeds, one gets settled
+    const p2 = await createRuleProposal(db, {
+      botId: 'scout',
+      threadId,
+      rule: 'Never edit billing profiles',
+      reason: 'Sensitive surface',
+      source: 'agent',
+      dataDir,
+      now: 3000,
+    })
+    expect(p2.created).toBe(true)
+    if (!p2.created) return
+
+    const [b1, b2] = await Promise.all([
+      resolveRuleProposal(db, { id: p2.proposal.id, decision: 'accept', dataDir, hub, now: 4000 }),
+      resolveRuleProposal(db, { id: p2.proposal.id, decision: 'dismiss', dataDir, hub, now: 4001 }),
+    ])
+    const mixedResults = [b1, b2]
+    expect(mixedResults.filter((r) => r.ok)).toHaveLength(1)
+    expect(mixedResults.filter((r) => !r.ok)).toEqual([{ ok: false, code: 'settled' }])
+
+    // Non-finite and fractional limits in listRuleProposals
+    expect(listRuleProposals(db, { botId: 'scout', limit: Number.NaN })).toHaveLength(2)
+    expect(listRuleProposals(db, { botId: 'scout', limit: Number.POSITIVE_INFINITY })).toHaveLength(2)
+    expect(listRuleProposals(db, { botId: 'scout', limit: 1.9 })).toHaveLength(1)
+
+    db.close()
+  })
+
+  it('handles discard edge cases (long kind=other bounds, mixed statuses, cross-bot isolation, exact 14-day cutoff) and explicit existingMemoryRules', async () => {
+    const db = openDb(':memory:')
+    const dataDir = makeTempDir('osb-discard-edges-')
+    const tScout = seedBot(db, 'scout')
+    const tOps = seedBot(db, 'ops')
+    const now = 1_700_000_000_000
+
+    // createRuleProposal with explicit existingMemoryRules (without dataDir)
+    expect(await createRuleProposal(db, {
+      botId: 'scout',
+      threadId: tScout,
+      rule: 'Never tweet pricing changes!',
+      reason: 'Already documented',
+      source: 'agent',
+      existingMemoryRules: ['never tweet pricing changes.'],
+    })).toEqual({ created: false, reason: 'already_in_memory' })
+    const noDirCreated = await createRuleProposal(db, {
+      botId: 'scout',
+      threadId: tScout,
+      rule: 'Always tag finance on refunds',
+      reason: 'Finance review policy',
+      source: 'agent',
+      existingMemoryRules: ['never tweet pricing changes.'],
+    })
+    expect(noDirCreated.created).toBe(true)
+
+    const addApproval = (opts: {
+      botId: string
+      threadId: string
+      kind: 'email' | 'other'
+      target: string
+      action: string
+      decision: 'approve' | 'discard'
+      resolvedAt: number
+    }) => {
+      const a = createApproval(db, {
+        threadId: opts.threadId,
+        botId: opts.botId,
+        kind: opts.kind,
+        target: opts.target,
+        action: opts.action,
+        now: opts.resolvedAt - 1000,
+      })
+      resolveApproval(db, a.id, opts.decision)
+      db.prepare('UPDATE approvals SET resolved_at = ? WHERE id = ?').run(opts.resolvedAt, a.id)
+      return db.prepare('SELECT * FROM approvals WHERE id = ?').get(a.id) as ReturnType<typeof createApproval>
+    }
+
+    // 1. Mixed approved + discarded for same target must NOT trigger
+    addApproval({
+      botId: 'scout', threadId: tScout, kind: 'email', target: 'mix@acme.com',
+      action: 'Email mix', decision: 'approve', resolvedAt: now - 5_000,
+    })
+    const mixDiscard = addApproval({
+      botId: 'scout', threadId: tScout, kind: 'email', target: 'mix@acme.com',
+      action: 'Email mix', decision: 'discard', resolvedAt: now,
+    })
+    expect(await maybeProposeRuleFromDiscard(db, { approval: mixDiscard, dataDir, now })).toBeNull()
+
+    // 2. Cross-bot isolation: 1 discard on scout + 1 discard on ops must NOT trigger
+    addApproval({
+      botId: 'scout', threadId: tScout, kind: 'email', target: 'shared@acme.com',
+      action: 'Email shared', decision: 'discard', resolvedAt: now - 5_000,
+    })
+    const opsDiscard = addApproval({
+      botId: 'ops', threadId: tOps, kind: 'email', target: 'shared@acme.com',
+      action: 'Email shared', decision: 'discard', resolvedAt: now,
+    })
+    expect(await maybeProposeRuleFromDiscard(db, { approval: opsDiscard, dataDir, now })).toBeNull()
+
+    // 3. Exact 14-day cutoff boundary (resolved_at === now - DISCARD_LOOKBACK_MS) MUST count
+    addApproval({
+      botId: 'scout', threadId: tScout, kind: 'email', target: 'boundary@acme.com',
+      action: 'Email boundary', decision: 'discard', resolvedAt: now - DISCARD_LOOKBACK_MS,
+    })
+    const boundary2 = addApproval({
+      botId: 'scout', threadId: tScout, kind: 'email', target: 'boundary@acme.com',
+      action: 'Email boundary', decision: 'discard', resolvedAt: now,
+    })
+    const boundaryProposal = await maybeProposeRuleFromDiscard(db, { approval: boundary2, dataDir, now })
+    expect(boundaryProposal?.created).toBe(true)
+
+    // 4. kind === 'other' with very long target (260 chars) + long action (140 chars) stays <= MAX_RULE_CHARS
+    const longTarget = `https://example.com/${'segment/'.repeat(32)}endpoint`
+    const longAction = `Synchronize external billing ledger and purge stale webhook retries ${'quickly '.repeat(12)}now`
+    expect(longTarget.length).toBeGreaterThan(250)
+    expect(longAction.length).toBeGreaterThan(120)
+
+    addApproval({
+      botId: 'scout', threadId: tScout, kind: 'other', target: longTarget,
+      action: longAction, decision: 'discard', resolvedAt: now - 2_000,
+    })
+    const longOther2 = addApproval({
+      botId: 'scout', threadId: tScout, kind: 'other', target: longTarget,
+      action: longAction, decision: 'discard', resolvedAt: now,
+    })
+    const longProposal = await maybeProposeRuleFromDiscard(db, { approval: longOther2, dataDir, now })
+    expect(longProposal?.created).toBe(true)
+    if (longProposal && longProposal.created) {
+      expect(longProposal.proposal.rule.length).toBeLessThanOrEqual(MAX_RULE_CHARS)
+    }
 
     db.close()
   })
