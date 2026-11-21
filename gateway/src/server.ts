@@ -300,7 +300,15 @@ type TurnOpts = {
   /** 流水线步骤及其审批/提问续跑回合：禁止递归创建流水线或后台任务 */
   isPipelineStep?: boolean
   /** 回合结束后的回调（用于审批/提问恢复后推进等待中的流水线步骤） */
-  onTurnFinished?: (res: { outcome: TurnOutcome; finalText: string; reportSummary: string; tainted: boolean }) => void
+  onTurnFinished?: (res: {
+    outcome: TurnOutcome
+    finalText: string
+    reportSummary: string
+    tainted: boolean
+    pendingApprovalId: number | null
+    openQuestionId: number | null
+    error?: string
+  }) => void
 }
 
 export function startOfLocalDay(now: Date, timeZone?: string): number {
@@ -631,6 +639,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       `SELECT id FROM messages WHERE thread_id = ? AND kind = 'question' AND json_extract(payload, '$.status') = 'open'`,
     ).all(threadId) as { id: number }[]
     for (const { id } of rows) {
+      if (findWaitingStepByQuestion(db, id)) continue
       const m = getMessage(db, id)
       if (!m) continue
       updateMessagePayload(db, id, { ...(m.payload as QuestionPayload), status: 'skipped' })
@@ -1032,37 +1041,51 @@ export function createApp(deps: AppDeps): GatewayApp {
     runTask: runBackgroundTask,
   })
 
-  function approvalWatermarkFor(threadId: string, botId: string): number {
-    return (
-      db.prepare('SELECT COALESCE(MAX(id), 0) AS maxId FROM approvals WHERE thread_id = ? AND bot_id = ?')
-        .get(threadId, botId) as { maxId: number }
-    ).maxId
-  }
-
-  function messageWatermarkFor(threadId: string, botId: string): number {
-    return (
-      db.prepare('SELECT COALESCE(MAX(id), 0) AS maxId FROM messages WHERE thread_id = ? AND sender = ?')
-        .get(threadId, botId) as { maxId: number }
-    ).maxId
-  }
-
-  function latestNewPendingApproval(threadId: string, botId: string, watermark: number): number | null {
-    const row = db.prepare(
-      `SELECT id FROM approvals
-       WHERE thread_id = ? AND bot_id = ? AND status = 'pending' AND id > ?
-       ORDER BY id DESC LIMIT 1`,
-    ).get(threadId, botId, watermark) as { id: number } | undefined
-    return row?.id ?? null
-  }
-
-  function latestNewOpenQuestion(threadId: string, botId: string, watermark: number): number | null {
-    const row = db.prepare(
-      `SELECT id FROM messages
-       WHERE thread_id = ? AND sender = ? AND kind = 'question'
-         AND json_extract(payload, '$.status') = 'open' AND id > ?
-       ORDER BY id DESC LIMIT 1`,
-    ).get(threadId, botId, watermark) as { id: number } | undefined
-    return row?.id ?? null
+  function captureTurnWaits(threadId: string) {
+    const base = events(threadId)
+    const approvalIds: number[] = []
+    const questionIds: number[] = []
+    return {
+      turnEvents: {
+        ...base,
+        onMessage: (m: MessageRow) => {
+          if (m.kind === 'approval_request') {
+            const p = m.payload as { status?: unknown; approvalId?: unknown } | null
+            if (
+              p?.status === 'pending'
+              && typeof p.approvalId === 'number'
+              && Number.isInteger(p.approvalId)
+              && p.approvalId > 0
+            ) {
+              approvalIds.push(p.approvalId)
+            }
+          } else if (m.kind === 'question') {
+            const p = m.payload as { status?: unknown } | null
+            if (p?.status === 'open' && Number.isInteger(m.id) && m.id > 0) {
+              questionIds.push(m.id)
+            }
+          }
+          base.onMessage(m)
+        },
+      },
+      latestPendingApprovalId: (): number | null => {
+        for (let i = approvalIds.length - 1; i >= 0; i--) {
+          const id = approvalIds[i]!
+          if (getApproval(db, id)?.status === 'pending') return id
+        }
+        return null
+      },
+      latestOpenQuestionId: (): number | null => {
+        for (let i = questionIds.length - 1; i >= 0; i--) {
+          const id = questionIds[i]!
+          const msg = getMessage(db, id)
+          if (msg?.kind === 'question' && (msg.payload as { status?: unknown } | null)?.status === 'open') {
+            return id
+          }
+        }
+        return null
+      },
+    }
   }
 
   function isWaitingStepTainted(waitingStep: { planId: string; stepId: string } | null): boolean {
@@ -1121,35 +1144,25 @@ export function createApp(deps: AppDeps): GatewayApp {
 
   function pipelineWaitTurnHooks(params: {
     waitingStep: { planId: string; stepId: string }
-    threadId: string
-    botId: string
     approvalId?: number
     questionId?: number
     fallbackOutput: string
     failureError: string
-  }): Pick<TurnOpts, 'onStart' | 'onTurnFinished'> {
-    let approvalWatermark = approvalWatermarkFor(params.threadId, params.botId)
-    let messageWatermark = messageWatermarkFor(params.threadId, params.botId)
+  }): Pick<TurnOpts, 'onTurnFinished'> {
     return {
-      onStart: () => {
-        approvalWatermark = approvalWatermarkFor(params.threadId, params.botId)
-        messageWatermark = messageWatermarkFor(params.threadId, params.botId)
-      },
-      onTurnFinished: ({ outcome, finalText, reportSummary, tainted }) => {
+      onTurnFinished: ({ outcome, finalText, reportSummary, tainted, pendingApprovalId, openQuestionId, error }) => {
         if (outcome === 'replied') {
-          const newApprovalId = latestNewPendingApproval(params.threadId, params.botId, approvalWatermark)
-          if (newApprovalId !== null) {
+          if (pendingApprovalId !== null) {
             rebindWaitingStep(params.waitingStep, {
-              approvalId: newApprovalId,
+              approvalId: pendingApprovalId,
               output: finalText || reportSummary,
               tainted,
             })
             return
           }
-          const newQuestionId = latestNewOpenQuestion(params.threadId, params.botId, messageWatermark)
-          if (newQuestionId !== null) {
+          if (openQuestionId !== null) {
             rebindWaitingStep(params.waitingStep, {
-              questionId: newQuestionId,
+              questionId: openQuestionId,
               output: finalText || reportSummary,
               tainted,
             })
@@ -1168,7 +1181,7 @@ export function createApp(deps: AppDeps): GatewayApp {
           ...(params.approvalId !== undefined ? { approvalId: params.approvalId } : {}),
           ...(params.questionId !== undefined ? { questionId: params.questionId } : {}),
           outcome: 'failed',
-          error: params.failureError,
+          error: error || params.failureError,
           ...(finalText || reportSummary ? { output: finalText || reportSummary } : {}),
           tainted,
         })
@@ -1200,8 +1213,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       }
       const group = groupContext(ctx.plan.threadId)
 
-      const approvalWatermark = approvalWatermarkFor(ctx.plan.threadId, bot.id)
-      const messageWatermark = messageWatermarkFor(ctx.plan.threadId, bot.id)
+      const waitCapture = captureTurnWaits(ctx.plan.threadId)
       let stepTainted = ctx.initialTainted
       let finalText = ''
       let reportSummary = ''
@@ -1245,7 +1257,7 @@ Complete your step and post a concise summary of your findings or output in this
           return
         }
         const hiddenIds = [...(waiting.get(ctx.plan.threadId) ?? [])]
-        const outcome = await runTurn(turnDeps, seed, events(ctx.plan.threadId), {
+        const outcome = await runTurn(turnDeps, seed, waitCapture.turnEvents, {
           persistUserMessage: false,
           hiddenIds,
         })
@@ -1256,7 +1268,7 @@ Complete your step and post a concise summary of your findings or output in this
           return
         }
 
-        const pendingApprovalId = latestNewPendingApproval(ctx.plan.threadId, bot.id, approvalWatermark)
+        const pendingApprovalId = waitCapture.latestPendingApprovalId()
         if (pendingApprovalId !== null) {
           result = {
             status: 'waiting_approval',
@@ -1267,7 +1279,7 @@ Complete your step and post a concise summary of your findings or output in this
           return
         }
 
-        const openQuestionId = latestNewOpenQuestion(ctx.plan.threadId, bot.id, messageWatermark)
+        const openQuestionId = waitCapture.latestOpenQuestionId()
         if (openQuestionId !== null) {
           result = {
             status: 'waiting_approval',
@@ -1295,6 +1307,15 @@ Complete your step and post a concise summary of your findings or output in this
           output: finalText || reportSummary || 'Completed.',
           tainted: stepTainted,
         }
+      } catch (err) {
+        result = combinedSignal.aborted
+          ? { status: 'cancelled' }
+          : {
+              status: 'failed',
+              error: err instanceof Error ? err.message : String(err),
+              output: finalText,
+              tainted: stepTainted,
+            }
       } finally {
         browserLeases.release(bot.id, fgHolder)
         try {
@@ -1316,9 +1337,8 @@ Complete your step and post a concise summary of your findings or output in this
   })
 
   function startTurn(bot: BotRow, threadId: string, text: string, opts: TurnOpts): Promise<void> {
-    let invoked = false
+    let notifiedFinished = false
     const done = turns.run(bot.id, threadId, async (signal) => {
-      invoked = true
       const waitingHere = [...(waiting.get(threadId) ?? [])]
       let order: { pendingIds?: number[]; hiddenIds?: number[] } = { hiddenIds: waitingHere }
       if (opts.alreadyStored) {
@@ -1338,11 +1358,13 @@ Complete your step and post a concise summary of your findings or output in this
       const priority: LlmPriority =
         opts.priority ?? (opts.origin === 'operator' ? 'interactive' : opts.origin === 'routine' ? 'routine' : 'background')
       const fgHolder: BrowserLeaseHolder = { kind: 'foreground', token: randomUUID(), label: 'foreground chat' }
+      const waitCapture = opts.onTurnFinished ? captureTurnWaits(threadId) : null
       let turnTainted = opts.tainted === true
       let finalText = ''
       let reportSummary = ''
       let outcome: TurnOutcome = 'error'
       let finished = false
+      let turnError = ''
       try {
         const turnDeps = await prepareTurnDeps({
           bot,
@@ -1378,19 +1400,31 @@ Complete your step and post a concise summary of your findings or output in this
             return { ok: true }
           },
         })
-        outcome = await runTurn(turnDeps, text, events(threadId), {
+        outcome = await runTurn(turnDeps, text, waitCapture ? waitCapture.turnEvents : events(threadId), {
           persistUserMessage: opts.persistUserMessage,
           alreadyStored: opts.alreadyStored,
           ...order,
         })
         lastOutcome.set(bot.id, outcome)
         finished = true
+      } catch (err) {
+        turnError = err instanceof Error ? err.message : String(err)
+        throw err
       } finally {
         browserLeases.release(bot.id, fgHolder)
         if (opts.onTurnFinished) {
+          notifiedFinished = true
           const finalOutcome: TurnOutcome = finished ? outcome : signal.aborted ? 'stopped' : 'error'
           try {
-            opts.onTurnFinished({ outcome: finalOutcome, finalText, reportSummary, tainted: turnTainted })
+            opts.onTurnFinished({
+              outcome: finalOutcome,
+              finalText,
+              reportSummary,
+              tainted: turnTainted,
+              pendingApprovalId: waitCapture?.latestPendingApprovalId() ?? null,
+              openQuestionId: waitCapture?.latestOpenQuestionId() ?? null,
+              ...(turnError ? { error: turnError } : {}),
+            })
           } catch (err) {
             console.warn('[gateway] onTurnFinished callback failed:', err)
           }
@@ -1399,13 +1433,16 @@ Complete your step and post a concise summary of your findings or output in this
     }, opts.coalesce ? { coalesceKey: `stored:${threadId}` } : undefined)
     if (!opts.onTurnFinished) return done
     return done.finally(() => {
-      if (invoked) return
+      if (notifiedFinished) return
+      notifiedFinished = true
       try {
         opts.onTurnFinished!({
           outcome: 'stopped',
           finalText: '',
           reportSummary: '',
           tainted: opts.tainted === true,
+          pendingApprovalId: null,
+          openQuestionId: null,
         })
       } catch (err) {
         console.warn('[gateway] onTurnFinished callback failed:', err)
@@ -1904,8 +1941,6 @@ Complete your step and post a concise summary of your findings or output in this
                 ...(waitingStep
                   ? pipelineWaitTurnHooks({
                       waitingStep,
-                      threadId: approval.thread_id,
-                      botId: bot.id,
                       approvalId: approval.id,
                       fallbackOutput: execRes.summary || 'Approved and completed.',
                       failureError: 'Follow-up after approval did not complete.',
@@ -2139,8 +2174,6 @@ Complete your step and post a concise summary of your findings or output in this
               ...(waitingStep
                 ? pipelineWaitTurnHooks({
                     waitingStep,
-                    threadId: approval.thread_id,
-                    botId: bot.id,
                     approvalId: approval.id,
                     fallbackOutput: execRes.summary || 'Approved and completed.',
                     failureError: 'Follow-up after approval did not complete.',
@@ -2232,8 +2265,6 @@ Complete your step and post a concise summary of your findings or output in this
         ...(attachPipelineResume
           ? pipelineWaitTurnHooks({
               waitingStep,
-              threadId: approval.thread_id,
-              botId: bot.id,
               approvalId: approval.id,
               fallbackOutput: 'Approved and completed.',
               failureError: 'Follow-up after approval did not complete.',
@@ -2988,8 +3019,6 @@ Complete your step and post a concise summary of your findings or output in this
           ...(waitingStep
             ? pipelineWaitTurnHooks({
                 waitingStep,
-                threadId: message.thread_id,
-                botId: bot.id,
                 questionId: message.id,
                 fallbackOutput: 'Answered and completed.',
                 failureError: 'Follow-up after answer did not complete.',

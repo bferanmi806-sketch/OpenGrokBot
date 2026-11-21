@@ -267,6 +267,7 @@ function Workspace({
 
   /** 拉消息期间经 WS 到达的更新先记下来，拉回来后叠在快照上；重叠拉取按序号只认最新那次，绝不让慢快照抹掉刚收到的实时消息 */
   const liveDuringFetch = useRef(new Map<number, Message>())
+  const livePlansDuringFetchRef = useRef(new Map<string, Map<string, DispatchPlanView>>())
   const inFlightFetches = useRef(0)
   const msgFetchSeq = useRef(0)
   const loadMessages = useCallback(async (thread: string) => {
@@ -279,6 +280,7 @@ function Workspace({
       for (const [id, m] of liveDuringFetch.current) {
         if (m.thread_id === thread) liveInThread.set(id, m)
       }
+      const livePlans = new Map(livePlansDuringFetchRef.current.get(thread) ?? [])
       setMessages((prev) => {
         const merged = fetched.map((m) => liveInThread.get(m.id) ?? m)
         const known = new Set(merged.map((m) => m.id))
@@ -295,13 +297,27 @@ function Workspace({
             known.add(m.id)
           }
         }
-        return merged.sort((a, b) => a.id - b.id)
+        const overlaid = livePlans.size === 0
+          ? merged
+          : merged.map((m) => {
+              const payload = m.kind === 'dispatch_plan' ? (m.payload as DispatchPlanPayload | null) : null
+              for (const plan of livePlans.values()) {
+                const matchesId = plan.messageId !== null && m.id === plan.messageId
+                const matchesPlan = m.kind === 'dispatch_plan' && payload?.planId === plan.id
+                if (matchesId || matchesPlan) {
+                  return { ...m, payload: planToPayload(plan) }
+                }
+              }
+              return m
+            })
+        return overlaid.sort((a, b) => a.id - b.id)
       })
     } finally {
       inFlightFetches.current -= 1
       if (inFlightFetches.current <= 0) {
         inFlightFetches.current = 0
         liveDuringFetch.current.clear()
+        livePlansDuringFetchRef.current.clear()
       }
     }
   }, [])
@@ -433,31 +449,26 @@ function Workspace({
     }
   }, [])
 
-  const applyDispatchPlanUpdate = useCallback((plan: DispatchPlanView) => {
-    const nextPayload = planToPayload(plan)
+  const applyDispatchPlanUpdate = useCallback((threadId: string, plan: DispatchPlanView) => {
     if (inFlightFetches.current > 0) {
-      for (const [id, m] of liveDuringFetch.current) {
-        if (m.kind !== 'dispatch_plan' || m.thread_id !== plan.threadId) continue
-        const payload = m.payload as DispatchPlanPayload | null
-        const matchesId = plan.messageId !== null && m.id === plan.messageId
-        const matchesPlan = payload?.planId === plan.id
-        if (matchesId || matchesPlan) {
-          liveDuringFetch.current.set(id, { ...m, payload: nextPayload })
-        }
+      let threadPlans = livePlansDuringFetchRef.current.get(threadId)
+      if (!threadPlans) {
+        threadPlans = new Map<string, DispatchPlanView>()
+        livePlansDuringFetchRef.current.set(threadId, threadPlans)
       }
+      threadPlans.set(plan.id, plan)
     }
+    const nextPayload = planToPayload(plan)
     setMessages((ms) => {
       let changed = false
       const next = ms.map((m) => {
-        if (m.kind !== 'dispatch_plan' || m.thread_id !== plan.threadId) return m
+        if (m.kind !== 'dispatch_plan' || m.thread_id !== threadId) return m
         const payload = m.payload as DispatchPlanPayload | null
         const matchesId = plan.messageId !== null && m.id === plan.messageId
         const matchesPlan = payload?.planId === plan.id
         if (!matchesId && !matchesPlan) return m
         changed = true
-        const updated: Message = { ...m, payload: nextPayload }
-        if (inFlightFetches.current > 0) liveDuringFetch.current.set(updated.id, updated)
-        return updated
+        return { ...m, payload: nextPayload }
       })
       return changed ? next : ms
     })
@@ -588,7 +599,7 @@ function Workspace({
         return
       }
       if (e.type === 'dispatch_plan_changed') {
-        applyDispatchPlanUpdate(e.plan)
+        applyDispatchPlanUpdate(e.threadId, e.plan)
         if (panelFor.current && (e.plan.status === 'completed' || e.plan.status === 'failed' || e.plan.status === 'cancelled')) {
           void loadPanel(panelFor.current)
         }
@@ -623,7 +634,13 @@ function Workspace({
         }
       }
       if (e.threadId === threadIdRef.current) {
-        if (inFlightFetches.current > 0) liveDuringFetch.current.set(e.message.id, e.message)
+        if (inFlightFetches.current > 0) {
+          liveDuringFetch.current.set(e.message.id, e.message)
+          if (e.message.kind === 'dispatch_plan') {
+            const pid = (e.message.payload as DispatchPlanPayload | null)?.planId
+            if (pid) livePlansDuringFetchRef.current.get(e.threadId)?.delete(pid)
+          }
+        }
         // 同 id 就替换：审批 chip 被放行、activity 卡片多了一步，都是就地更新
         setMessages((ms) => {
           const at = ms.findIndex((m) => m.id === e.message.id)
@@ -791,7 +808,7 @@ function Workspace({
     async (planId: string) => {
       try {
         const res = await startDispatchPlan(planId)
-        applyDispatchPlanUpdate(res.plan)
+        applyDispatchPlanUpdate(res.plan.threadId, res.plan)
       } catch (err: unknown) {
         if (err instanceof SignedOut) {
           setSignedOut(true)
@@ -814,7 +831,7 @@ function Workspace({
     async (planId: string) => {
       try {
         const res = await cancelDispatchPlan(planId)
-        applyDispatchPlanUpdate(res.plan)
+        applyDispatchPlanUpdate(res.plan.threadId, res.plan)
       } catch (err: unknown) {
         if (err instanceof SignedOut) {
           setSignedOut(true)

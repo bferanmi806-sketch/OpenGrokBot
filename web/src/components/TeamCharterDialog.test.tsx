@@ -219,4 +219,76 @@ describe('TeamCharterDialog', () => {
     fireEvent.click(scrim)
     expect(onClose).toHaveBeenCalledTimes(2)
   })
+
+  it('normalizes CRLF line endings for character count/validation, skips refreshTick during save, and resets saving state on thread switch', async () => {
+    let resolveSave!: (r: Response) => void
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        return new Promise<Response>((res) => { resolveSave = res })
+      }
+      if (url.includes('group%3Acrew-b')) {
+        return Promise.resolve(new Response(JSON.stringify({ threadId: 'group:crew-b', content: 'Crew B charter', updatedAt: 2 }), { status: 200 }))
+      }
+      return Promise.resolve(new Response(JSON.stringify({ threadId: 'group:crew-a', content: 'Initial\r\n', updatedAt: 1 }), { status: 200 }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { rerender } = render(
+      <TeamCharterDialog
+        threadId="group:crew-a"
+        groupTitle="Crew A"
+        refreshTick={0}
+        onSignedOut={() => {}}
+        onClose={() => {}}
+      />,
+    )
+
+    const textarea = await screen.findByRole('textbox', { name: 'Team charter (team.md)' })
+    // Raw loaded content 'Initial\r\n' has 9 UTF-16 code units, but normalized LF length is 8
+    expect(screen.getByText('8 / 16,384')).toBeInTheDocument()
+    // 16,383 'a' + '\r\n' -> normalized LF length 16,384 (exact limit, MUST stay valid!)
+    const crContent = `${'a'.repeat(MAX_TEAM_CHARTER_CHARS - 1)}\r\n`
+    fireEvent.change(textarea, { target: { value: crContent } })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByText('16,384 / 16,384')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save charter' })).toBeEnabled()
+
+    // Start saving crew-a (stays in flight)
+    fireEvent.change(textarea, { target: { value: 'Edited crew A' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save charter' }))
+    expect(screen.getByRole('button', { name: 'Saving…' })).toBeDisabled()
+    const callsWhileSaving = fetchMock.mock.calls.length
+
+    // refreshTick arrives while save is in flight -> MUST NOT trigger a silent reload
+    rerender(
+      <TeamCharterDialog
+        threadId="group:crew-a"
+        groupTitle="Crew A"
+        refreshTick={1}
+        onSignedOut={() => {}}
+        onClose={() => {}}
+      />,
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(callsWhileSaving)
+
+    // Switch threadId while crew-a save is still in flight -> resets saving state cleanly for crew-b
+    rerender(
+      <TeamCharterDialog
+        threadId="group:crew-b"
+        groupTitle="Crew B"
+        refreshTick={1}
+        onSignedOut={() => {}}
+        onClose={() => {}}
+      />,
+    )
+    expect(await screen.findByDisplayValue('Crew B charter')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save charter' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+
+    // Resolve the stale crew-a save -> must not overwrite crew-b
+    resolveSave(new Response(JSON.stringify({ threadId: 'group:crew-a', content: 'Edited crew A', updatedAt: 3 }), { status: 200 }))
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('Crew B charter')).toBeInTheDocument()
+    })
+  })
 })

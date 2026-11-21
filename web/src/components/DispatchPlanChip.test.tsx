@@ -271,5 +271,14 @@ describe('DispatchPlanChip', () => {
     )
     expect(screen.getByText('阶段 1')).toBeInTheDocument()
     expect(screen.getByText('等待中')).toBeInTheDocument()
+
+    // Prototype-key status falls back cleanly instead of indexing Object.prototype
+    const protoStatus = makePayload({
+      status: 'toString' as unknown as DispatchPlanPayload['status'],
+      steps: [makeStep({ id: 's1', status: 'constructor' as unknown as DispatchStepView['status'] })],
+    })
+    rerender(<DispatchPlanChip payload={protoStatus} roster={roster} />)
+    expect(screen.getByText('Failed')).toBeInTheDocument()
+    expect(screen.getByText('Pending')).toBeInTheDocument()
   })
 })

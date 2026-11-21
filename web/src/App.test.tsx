@@ -1548,4 +1548,122 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Start pipeline' }))
     expect(await screen.findByText('Completed')).toBeInTheDocument()
   })
+
+  it('preserves a dispatch_plan_changed WS update arriving while fetchMessages is in flight after switching to a group thread', async () => {
+    const dmConv = conversation({
+      id: 'dm:chief',
+      title: 'Chief',
+      emoji: '🧭',
+      subtitle: 'lead',
+      members: ['chief'],
+    })
+    const groupConv = conversation({
+      id: 'group:offsite-crew',
+      kind: 'group',
+      title: 'Offsite crew',
+      emoji: '👥',
+      subtitle: 'Chief · Scout',
+      members: ['chief', 'researcher'],
+    })
+    const stepDraft = {
+      id: 's1',
+      seq: 0,
+      wave: 0,
+      botId: 'researcher',
+      title: 'Audit vendor pricing',
+      instructions: 'Audit pricing.',
+      dependsOn: [],
+      status: 'pending' as const,
+      output: '',
+      error: '',
+      outputTainted: false,
+      waitingApprovalId: null,
+      waitingQuestionId: null,
+      startedAt: null,
+      finishedAt: null,
+    }
+    const staleDraftMessage: Message = {
+      id: 120,
+      thread_id: 'group:offsite-crew',
+      sender: 'chief',
+      kind: 'dispatch_plan',
+      content: '',
+      payload: {
+        planId: 'dp-race1111',
+        threadId: 'group:offsite-crew',
+        createdBy: 'chief',
+        title: 'Launch pricing pipeline',
+        status: 'draft',
+        sourceTainted: false,
+        error: '',
+        steps: [stepDraft],
+        createdAt: 100,
+        startedAt: null,
+        finishedAt: null,
+      },
+      created_at: 100,
+    }
+    const liveRunningPlan: DispatchPlanView = {
+      id: 'dp-race1111',
+      threadId: 'group:offsite-crew',
+      createdBy: 'chief',
+      title: 'Launch pricing pipeline',
+      status: 'running',
+      sourceTainted: false,
+      messageId: 120,
+      error: '',
+      steps: [{ ...stepDraft, status: 'running', startedAt: 250 }],
+      createdAt: 100,
+      startedAt: 250,
+      finishedAt: null,
+    }
+
+    let resolveGroupFetch!: (msgs: Message[]) => void
+    let groupFetchStarted = false
+    mockGateway({
+      conversations: [dmConv, groupConv],
+      bots: [
+        { id: 'chief', name: 'Chief', role: 'lead', emoji: '🧭', thread_id: 'dm:chief', last_message: null },
+        { id: 'researcher', name: 'Scout', role: 'research', emoji: '🔎', thread_id: 'dm:researcher', last_message: null },
+      ],
+      messages: (url) => {
+        if (url.includes(encodeURIComponent('group:offsite-crew'))) {
+          groupFetchStarted = true
+          return new Promise<Message[]>((resolve) => {
+            resolveGroupFetch = resolve
+          })
+        }
+        return []
+      },
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findAllByText('Chief')
+    await waitFor(() => expect(FakeSocket.last).not.toBeNull())
+    await act(async () => {})
+    const socket = FakeSocket.last!
+
+    // Switch to the group thread -> messages clears to [] and fetchMessages(group) stays in flight
+    await user.click(screen.getByRole('button', { name: /Offsite crew/ }))
+    await waitFor(() => expect(groupFetchStarted).toBe(true))
+
+    // WS dispatch_plan_changed arrives BEFORE fetchMessages resolves (while messages === [])
+    await act(async () => {
+      socket.emit({
+        type: 'dispatch_plan_changed',
+        threadId: 'group:offsite-crew',
+        plan: liveRunningPlan,
+      })
+    })
+
+    // Now the stale HTTP snapshot (status: 'draft') resolves -> MUST be overlaid with liveRunningPlan ('running')!
+    await act(async () => {
+      resolveGroupFetch([staleDraftMessage])
+    })
+
+    expect(await screen.findByText('Launch pricing pipeline')).toBeInTheDocument()
+    expect((await screen.findAllByText('Running')).length).toBeGreaterThanOrEqual(2)
+    expect(screen.queryByRole('button', { name: 'Start pipeline' })).toBeNull()
+  })
 })

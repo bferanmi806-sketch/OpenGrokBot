@@ -44,7 +44,8 @@ export function TeamCharterDialog({
   const [error, setError] = useState<string | null>(null)
 
   const dirty = draft !== savedContent
-  const overLimit = draft.length > MAX_TEAM_CHARTER_CHARS
+  const normalizedDraftLength = draft.replace(/\r\n?/g, '\n').length
+  const overLimit = normalizedDraftLength > MAX_TEAM_CHARTER_CHARS
 
   const mountedRef = useRef(true)
   const reqSeqRef = useRef(0)
@@ -101,6 +102,8 @@ export function TeamCharterDialog({
   }, [])
 
   useEffect(() => {
+    inFlightSaveRef.current = false
+    setSaving(false)
     setSavedContent('')
     setDraft('')
     void loadCharter(threadId, { silent: false })
@@ -110,7 +113,7 @@ export function TeamCharterDialog({
   useEffect(() => {
     if (refreshTick === prevTickRef.current) return
     prevTickRef.current = refreshTick
-    if (savingRef.current) return
+    if (inFlightSaveRef.current || savingRef.current) return
     void loadCharter(threadId, { silent: true })
   }, [refreshTick, threadId, loadCharter])
 
@@ -136,15 +139,17 @@ export function TeamCharterDialog({
       }
       setError(formatCharterError(err, tRef.current, 'teamCharter.saveFailed'))
     } finally {
-      inFlightSaveRef.current = false
-      if (mountedRef.current && activeThreadRef.current === activeThread) {
-        setSaving(false)
+      if (activeThreadRef.current === activeThread) {
+        inFlightSaveRef.current = false
+        if (mountedRef.current) {
+          setSaving(false)
+        }
       }
     }
   }
 
   const locale = t.locale ?? 'en-US'
-  const charCountLabel = `${draft.length.toLocaleString(locale)} / ${MAX_TEAM_CHARTER_CHARS.toLocaleString(locale)}`
+  const charCountLabel = `${normalizedDraftLength.toLocaleString(locale)} / ${MAX_TEAM_CHARTER_CHARS.toLocaleString(locale)}`
   const displayError = overLimit ? t('teamCharter.tooLong', { max: MAX_TEAM_CHARTER_CHARS }) : error
 
   return (

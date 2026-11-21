@@ -111,7 +111,9 @@ export function DispatchPlanChip({
   }, [payload.status, cancellable])
 
   const steps = safeSteps(payload.steps)
-  const planStatusKey = PLAN_STATUS_KEY[payload.status] ?? 'dispatch.status.failed'
+  const planStatusKey = payload.status && Object.hasOwn(PLAN_STATUS_KEY, payload.status)
+    ? PLAN_STATUS_KEY[payload.status]
+    : 'dispatch.status.failed'
 
   const toggleOutput = (stepId: string) => {
     setExpandedOutputs((prev) => ({ ...prev, [stepId]: !prev[stepId] }))
