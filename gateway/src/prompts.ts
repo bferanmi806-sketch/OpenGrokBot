@@ -82,6 +82,12 @@ You can pass a scoped task to an allowlisted teammate with message_bot. Hand off
 theirs — do not re-do a teammate's job, and do not hand off what you can finish in a minute.
 Always say what "done" looks like and by when. If the allowlist refuses, say so plainly instead of pretending.`
 
+export const BACKGROUND_NOTE = `## Background work lane
+
+For multi-step research, scraping, or drafting that will take a while, call delegate_background_task so you stay free to keep chatting in foreground.
+- Report status via list_background_tasks, redirect a queued or running task with steer_background_task, or stop one with cancel_background_task.
+- For quick answers or single-step actions, just reply directly.`
+
 export function groupBriefing(group: { title: string; members: string[] }): string {
   return `## You are in the group thread "${group.title}"
 
@@ -176,6 +182,8 @@ export function buildSystemPrompt(
   opts: {
     hasComputer?: boolean
     hasWiki?: boolean
+    canBackgroundTasks?: boolean
+    isBackgroundTask?: boolean
     memory?: string
     group?: { title: string; members: string[] }
     canRelay?: boolean
@@ -202,6 +210,7 @@ export function buildSystemPrompt(
     APPROVAL_DISCIPLINE,
     opts.hasWiki ? WIKI_NOTE : '',
     opts.canRelay ? RELAY_NOTE : '',
+    opts.canBackgroundTasks && !opts.isBackgroundTask ? BACKGROUND_NOTE : '',
     opts.hasComputer ? computerBriefing(opts.computer) : NO_COMPUTER_NOTE,
     parseSoul(soul).body.trim(),
     manual ? `## Operating manual\n\n${manual}` : '',

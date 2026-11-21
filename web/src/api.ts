@@ -1,6 +1,6 @@
 import { fileToBase64 } from './attachments'
 import type {
-  AboutInfo, AppKey, ApprovalEditInput, AttachmentPayload, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
+  AboutInfo, AppKey, ApprovalEditInput, AttachmentPayload, BackgroundTaskActionResponse, BackgroundTaskView, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
   Conversation, CreateMcpServerInput, FieldError, GatewayEvent, ImportMcpServersInput, ImportMcpServersResult, LlmPriority, LlmQueueEndpointView,
   LlmQueueSnapshot, McpServersSnapshot, McpServerView, Message, ProviderPreset, QuietDigestBotSummary, QuietDigestFlushResponse, QuietDigestSummary,
   ResolveRuleProposalResponse, RoutineAction, RuleDuration, RuleProposalStatus, RuleProposalView, ServerEvent, SettingsView, SetupInfo, UpdateMcpServerPatch,
@@ -9,6 +9,11 @@ import type {
 
 export type {
   ApprovalEditInput,
+  BackgroundTaskActionResponse,
+  BackgroundTaskPayload,
+  BackgroundTaskStatus,
+  BackgroundTaskStep,
+  BackgroundTaskView,
   CreateMcpServerInput,
   GatewayEvent,
   ImportMcpServersInput,
@@ -373,6 +378,23 @@ export function fetchQuietDigest(): Promise<QuietDigestSummary> {
 /** 本地模型优先级队列快照（并发上限、各端点运行中与排队中数量） */
 export function fetchLlmQueue(): Promise<LlmQueueSnapshot> {
   return getApiJson<LlmQueueSnapshot>('/api/llm-queue')
+}
+
+/** 查询某位同事的后台任务列表（运行中/排队中在前，最新在前） */
+export function fetchBackgroundTasks(botId: string): Promise<{ tasks: BackgroundTaskView[] }> {
+  return getApiJson<{ tasks: BackgroundTaskView[] }>(`/api/bots/${encodeURIComponent(botId)}/background-tasks`)
+}
+
+/** 向排队中或运行中的后台任务发送纠偏指令 */
+export async function steerBackgroundTask(id: string, note: string): Promise<BackgroundTaskActionResponse> {
+  const res = await send('POST', `/api/background-tasks/${encodeURIComponent(id)}/steer`, { note }, { strict: true })
+  return res.json() as Promise<BackgroundTaskActionResponse>
+}
+
+/** 取消排队中或运行中的后台任务 */
+export async function cancelBackgroundTask(id: string): Promise<BackgroundTaskActionResponse> {
+  const res = await send('POST', `/api/background-tasks/${encodeURIComponent(id)}/cancel`, undefined, { strict: true })
+  return res.json() as Promise<BackgroundTaskActionResponse>
 }
 
 /** 立即投递免打扰期间暂存的晨报更新（可按同事筛选） */

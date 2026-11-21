@@ -222,7 +222,7 @@ export type ApprovalPayload = {
   /** 同一个原因的代码和插值，界面按语言说；老 chip 只有上面那句英文 */
   rememberReason?: BlockReason
   /** 有规则本来能放行它，但这一回合不是你开的头（或眼前有外部数据），所以还是问了你 */
-  ruleHeld?: 'routine' | 'webhook' | 'relay' | 'outside-data' | 'unknown'
+  ruleHeld?: 'routine' | 'webhook' | 'relay' | 'background' | 'outside-data' | 'unknown'
   /** 一批对象，一项一行 */
   items?: string[]
   /** 你勾留下、放行了的那几项的下标 */
@@ -351,6 +351,8 @@ export type ComputerInfo = {
   connectors?: ComputerConnectorItem[]
   /** 已配置的 MCP 服务，以及这位同事有没有获得访问授权 */
   mcpServers?: BotMcpServerItem[]
+  /** 后台任务列表（运行中/排队中在前，最新在前） */
+  backgroundTasks?: BackgroundTaskView[]
 }
 
 export type ComputerView = ComputerInfo
@@ -373,6 +375,7 @@ export type MessageKind =
   | 'attachment'
   | 'quiet_digest'
   | 'rule_proposal'
+  | 'background_task'
 
 export type Message = {
   id: number
@@ -396,6 +399,7 @@ export type Message = {
     | NoticePayload
     | QuietDigestPayload
     | RuleProposalPayload
+    | BackgroundTaskPayload
     | null
   created_at: number
 }
@@ -437,6 +441,7 @@ export type GatewayEvent =
   | { type: 'mcp_changed' }
   | { type: 'wiki_changed' }
   | { type: 'quiet_digest_changed' }
+  | { type: 'background_task_changed'; botId: string; task: BackgroundTaskView }
 
 export type ServerEvent = GatewayEvent
 
@@ -843,4 +848,54 @@ export type LlmQueueEndpointView = {
 export type LlmQueueSnapshot = {
   concurrency: number
   endpoints: LlmQueueEndpointView[]
+}
+
+export type BackgroundTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+export type BackgroundTaskStep = {
+  tool: string
+  summary: string
+  ok?: boolean
+  ms?: number
+  at: number
+}
+
+export type BackgroundTaskView = {
+  id: string
+  botId: string
+  threadId: string
+  title: string
+  instructions: string
+  status: BackgroundTaskStatus
+  stepCount: number
+  lastStep: string
+  steps: BackgroundTaskStep[]
+  summary: string
+  error: string
+  usesBrowser: boolean
+  sourceTainted?: boolean
+  messageId: number | null
+  createdAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export type BackgroundTaskPayload = {
+  taskId: string
+  title: string
+  status: BackgroundTaskStatus
+  stepCount: number
+  lastStep: string
+  steps: BackgroundTaskStep[]
+  summary?: string
+  error?: string
+  usesBrowser: boolean
+  createdAt: number
+  startedAt?: number | null
+  finishedAt?: number | null
+}
+
+export type BackgroundTaskActionResponse = {
+  ok: true
+  task: BackgroundTaskView
 }

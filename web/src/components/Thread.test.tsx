@@ -489,4 +489,51 @@ describe('Thread', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save to MEMORY.md' }))
     expect(onResolveRuleProposal).toHaveBeenCalledWith(7, 'accept', 'Never send Slack blasts on weekends')
   })
+
+  it('renders background_task messages and forwards steer and cancel callbacks', async () => {
+    const onSteer = vi.fn().mockResolvedValue(undefined)
+    const onCancel = vi.fn().mockResolvedValue(undefined)
+    const user = userEvent.setup()
+    const bgMessages: Message[] = [
+      {
+        id: 70,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'background_task',
+        content: '',
+        created_at: 70,
+        payload: {
+          taskId: 'bg-abcd1234',
+          title: 'Audit pricing pages',
+          status: 'running',
+          stepCount: 1,
+          lastStep: 'browser_goto: https://example.com',
+          steps: [{ tool: 'browser_goto', summary: 'https://example.com', ok: true, at: 70 }],
+          usesBrowser: true,
+          createdAt: 70,
+        },
+      },
+    ]
+    render(
+      <Thread
+        conversation={dm}
+        roster={roster}
+        messages={bgMessages}
+        thinking={false}
+        onSend={() => {}}
+        onDecide={() => {}}
+        onSteerBackgroundTask={onSteer}
+        onCancelBackgroundTask={onCancel}
+      />,
+    )
+    expect(screen.getByText('Audit pricing pages')).toBeInTheDocument()
+    expect(screen.getByText('Using browser')).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText('Send a steering note…'), 'Focus on Pro plan')
+    await user.click(screen.getByRole('button', { name: 'Steer' }))
+    expect(onSteer).toHaveBeenCalledWith('bg-abcd1234', 'Focus on Pro plan')
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).toHaveBeenCalledWith('bg-abcd1234')
+  })
 })

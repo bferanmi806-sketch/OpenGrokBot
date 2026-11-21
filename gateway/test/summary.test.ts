@@ -33,15 +33,15 @@ describe('/api/summary', () => {
     const post = (thread: string) => app.request(`/api/threads/${thread}/messages`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'go' }),
     })
-    expect(await summary()).toEqual({ working: 0, waiting: 0, routines: 0 })
+    expect(await summary()).toEqual({ working: 0, waiting: 0, routines: 0, backgroundTasks: 0 })
 
     createRoutine(db, { botId: 'researcher', name: 'Digest', cron: '0 9 * * *', instructions: 'x' })
     const off = createRoutine(db, { botId: 'chief', name: 'Paused', cron: '0 9 * * *', instructions: 'x' })
     setRoutineEnabled(db, off.id, false)
     await post('dm:researcher')
     await post('dm:chief')
-    await vi.waitFor(async () => expect(await summary()).toEqual({ working: 1, waiting: 1, routines: 1 }))
+    await vi.waitFor(async () => expect(await summary()).toEqual({ working: 1, waiting: 1, routines: 1, backgroundTasks: 0 }))
     release()
-    await vi.waitFor(async () => expect(await summary()).toEqual({ working: 0, waiting: 1, routines: 1 }))
+    await vi.waitFor(async () => expect(await summary()).toEqual({ working: 0, waiting: 1, routines: 1, backgroundTasks: 0 }))
   })
 })

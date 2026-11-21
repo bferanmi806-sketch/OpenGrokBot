@@ -238,4 +238,56 @@ describe('Sidebar', () => {
     expect(screen.getByText('💡 Never email bob@acme.com without asking')).toBeInTheDocument()
     expect(screen.getByText('🌅 Morning digest (3 updates)')).toBeInTheDocument()
   })
+
+  it('previews background_task messages with title or fallback label', () => {
+    const withTitle = conversation({
+      id: 'dm:researcher',
+      title: 'Scout',
+      members: ['researcher'],
+      last_message: {
+        id: 22,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'background_task',
+        content: '',
+        created_at: 22,
+        payload: {
+          taskId: 'bg-12345678',
+          title: 'Competitor audit',
+          status: 'running',
+          stepCount: 2,
+          lastStep: 'browser_goto: example.com',
+          steps: [],
+          usesBrowser: true,
+          createdAt: 22,
+        },
+      },
+    })
+    const withoutTitle = conversation({
+      id: 'dm:chief',
+      title: 'Chief',
+      members: ['chief'],
+      last_message: {
+        id: 23,
+        thread_id: 'dm:chief',
+        sender: 'chief',
+        kind: 'background_task',
+        content: '',
+        created_at: 23,
+        payload: {
+          taskId: 'bg-87654321',
+          title: '',
+          status: 'queued',
+          stepCount: 0,
+          lastStep: '',
+          steps: [],
+          usesBrowser: false,
+          createdAt: 23,
+        },
+      },
+    })
+    render(<Sidebar conversations={[withTitle, withoutTitle]} selectedId={null} statuses={{}} onSelect={() => {}} onNewBot={() => {}} />)
+    expect(screen.getByText('⚡ Background: Competitor audit')).toBeInTheDocument()
+    expect(screen.getByText('⚡ Background task')).toBeInTheDocument()
+  })
 })

@@ -18,6 +18,7 @@ const HELD_BECAUSE: Record<string, MessageKey> = {
   webhook: 'approval.held.webhook',
   routine: 'approval.held.routine',
   relay: 'approval.held.relay',
+  background: 'approval.held.background',
   'outside-data': 'approval.held.outsideData',
   unknown: 'approval.held.unknown',
 }

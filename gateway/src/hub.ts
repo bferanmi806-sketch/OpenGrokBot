@@ -1,3 +1,4 @@
+import type { BackgroundTaskView } from './background-tasks.js'
 import type { BrowserStatus } from './browsers.js'
 import type { MessageRow } from './db.js'
 
@@ -17,6 +18,7 @@ export type GatewayEvent =
   | { type: 'mcp_changed' }
   | { type: 'wiki_changed' }
   | { type: 'quiet_digest_changed' }
+  | { type: 'background_task_changed'; botId: string; task: BackgroundTaskView }
 
 type WsLike = { send(data: string): void }
 

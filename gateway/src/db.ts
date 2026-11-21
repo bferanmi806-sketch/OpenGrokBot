@@ -19,6 +19,7 @@ export type MessageKind =
   | 'attachment'
   | 'quiet_digest'
   | 'rule_proposal'
+  | 'background_task'
 
 export type BotRow = {
   id: string
@@ -410,6 +411,34 @@ const MIGRATIONS: Migration[] = [
 
       CREATE INDEX IF NOT EXISTS idx_approvals_discard_lookup
         ON approvals(bot_id, status, kind, target, resolved_at DESC);
+    `)
+  },
+  // v16：非阻塞后台任务表（Meta / AlterEgo 副车道执行记录与实时进度）
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS background_tasks (
+        id TEXT PRIMARY KEY,
+        bot_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        instructions TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        step_count INTEGER NOT NULL DEFAULT 0,
+        last_step TEXT NOT NULL DEFAULT '',
+        steps_json TEXT NOT NULL DEFAULT '[]',
+        summary TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        uses_browser INTEGER NOT NULL DEFAULT 0,
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        message_id INTEGER,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_background_tasks_bot
+        ON background_tasks(bot_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_background_tasks_status
+        ON background_tasks(status, bot_id);
     `)
   },
 ]

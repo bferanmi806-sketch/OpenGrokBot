@@ -2,6 +2,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api'
+import { I18nProvider } from '../i18n'
 import type { ApprovalPayload } from '../types'
 import { ApprovalChip } from './ApprovalChip'
 
@@ -85,6 +86,21 @@ describe('ApprovalChip', () => {
     expect(screen.getByText(/Your standing rule covers email → bob@acme.com, but rules only apply to work you start yourself: this came in through a webhook\./))
       .toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+  })
+
+  it('explains when a standing rule was held because the turn is a background task', () => {
+    const { unmount } = render(
+      <ApprovalChip payload={{ ...pending, kind: 'email', target: 'bob@acme.com', canRemember: true, ruleHeld: 'background' }} onDecide={() => {}} />,
+    )
+    expect(screen.getByText(/Your standing rule covers email → bob@acme.com, but rules only apply to work you start yourself: this is running as a background task\./))
+      .toBeInTheDocument()
+    unmount()
+    render(
+      <I18nProvider lang="zh-CN">
+        <ApprovalChip payload={{ ...pending, kind: 'email', target: 'bob@acme.com', canRemember: true, ruleHeld: 'background' }} onDecide={() => {}} />
+      </I18nProvider>,
+    )
+    expect(screen.getByText(/你的放行规矩管得到「email → bob@acme.com」.*这件事正在后台任务里跑。/)).toBeInTheDocument()
   })
 
   it('says why "Always allow" is not offered for a vague destination', () => {

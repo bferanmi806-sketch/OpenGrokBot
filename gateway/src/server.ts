@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { Hono, type Context } from 'hono'
 import { listActions, recordAction, type ActionTrigger } from './actions.js'
-import { runTurn, type AttachmentBrief, type TurnOrigin, type TurnOutcome } from './agent.js'
+import { runTurn, type AgentDeps, type AttachmentBrief, type TurnOrigin, type TurnOutcome } from './agent.js'
 import { applyApprovalEdit, type AppliedApprovalEdit } from './approval-edit.js'
 import {
   attachApprovalMessage, canRemember, createApproval, createRule, findMatchingRule, getApproval, getRule, isRuleDuration,
@@ -13,7 +13,20 @@ import {
 } from './approvals.js'
 import { canMessage, denyReason, type A2ARules } from './a2a.js'
 import { authMiddleware, loginHandler } from './auth.js'
+import {
+  createBackgroundTaskManager,
+  listBackgroundTasks,
+  reconcileStaleBackgroundTasks,
+  type BackgroundSteeringNote,
+  type BackgroundTaskRunContext,
+  type BackgroundTaskRunnerResult,
+} from './background-tasks.js'
 import { createBot } from './bots.js'
+import {
+  createBrowserLeasePool,
+  formatBrowserConflict,
+  type BrowserLeaseHolder,
+} from './browser-lease.js'
 import {
   type BotRow, type Db, ensureDmThread, getMessage, insertMessage, listBotsWithLastMessage, listConversations, listMessages, type MessageRow, pendingCount, recordUsage, setBotShell, threadMembers, updateMessagePayload, usageSince, waitsOnOperator,
 } from './db.js'
@@ -180,6 +193,7 @@ type ActiveWorkflowRecording = {
   stopping: Promise<WorkflowTrace> | null
   draft: WorkflowDraft | null
   releaseTurns: () => void
+  releaseBrowser: () => void
   timeout: ReturnType<typeof setTimeout> | null
   cancelled: boolean
   released: boolean
@@ -197,6 +211,7 @@ type ActiveWorkflowRun = {
   bindings: Map<string, string>
   rulesAllowed: boolean
   releaseTurns: () => void
+  releaseBrowser: () => void
   controller: AbortController
   phase: WorkflowRunPhase
   released: boolean
@@ -314,6 +329,8 @@ export function createApp(deps: AppDeps): GatewayApp {
     now: () => now().getTime(),
   })
   const app = new Hono()
+  const browserLeases = createBrowserLeasePool()
+  reconcileStaleBackgroundTasks(db, { now: now().getTime() })
   // 车道只说「忙 / 不忙」；不忙的时候是在等你、卡住了，还是真的闲着，由 presenceOf 看库和上一回合的收场来定
   const turns = createTurnQueue((botId) => publishPresence(botId))
   const rounds = createTurnQueue(() => {})
@@ -450,6 +467,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     if (workflowRecordings.get(botId) === active) workflowRecordings.delete(botId)
     if (!active.released) {
       active.released = true
+      active.releaseBrowser()
       active.releaseTurns()
     }
   }
@@ -622,6 +640,339 @@ export function createApp(deps: AppDeps): GatewayApp {
     onStatus: () => {},
   })
 
+  async function prepareTurnDeps(params: {
+    bot: BotRow
+    threadId: string
+    signal: AbortSignal
+    origin: TurnOrigin
+    priority: LlmPriority
+    trigger: ActionTrigger
+    effectiveMode: RoutineMode
+    hop?: number
+    group?: { title: string; members: string[] }
+    tainted?: boolean
+    onTainted?: () => void
+    quietBuffer?: boolean
+    routineId?: number
+    routineName?: string
+    isBackgroundTask?: boolean
+    historyLimit?: number
+    drainSteeringNotes?: () => BackgroundSteeringNote[]
+    onStepProgress?: (step: { tool: string; summary: string; ok: boolean; ms: number }) => void
+    onAcquireBrowser?: (toolName: string) => { ok: true } | { ok: false; reason: string }
+    onFinalText?: (text: string) => void
+    onReportFiled?: (summary: string) => void
+    includeBackgroundControls?: boolean
+  }): Promise<AgentDeps> {
+    const { bot, threadId, signal, origin, priority, trigger, effectiveMode } = params
+    const isWatch = effectiveMode === 'watch'
+    const isPrepare = effectiveMode === 'prepare'
+    const readOnlyExternal = isWatch || isPrepare
+    const { soul, manual } = loadPersona(bot)
+    const memory = dataDir ? await readMemory(dataDir, bot.id) : ''
+    const routines = listRoutines(db, bot.id)
+      .map((r) => ({
+        id: r.id,
+        name: r.name,
+        human: describeRoutine(r),
+        enabled: r.enabled === 1,
+        watch: r.mode === 'watch',
+        mode: r.mode,
+      }))
+    const botConnectors = listBotConnectorsAllStatuses(db, bot.id)
+    const activeConnectors = botConnectors.filter((c) => c.status === 'active')
+    const promptConnectors = botConnectors.map((c) => ({
+      id: c.id,
+      app: c.app,
+      label: c.account_label || c.id,
+      status: c.status,
+    }))
+    const connectorTools = buildConnectorTools(activeConnectors, { watch: readOnlyExternal })
+    let botMcpServers = listBotMcpServersAllStatuses(db, bot.id)
+    const unprobedMcpServers = botMcpServers.filter(
+      (s) => s.enabled && s.tools.length === 0 && s.status === 'disconnected',
+    )
+    if (unprobedMcpServers.length > 0) {
+      await Promise.all(unprobedMcpServers.map((s) => mcpManager.ensureDiscovered(s.id).catch(() => null)))
+      botMcpServers = listBotMcpServersAllStatuses(db, bot.id)
+    }
+    const enabledMcpServers = botMcpServers.filter((s) => s.enabled)
+    const { tools: mcpTools, readToolNames: mcpReadToolNames } = buildMcpToolSet(enabledMcpServers, {
+      watch: readOnlyExternal,
+    })
+    const promptMcpServers = botMcpServers.map((s) => ({
+      id: s.id,
+      name: s.name,
+      slug: s.slug,
+      enabled: s.enabled,
+      status: s.status,
+      toolCount: s.tools.length,
+    }))
+    const skills = dataDir ? await listSkills(skillsDir(dataDir)) : []
+    // 这位同事此刻用的模型：回合开始时定下，回合中途改了设置从下一回合起生效
+    const own = deps.llmFor?.(bot.id)
+    const vision = own ? own.vision : (typeof deps.vision === 'function' ? deps.vision() : deps.vision) === true
+    return {
+      db,
+      llm: own?.llm ?? llm,
+      bot,
+      soul,
+      manual,
+      memory,
+      routines,
+      connectors: promptConnectors,
+      connectorTools,
+      mcpServers: promptMcpServers,
+      mcpTools,
+      mcpReadToolNames,
+      threadId,
+      signal,
+      now,
+      origin,
+      priority,
+      ...(params.tainted ? { tainted: true } : {}),
+      ...(params.onTainted ? { onTainted: params.onTainted } : {}),
+      hop: params.hop ?? 0,
+      vision,
+      ...(params.isBackgroundTask ? { isBackgroundTask: true } : {}),
+      ...(params.historyLimit ? { historyLimit: params.historyLimit } : {}),
+      ...(params.drainSteeringNotes ? { drainSteeringNotes: params.drainSteeringNotes } : {}),
+      ...(params.onStepProgress ? { onStepProgress: params.onStepProgress } : {}),
+      ...(params.onAcquireBrowser ? { onAcquireBrowser: params.onAcquireBrowser } : {}),
+      ...(params.onFinalText ? { onFinalText: params.onFinalText } : {}),
+      ...(params.onReportFiled ? { onReportFiled: params.onReportFiled } : {}),
+      onListBackgroundTasks: () => listBackgroundTasks(db, { botId: bot.id, limit: 20 }),
+      ...(params.includeBackgroundControls ? {
+        onDelegateBackgroundTask: async ({ title, instructions, tainted }) => {
+          const res = backgroundTasks.enqueue({
+            botId: bot.id,
+            threadId,
+            title,
+            instructions,
+            sourceTainted: tainted === true,
+          })
+          return res.ok ? { ok: true, task: res.task } : { ok: false, error: res.error }
+        },
+        onSteerBackgroundTask: async ({ taskId, note, tainted }) => {
+          const res = backgroundTasks.steer(taskId, note, { botId: bot.id, tainted: tainted === true })
+          return res.ok ? { ok: true, task: res.task } : { ok: false, error: res.error }
+        },
+        onCancelBackgroundTask: async ({ taskId }) => {
+          const res = backgroundTasks.cancel(taskId, { botId: bot.id })
+          return res.ok ? { ok: true, task: res.task } : { ok: false, error: res.error }
+        },
+      } : {}),
+      onConnectorTool: ({ name, args, ruleBlock, events: turnEvents }) =>
+        runConnectorToolCall({
+          db,
+          driver: connectorDriver,
+          hub,
+          botId: bot.id,
+          threadId,
+          trigger,
+          name,
+          args,
+          ruleBlock,
+          events: turnEvents,
+          readOnly: readOnlyExternal,
+          now: now().getTime(),
+        }),
+      onMcpTool: ({ name, args, events: turnEvents, signal: toolSignal }) =>
+        runMcpToolCall({
+          db,
+          manager: mcpManager,
+          botId: bot.id,
+          threadId,
+          trigger,
+          name,
+          args,
+          watch: readOnlyExternal,
+          signal: toolSignal ?? signal,
+          events: turnEvents,
+          now: now().getTime(),
+        }),
+      onWikiTool: ({ name, args, turnTainted }) =>
+        runWikiToolCall({
+          db,
+          dataDir,
+          hub,
+          botId: bot.id,
+          threadId,
+          trigger,
+          origin,
+          turnTainted,
+          watch: isWatch,
+          name,
+          args,
+          now: now().getTime(),
+        }),
+      ...(uploads ? { attachments: (rows: MessageRow[]) => briefAttachments(bot, vision, rows) } : {}),
+      ...(deps.timeZone ? { timeZone: deps.timeZone } : {}),
+      ...(deps.maxSteps ? { maxSteps: deps.maxSteps } : {}),
+      ...(deps.turnMinutes !== undefined ? { turnTimeoutMs: deps.turnMinutes * 60_000 } : {}),
+      ...(params.group ? { group: params.group } : {}),
+      onUsage: (usage) => recordUsage(db, { botId: bot.id, threadId, usage, at: now().getTime() }),
+      onAction: (a) => recordAction(db, { botId: bot.id, threadId, trigger, ...a, at: now().getTime() }),
+      routineMode: effectiveMode,
+      ...(isWatch ? { watch: true } : {}),
+      ...(params.quietBuffer ? {
+        quietBuffer: true,
+        onQuietBuffer: (item: { kind: 'report' | 'text'; summary: string; payload: unknown }) => {
+          enqueueQuietDigestItem(db, {
+            botId: bot.id,
+            threadId,
+            routineId: params.routineId ?? null,
+            routineName: params.routineName ?? '',
+            routineMode: effectiveMode,
+            kind: item.kind,
+            summary: item.summary,
+            payload: item.payload,
+            now: now().getTime(),
+            hub,
+          })
+        },
+      } : {}),
+      ...(skills.length ? { skills, onReadSkill: (name: string) => readSkill(skillsDir(dataDir), name) } : {}),
+      checkBudget: () => budgetNote(bot),
+      language: uiLanguage(),
+      onMessageBot: ({ to, content, tainted }) => relay(bot, to, content, params.hop ?? 0, tainted),
+      // 容器：提前拉起来，用户点开面板时屏幕已经在了；本机：把浏览器以窗口开到桌面上让人登录
+      ...(pool ? { onAskForLogin: async () => { await (await pool.get(bot.id)).showWindow?.() } } : {}),
+      ...(pool ? { getComputer: () => pool.get(bot.id) } : {}),
+      computer: { kind: computerKind, shell: shellEnabledFor(bot) },
+      ...(pool && dataDir ? { saveShot: (botId, shot) => saveScreenshot(dataDir, botId, shot, Date.now()) } : {}),
+      onApproval: async ({ action, detail, kind, target, rulesAllowed, items }) => {
+        const at = now().getTime()
+        // 规则只看「谁 · 哪类 · 发给谁」：bot 自己不能建、不能改规则，只有操作者在放行时能留下一条。
+        // 而且只在操作者自己开头、上下文里没有外部载荷的回合里生效；一批对象每项去向都不同，永远等人
+        const match = items ? null : findMatchingRule(db, { botId: bot.id, kind, target, now: at })
+        const rule = rulesAllowed ? match : null
+        const approval = createApproval(db, {
+          threadId, botId: bot.id, action, detail, kind, target, now: at,
+          ...(rule ? { ruleId: rule.id } : {}), ...(items ? { items } : {}),
+        })
+        if (!rule) return { approvalId: approval.id, ...(match ? { ruleHeld: true } : {}) }
+        recordAction(db, {
+          botId: bot.id, threadId, trigger, tool: 'approval', summary: `allowed by your rule #${rule.id}: ${action}`, at,
+        })
+        return { approvalId: approval.id, rule: { id: rule.id, kind: rule.kind, target: rule.target, expiresAt: rule.expires_at } }
+      },
+      ...(dataDir ? {
+        onSaveMemory: (rule: string) => appendMemoryRule(dataDir, bot.id, rule),
+        onForgetMemory: (rule: string) => removeMemoryRule(dataDir, bot.id, rule),
+        onProposeMemoryRule: ({ rule, reason, sourceTainted }) =>
+          createRuleProposal(db, {
+            botId: bot.id,
+            threadId,
+            rule,
+            reason,
+            source: 'agent',
+            sourceTainted,
+            dataDir,
+            hub,
+            now: now().getTime(),
+          }),
+      } : {}),
+      onCreateRoutine: async ({ name, cron, instructions, webhook, mode }) => {
+        if (cron && !isValidCron(cron)) throw new Error(`not a valid cron expression: ${cron}`)
+        const routine = createRoutine(db, { botId: bot.id, name, cron, instructions, webhook, mode })
+        scheduler?.add(routine)
+        return {
+          id: routine.id, name: routine.name, cron: routine.cron, human: describeRoutine(routine),
+          webhook: Boolean(routine.webhook_key), mode: routine.mode,
+        }
+      },
+      onStopRoutine: async (id) => {
+        const routine = getRoutine(db, id)
+        if (!routine || routine.bot_id !== bot.id) return { ok: false, reason: `You have no routine #${id}.` }
+        setRoutineEnabled(db, id, false)
+        scheduler?.remove(id)
+        return { ok: true, name: routine.name }
+      },
+    }
+  }
+
+  async function runBackgroundTask(ctx: BackgroundTaskRunContext): Promise<BackgroundTaskRunnerResult> {
+    const bot = botById(ctx.task.botId)
+    if (!bot) {
+      return { status: 'failed', error: 'Teammate no longer exists.' }
+    }
+    const bgHolder: BrowserLeaseHolder = {
+      kind: 'background',
+      taskId: ctx.task.id,
+      title: ctx.task.title,
+    }
+    let finalText = ''
+    let reportSummary = ''
+    try {
+      const group = groupContext(ctx.task.threadId)
+      const turnDeps = await prepareTurnDeps({
+        bot,
+        threadId: ctx.task.threadId,
+        signal: ctx.signal,
+        origin: 'background',
+        priority: 'background',
+        trigger: 'background',
+        effectiveMode: 'act',
+        ...(ctx.task.sourceTainted ? { tainted: true } : {}),
+        ...(group ? { group } : {}),
+        isBackgroundTask: true,
+        historyLimit: 12,
+        drainSteeringNotes: ctx.drainSteeringNotes,
+        onStepProgress: (step) => ctx.recordStep(step),
+        onAcquireBrowser: () => {
+          const r = browserLeases.acquire(bot.id, bgHolder)
+          if (!r.ok) return { ok: false, reason: formatBrowserConflict('background', r.holder) }
+          if (r.newlyAcquired) ctx.markUsesBrowser()
+          return { ok: true }
+        },
+        onFinalText: (t) => { finalText = t },
+        onReportFiled: (s) => { reportSummary = s },
+      })
+      if (ctx.signal.aborted) {
+        return { status: 'cancelled' }
+      }
+      const hiddenIds = [...(waiting.get(ctx.task.threadId) ?? [])]
+      const seed =
+        `[background task ${ctx.task.id}] Title: ${ctx.task.title}\n\n`
+        + `Instructions:\n${ctx.task.instructions}\n\n`
+        + 'You are running in your background lane while foreground chat stays free for your operator. '
+        + 'Work through the instructions step by step, follow any mid-flight steering notes if they arrive, '
+        + 'hold outward-facing actions for approval, and finish with a concise summary or report.'
+      const outcome = await runTurn(turnDeps, seed, events(ctx.task.threadId), {
+        persistUserMessage: false,
+        hiddenIds,
+      })
+      if (outcome === 'stopped' || ctx.signal.aborted) {
+        return { status: 'cancelled' }
+      }
+      if (outcome === 'error') {
+        return { status: 'failed', error: 'Background task encountered an error.' }
+      }
+      if (outcome === 'budget') {
+        return { status: 'failed', error: 'Daily token budget reached.' }
+      }
+      if (outcome === 'limit') {
+        return { status: 'failed', error: 'Turn step or time limit reached.' }
+      }
+      return { status: 'completed', summary: finalText || reportSummary || 'Completed.' }
+    } finally {
+      browserLeases.release(bot.id, bgHolder)
+      try {
+        publishPresence(bot.id)
+      } catch {
+        // Gateway shutdown or test teardown may close the DB while unwinding.
+      }
+    }
+  }
+
+  const backgroundTasks = createBackgroundTaskManager({
+    db,
+    hub,
+    now: () => now().getTime(),
+    runTask: runBackgroundTask,
+  })
+
   function startTurn(bot: BotRow, threadId: string, text: string, opts: TurnOpts): Promise<void> {
     return turns.run(bot.id, threadId, async (signal) => {
       const waitingHere = [...(waiting.get(threadId) ?? [])]
@@ -633,212 +984,48 @@ export function createApp(deps: AppDeps): GatewayApp {
       }
       if (pool && opts.prewarm) void pool.get(bot.id).catch(() => {})
       // 登录接管留下的窗口：操作者再开口（下一条消息、一个决定）就收回后台；routine、webhook、
-      // 转交开的回合不动它——人可能正在那个窗口里敲密码。只收已经开着的电脑，不为此拉起一台。
-      if (pool && opts.origin === 'operator') await pool.peek(bot.id)?.then((c) => c.hideWindow?.()).catch(() => {})
-      opts.onStart?.()
-      const { soul, manual } = loadPersona(bot)
-      const memory = dataDir ? await readMemory(dataDir, bot.id) : ''
-      const effectiveMode: RoutineMode = opts.routineMode ?? (opts.watch ? 'watch' : 'act')
-      const isWatch = effectiveMode === 'watch'
-      const isPrepare = effectiveMode === 'prepare'
-      const readOnlyExternal = isWatch || isPrepare
-      const routines = listRoutines(db, bot.id)
-        .map((r) => ({
-          id: r.id,
-          name: r.name,
-          human: describeRoutine(r),
-          enabled: r.enabled === 1,
-          watch: r.mode === 'watch',
-          mode: r.mode,
-        }))
-      const botConnectors = listBotConnectorsAllStatuses(db, bot.id)
-      const activeConnectors = botConnectors.filter((c) => c.status === 'active')
-      const promptConnectors = botConnectors.map((c) => ({
-        id: c.id,
-        app: c.app,
-        label: c.account_label || c.id,
-        status: c.status,
-      }))
-      const connectorTools = buildConnectorTools(activeConnectors, { watch: readOnlyExternal })
-      let botMcpServers = listBotMcpServersAllStatuses(db, bot.id)
-      const unprobedMcpServers = botMcpServers.filter(
-        (s) => s.enabled && s.tools.length === 0 && s.status === 'disconnected',
-      )
-      if (unprobedMcpServers.length > 0) {
-        await Promise.all(unprobedMcpServers.map((s) => mcpManager.ensureDiscovered(s.id).catch(() => null)))
-        botMcpServers = listBotMcpServersAllStatuses(db, bot.id)
+      // 转交开的回合，或者后台任务正占用浏览器时不动它——人或后台任务可能正在用那个窗口。只收已经开着的电脑，不为此拉起一台。
+      if (pool && opts.origin === 'operator' && !browserLeases.isHeldByBackground(bot.id)) {
+        await pool.peek(bot.id)?.then((c) => c.hideWindow?.()).catch(() => {})
       }
-      const enabledMcpServers = botMcpServers.filter((s) => s.enabled)
-      const { tools: mcpTools, readToolNames: mcpReadToolNames } = buildMcpToolSet(enabledMcpServers, {
-        watch: readOnlyExternal,
-      })
-      const promptMcpServers = botMcpServers.map((s) => ({
-        id: s.id,
-        name: s.name,
-        slug: s.slug,
-        enabled: s.enabled,
-        status: s.status,
-        toolCount: s.tools.length,
-      }))
-      const skills = dataDir ? await listSkills(skillsDir(dataDir)) : []
+      opts.onStart?.()
+      const effectiveMode: RoutineMode = opts.routineMode ?? (opts.watch ? 'watch' : 'act')
       const trigger = opts.trigger ?? 'you'
-      // 这位同事此刻用的模型：回合开始时定下，回合中途改了设置从下一回合起生效
-      const own = deps.llmFor?.(bot.id)
-      const vision = own ? own.vision : (typeof deps.vision === 'function' ? deps.vision() : deps.vision) === true
       const priority: LlmPriority =
         opts.priority ?? (opts.origin === 'operator' ? 'interactive' : opts.origin === 'routine' ? 'routine' : 'background')
-      const outcome = await runTurn({
-        db,
-        llm: own?.llm ?? llm,
-        bot,
-        soul,
-        manual,
-        memory,
-        routines,
-        connectors: promptConnectors,
-        connectorTools,
-        mcpServers: promptMcpServers,
-        mcpTools,
-        mcpReadToolNames,
-        threadId,
-        signal,
-        now,
-        origin: opts.origin,
-        priority,
-        ...(opts.tainted ? { tainted: true } : {}),
-        ...(opts.onTainted ? { onTainted: opts.onTainted } : {}),
-        hop: opts.hop ?? 0,
-        vision,
-        onConnectorTool: ({ name, args, ruleBlock, events: turnEvents }) =>
-          runConnectorToolCall({
-            db,
-            driver: connectorDriver,
-            hub,
-            botId: bot.id,
-            threadId,
-            trigger,
-            name,
-            args,
-            ruleBlock,
-            events: turnEvents,
-            readOnly: readOnlyExternal,
-            now: now().getTime(),
-          }),
-        onMcpTool: ({ name, args, events: turnEvents, signal: toolSignal }) =>
-          runMcpToolCall({
-            db,
-            manager: mcpManager,
-            botId: bot.id,
-            threadId,
-            trigger,
-            name,
-            args,
-            watch: readOnlyExternal,
-            signal: toolSignal ?? signal,
-            events: turnEvents,
-            now: now().getTime(),
-          }),
-        onWikiTool: ({ name, args, turnTainted }) =>
-          runWikiToolCall({
-            db,
-            dataDir,
-            hub,
-            botId: bot.id,
-            threadId,
-            trigger,
-            origin: opts.origin,
-            turnTainted,
-            watch: isWatch,
-            name,
-            args,
-            now: now().getTime(),
-          }),
-        ...(uploads ? { attachments: (rows: MessageRow[]) => briefAttachments(bot, vision, rows) } : {}),
-        ...(deps.timeZone ? { timeZone: deps.timeZone } : {}),
-        ...(deps.maxSteps ? { maxSteps: deps.maxSteps } : {}),
-        ...(deps.turnMinutes !== undefined ? { turnTimeoutMs: deps.turnMinutes * 60_000 } : {}),
-        ...(opts.group ? { group: opts.group } : {}),
-        onUsage: (usage) => recordUsage(db, { botId: bot.id, threadId, usage, at: now().getTime() }),
-        onAction: (a) => recordAction(db, { botId: bot.id, threadId, trigger, ...a, at: now().getTime() }),
-        routineMode: effectiveMode,
-        ...(isWatch ? { watch: true } : {}),
-        ...(opts.quietBuffer ? {
-          quietBuffer: true,
-          onQuietBuffer: (item: { kind: 'report' | 'text'; summary: string; payload: unknown }) => {
-            enqueueQuietDigestItem(db, {
-              botId: bot.id,
-              threadId,
-              routineId: opts.routineId ?? null,
-              routineName: opts.routineName ?? '',
-              routineMode: effectiveMode,
-              kind: item.kind,
-              summary: item.summary,
-              payload: item.payload,
-              now: now().getTime(),
-              hub,
-            })
+      const fgHolder: BrowserLeaseHolder = { kind: 'foreground', token: randomUUID(), label: 'foreground chat' }
+      try {
+        const turnDeps = await prepareTurnDeps({
+          bot,
+          threadId,
+          signal,
+          origin: opts.origin,
+          priority,
+          trigger,
+          effectiveMode,
+          ...(opts.hop !== undefined ? { hop: opts.hop } : {}),
+          ...(opts.group ? { group: opts.group } : {}),
+          ...(opts.tainted ? { tainted: true } : {}),
+          ...(opts.onTainted ? { onTainted: opts.onTainted } : {}),
+          ...(opts.quietBuffer ? { quietBuffer: true } : {}),
+          ...(opts.routineId !== undefined ? { routineId: opts.routineId } : {}),
+          ...(opts.routineName !== undefined ? { routineName: opts.routineName } : {}),
+          includeBackgroundControls: opts.origin === 'operator' && effectiveMode === 'act',
+          onAcquireBrowser: () => {
+            const r = browserLeases.acquire(bot.id, fgHolder)
+            if (!r.ok) return { ok: false, reason: formatBrowserConflict('foreground', r.holder) }
+            return { ok: true }
           },
-        } : {}),
-        ...(skills.length ? { skills, onReadSkill: (name: string) => readSkill(skillsDir(dataDir), name) } : {}),
-        checkBudget: () => budgetNote(bot),
-        language: uiLanguage(),
-        onMessageBot: ({ to, content, tainted }) => relay(bot, to, content, opts.hop ?? 0, tainted),
-        // 提前把容器拉起来，用户点开面板时屏幕已经在了
-        // 容器：提前拉起来，用户点开面板时屏幕已经在了；本机：把浏览器以窗口开到桌面上让人登录
-        ...(pool ? { onAskForLogin: async () => { await (await pool.get(bot.id)).showWindow?.() } } : {}),
-        ...(pool ? { getComputer: () => pool.get(bot.id) } : {}),
-        computer: { kind: computerKind, shell: shellEnabledFor(bot) },
-        ...(pool && dataDir ? { saveShot: (botId, shot) => saveScreenshot(dataDir, botId, shot, Date.now()) } : {}),
-        onApproval: async ({ action, detail, kind, target, rulesAllowed, items }) => {
-          const at = now().getTime()
-          // 规则只看「谁 · 哪类 · 发给谁」：bot 自己不能建、不能改规则，只有操作者在放行时能留下一条。
-          // 而且只在操作者自己开头、上下文里没有外部载荷的回合里生效；一批对象每项去向都不同，永远等人
-          const match = items ? null : findMatchingRule(db, { botId: bot.id, kind, target, now: at })
-          const rule = rulesAllowed ? match : null
-          const approval = createApproval(db, {
-            threadId, botId: bot.id, action, detail, kind, target, now: at,
-            ...(rule ? { ruleId: rule.id } : {}), ...(items ? { items } : {}),
-          })
-          if (!rule) return { approvalId: approval.id, ...(match ? { ruleHeld: true } : {}) }
-          recordAction(db, {
-            botId: bot.id, threadId, trigger, tool: 'approval', summary: `allowed by your rule #${rule.id}: ${action}`, at,
-          })
-          return { approvalId: approval.id, rule: { id: rule.id, kind: rule.kind, target: rule.target, expiresAt: rule.expires_at } }
-        },
-        ...(dataDir ? {
-          onSaveMemory: (rule: string) => appendMemoryRule(dataDir, bot.id, rule),
-          onForgetMemory: (rule: string) => removeMemoryRule(dataDir, bot.id, rule),
-          onProposeMemoryRule: ({ rule, reason, sourceTainted }) =>
-            createRuleProposal(db, {
-              botId: bot.id,
-              threadId,
-              rule,
-              reason,
-              source: 'agent',
-              sourceTainted,
-              dataDir,
-              hub,
-              now: now().getTime(),
-            }),
-        } : {}),
-        onCreateRoutine: async ({ name, cron, instructions, webhook, mode }) => {
-          if (cron && !isValidCron(cron)) throw new Error(`not a valid cron expression: ${cron}`)
-          const routine = createRoutine(db, { botId: bot.id, name, cron, instructions, webhook, mode })
-          scheduler?.add(routine)
-          return {
-            id: routine.id, name: routine.name, cron: routine.cron, human: describeRoutine(routine),
-            webhook: Boolean(routine.webhook_key), mode: routine.mode,
-          }
-        },
-        onStopRoutine: async (id) => {
-          const routine = getRoutine(db, id)
-          if (!routine || routine.bot_id !== bot.id) return { ok: false, reason: `You have no routine #${id}.` }
-          setRoutineEnabled(db, id, false)
-          scheduler?.remove(id)
-          return { ok: true, name: routine.name }
-        },
-      }, text, events(threadId), { persistUserMessage: opts.persistUserMessage, alreadyStored: opts.alreadyStored, ...order })
-      lastOutcome.set(bot.id, outcome)
+        })
+        const outcome = await runTurn(turnDeps, text, events(threadId), {
+          persistUserMessage: opts.persistUserMessage,
+          alreadyStored: opts.alreadyStored,
+          ...order,
+        })
+        lastOutcome.set(bot.id, outcome)
+      } finally {
+        browserLeases.release(bot.id, fgHolder)
+      }
     }, opts.coalesce ? { coalesceKey: `stored:${threadId}` } : undefined)
   }
 
@@ -925,6 +1112,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     active.bindings.clear()
     if (!active.released) {
       active.released = true
+      active.releaseBrowser()
       active.releaseTurns()
     }
     publishPresence(active.botId)
@@ -1702,7 +1890,47 @@ export function createApp(deps: AppDeps): GatewayApp {
   app.get('/api/summary', (c) => {
     const ids = (db.prepare('SELECT id FROM bots').all() as { id: string }[]).map((r) => r.id)
     const routines = (db.prepare('SELECT COUNT(*) AS n FROM routines WHERE enabled = 1').get() as { n: number }).n
-    return c.json({ working: ids.filter((id) => presenceOf(id) === 'thinking').length, waiting: pendingCount(db), routines })
+    const working = ids.filter((id) => presenceOf(id) === 'thinking' || backgroundTasks.hasActive(id)).length
+    return c.json({
+      working,
+      waiting: pendingCount(db),
+      routines,
+      backgroundTasks: backgroundTasks.activeCount(),
+    })
+  })
+
+  app.get('/api/bots/:botId/background-tasks', (c) => {
+    const botId = c.req.param('botId')
+    if (!botById(botId)) return c.json({ error: 'unknown bot' }, 404)
+    return c.json({ tasks: listBackgroundTasks(db, { botId, limit: 20 }) })
+  })
+
+  app.post('/api/background-tasks/:id/steer', async (c) => {
+    const id = c.req.param('id')
+    const body = (await c.req.json().catch(() => null)) as unknown
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return c.json({ error: 'JSON object body required', code: 'invalid_note' }, 400)
+    }
+    const note = (body as { note?: unknown }).note
+    if (typeof note !== 'string') {
+      return c.json({ error: 'note must be a string', code: 'invalid_note' }, 400)
+    }
+    const res = backgroundTasks.steer(id, note)
+    if (!res.ok) {
+      const status = res.code === 'not_found' ? 404 : res.code === 'settled' ? 409 : 400
+      return c.json({ error: res.error, code: res.code }, status)
+    }
+    return c.json({ ok: true, task: res.task })
+  })
+
+  app.post('/api/background-tasks/:id/cancel', (c) => {
+    const id = c.req.param('id')
+    const res = backgroundTasks.cancel(id)
+    if (!res.ok) {
+      const status = res.code === 'not_found' ? 404 : 409
+      return c.json({ error: res.error, code: res.code }, status)
+    }
+    return c.json({ ok: true, task: res.task })
   })
 
   app.get('/api/llm-queue', (c) => {
@@ -1746,20 +1974,33 @@ export function createApp(deps: AppDeps): GatewayApp {
       botId, routines, usage, rules, memory, skills, actions, connectors, mcpServers,
       workflowRecording: workflowRecordings.has(botId), workflowDraft: workflowDrafts.has(botId),
     }
-    if (!pool) return c.json({ ...base, running: false, vncUrl: null })
+    if (!pool) {
+      return c.json({
+        ...base,
+        backgroundTasks: listBackgroundTasks(db, { botId, limit: 20 }),
+        running: false,
+        vncUrl: null,
+      })
+    }
     try {
       const computer = await pool.get(botId)
       const vncUrl = computer.screen ? screenPagePath(botId, computer.screen.password) : null
       // 两种屏幕：容器给 noVNC 页面，本机给浏览器截屏流；面板按 kind 选怎么看
       const screen = vncUrl ? { kind: 'vnc', url: vncUrl } : computer.screencast ? { kind: 'cdp', url: screencastPath(botId) } : null
       return c.json({
-        ...base, running: true, kind: computer.kind, vncUrl, screen, window: computer.windowShown?.() ?? false,
+        ...base,
+        backgroundTasks: listBackgroundTasks(db, { botId, limit: 20 }),
+        running: true, kind: computer.kind, vncUrl, screen, window: computer.windowShown?.() ?? false,
         shell: shellView(botById(botId)!),
       })
     } catch (err) {
       // 面板要显示"为什么没屏幕"——白屏是最难查的故障
       const { error, code, params } = errorBody(err)
-      return c.json({ ...base, running: false, vncUrl: null, error, ...(code ? { errorCode: code } : {}), ...(params ? { errorParams: params } : {}) })
+      return c.json({
+        ...base,
+        backgroundTasks: listBackgroundTasks(db, { botId, limit: 20 }),
+        running: false, vncUrl: null, error, ...(code ? { errorCode: code } : {}), ...(params ? { errorParams: params } : {}),
+      })
     }
   })
 
@@ -1790,8 +2031,27 @@ export function createApp(deps: AppDeps): GatewayApp {
     if (routineBotsInFlight.has(botId)) return c.json({ error: 'the teammate is busy' }, 409)
     const releaseTurns = turns.hold(botId)
     if (!releaseTurns) return c.json({ error: 'the teammate is busy' }, 409)
+    const recHolder: BrowserLeaseHolder = { kind: 'foreground', token: randomUUID(), label: 'workflow recording' }
+    const browserLease = browserLeases.acquire(botId, recHolder)
+    if (!browserLease.ok) {
+      releaseTurns()
+      if (browserLease.holder.kind === 'background') {
+        return c.json(
+          { error: 'browser_in_use', taskId: browserLease.holder.taskId, title: browserLease.holder.title },
+          409,
+        )
+      }
+      return c.json({ error: 'the teammate is busy' }, 409)
+    }
     const active: ActiveWorkflowRecording = {
-      recorder: null, stopping: null, draft: null, releaseTurns, timeout: null, cancelled: false, released: false,
+      recorder: null,
+      stopping: null,
+      draft: null,
+      releaseTurns,
+      releaseBrowser: () => { browserLeases.release(botId, recHolder) },
+      timeout: null,
+      cancelled: false,
+      released: false,
     }
     workflowRecordings.set(botId, active)
     let computer: BotComputer
@@ -1983,13 +2243,43 @@ export function createApp(deps: AppDeps): GatewayApp {
       return c.json({ error: problem.message }, problem.status)
     }
 
+    const threadId = ensureDmThread(db, botId)
     const releaseTurns = turns.hold(botId)
     if (!releaseTurns) return c.json({ error: 'the teammate is busy' }, 409)
-    const active: ActiveWorkflowRun = {
-      runId: randomUUID(), workflowId: c.req.param('workflowId'), botId, threadId: ensureDmThread(db, botId), trace,
-      bindings, rulesAllowed, releaseTurns, controller: new AbortController(), phase: { kind: 'running' }, released: false,
+    const runHolder: BrowserLeaseHolder = { kind: 'foreground', token: randomUUID(), label: 'workflow run' }
+    const browserLease = browserLeases.acquire(botId, runHolder)
+    if (!browserLease.ok) {
+      releaseTurns()
+      if (browserLease.holder.kind === 'background') {
+        return c.json(
+          { error: 'browser_in_use', taskId: browserLease.holder.taskId, title: browserLease.holder.title },
+          409,
+        )
+      }
+      return c.json({ error: 'the teammate is busy' }, 409)
     }
-    workflowRuns.set(botId, active)
+    let active: ActiveWorkflowRun
+    try {
+      active = {
+        runId: randomUUID(),
+        workflowId: c.req.param('workflowId'),
+        botId,
+        threadId,
+        trace,
+        bindings,
+        rulesAllowed,
+        releaseTurns,
+        releaseBrowser: () => { browserLeases.release(botId, runHolder) },
+        controller: new AbortController(),
+        phase: { kind: 'running' },
+        released: false,
+      }
+      workflowRuns.set(botId, active)
+    } catch (err) {
+      browserLeases.release(botId, runHolder)
+      releaseTurns()
+      throw err
+    }
     publishPresence(botId)
     void continueWorkflowRun(active)
     return c.json({ runId: active.runId, status: 'running' }, 202)
@@ -2448,16 +2738,20 @@ export function createApp(deps: AppDeps): GatewayApp {
     hub,
     hello: () => ({ type: 'hello', statuses: presenceSnapshot() }),
     runRoutine,
-    isBusy: (botId) => turns.isBusy(botId) || workflowRuns.has(botId) || workflowRecordings.has(botId),
+    isBusy: (botId) =>
+      turns.isBusy(botId) || workflowRuns.has(botId) || workflowRecordings.has(botId) || backgroundTasks.hasActive(botId),
     flushQuietDigestsIfDue,
     sweepUploads: async () => (uploads ? uploads.sweep(markUploadRemoved) : { orphans: 0, strays: 0, missing: 0 }),
     stopAll: () => {
       rounds.stopAll()
       turns.stopAll()
       for (const active of workflowRuns.values()) releaseWorkflowRun(active, true)
+      for (const [botId, active] of workflowRecordings.entries()) releaseWorkflowRecording(botId, active)
       waiting.clear()
+      const bgStop = backgroundTasks.stopAll()
       mcpApi.stop()
-      return mcpManager.closeAll().catch(() => {})
+      const mcpClose = mcpManager.closeAll().catch(() => {})
+      return Promise.all([bgStop, mcpClose]).then(() => {})
     },
   }
 }

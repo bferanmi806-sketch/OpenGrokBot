@@ -78,8 +78,8 @@ function seedBot(db: ReturnType<typeof openDb>, id: string, name = id) {
 describe('schema v15, hub event, routines mode, action trigger & quiet hours settings', () => {
   it('migrates fresh DB to v15 with tables, indexes, hub event, prepare mode & trigger', () => {
     const db = openDb(':memory:')
-    expect(SCHEMA_VERSION).toBe(15)
-    expect(schemaVersion(db)).toBe(15)
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(15)
+    expect(schemaVersion(db)).toBe(SCHEMA_VERSION)
 
     const tables = (
       db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]
@@ -142,8 +142,8 @@ describe('schema v15, hub event, routines mode, action trigger & quiet hours set
 
     const migrated: Array<[number, number]> = []
     const upgraded = openDb(dbPath, { onMigrate: (from, to) => migrated.push([from, to]) })
-    expect(migrated).toEqual([[14, 15]])
-    expect(schemaVersion(upgraded)).toBe(15)
+    expect(migrated).toEqual([[14, SCHEMA_VERSION]])
+    expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION)
 
     // Pre-existing data preserved and new tables usable
     expect(listMessages(upgraded, threadId).map((m) => m.content)).toEqual(['pre-upgrade message'])
