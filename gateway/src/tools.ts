@@ -407,12 +407,102 @@ export const OPERATOR_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'save_memory', 'forget_memory', 'create_routine', 'stop_routine',
 ])
 
+export const BACKGROUND_CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'delegate_background_task',
+  'steer_background_task',
+  'cancel_background_task',
+])
+
+export const BACKGROUND_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ...BACKGROUND_CONTROL_TOOL_NAMES,
+  'list_background_tasks',
+])
+
+export const BACKGROUND_TOOLS: ToolDef[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'delegate_background_task',
+      description:
+        'Delegate a longer multi-step job (research, scraping, drafting, or multi-file analysis) to your background worker lane so foreground chat stays immediately responsive. Never use this for quick 1-step replies.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: {
+            type: 'string',
+            description: 'Short single-line task title (1–120 characters), e.g. "Compare Q3 competitor pricing".',
+          },
+          instructions: {
+            type: 'string',
+            description: 'Complete instructions and what "done" looks like for your background worker (1–4000 characters).',
+          },
+        },
+        required: ['title', 'instructions'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_background_tasks',
+      description:
+        'Return your active and recent background tasks (id, title, status, step count, last step, browser usage, summary).',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'steer_background_task',
+      description:
+        'Send a mid-flight steering instruction to one of your queued or running background tasks.',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskId: {
+            type: 'string',
+            description: 'The background task id, e.g. "bg-a1b2c3d4".',
+          },
+          note: {
+            type: 'string',
+            description: 'Steering instruction or course-correction for the background task (1–1000 characters).',
+          },
+        },
+        required: ['taskId', 'note'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'cancel_background_task',
+      description:
+        'Cancel one of your queued or running background tasks without affecting foreground chat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskId: {
+            type: 'string',
+            description: 'The background task id to cancel, e.g. "bg-a1b2c3d4".',
+          },
+        },
+        required: ['taskId'],
+      },
+    },
+  },
+]
+
 export function buildTools(opts: {
   hasComputer: boolean
   canRelay?: boolean
   hasSkills?: boolean
   hasWiki?: boolean
   canProposeRule?: boolean
+  canBackgroundTasks?: boolean
+  isBackgroundTask?: boolean
   watch?: boolean
   routineMode?: RoutineMode
   /** false = 这一回合不是操作者开的头：改常设安排的工具不列出来（执行时另有一道门） */
@@ -427,6 +517,9 @@ export function buildTools(opts: {
   mcpTools?: ToolDef[]
   mcpReadToolNames?: ReadonlySet<string>
 }): ToolDef[] {
+  const effectiveMode: RoutineMode = opts.routineMode ?? (opts.watch ? 'watch' : 'act')
+  const allowBackgroundControls =
+    opts.operatorTurn !== false && opts.isBackgroundTask !== true && effectiveMode === 'act'
   const computerTools = COMPUTER_TOOLS
     .filter((t) => opts.shell !== false || t.function.name !== 'shell')
     .map((t) => (t.function.name === 'shell' && opts.kind === 'local'
@@ -450,14 +543,19 @@ export function buildTools(opts: {
     MESSAGE_USER_TOOL,
     ...WORKFLOW_TOOLS,
     ...(opts.canProposeRule === true ? [PROPOSE_MEMORY_RULE_TOOL] : []),
+    ...(opts.canBackgroundTasks === true ? BACKGROUND_TOOLS : []),
     ...(opts.hasWiki ? WIKI_TOOLS : []),
     ...(opts.hasSkills ? [SKILL_TOOL] : []),
     ...(opts.canRelay ? [RELAY_TOOL] : []),
     ...(opts.hasComputer ? computerTools : []),
     ...(opts.connectorTools ?? []),
     ...(opts.mcpTools ?? []),
-  ].filter((t) => opts.operatorTurn !== false || !OPERATOR_ONLY_TOOL_NAMES.has(t.function.name))
-  const effectiveMode: RoutineMode = opts.routineMode ?? (opts.watch ? 'watch' : 'act')
+  ].filter((t) => {
+    const name = t.function.name
+    if (opts.operatorTurn === false && OPERATOR_ONLY_TOOL_NAMES.has(name)) return false
+    if (!allowBackgroundControls && BACKGROUND_CONTROL_TOOL_NAMES.has(name)) return false
+    return true
+  })
   if (effectiveMode === 'watch') {
     return tools.filter((t) => WATCH_TOOL_NAMES.has(t.function.name) || Boolean(opts.mcpReadToolNames?.has(t.function.name)))
   }

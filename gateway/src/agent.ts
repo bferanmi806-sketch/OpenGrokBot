@@ -5,6 +5,8 @@ import {
   MAX_BATCH_ITEMS, RULEABLE_KINDS, blockText, canRemember, destinationReason, type BlockReason, normalizeItems, normalizeKind, normalizeTarget,
   type ApprovalKind,
 } from './approvals.js'
+import type { BackgroundTaskView } from './background-tasks.js'
+import { BROWSER_LEASE_TOOL_NAMES } from './browser-lease.js'
 import { checkBrowserUrl } from './browser-page.js'
 import type { BotComputer, Shot } from './computer.js'
 import { CONNECTOR_READ_TOOL_NAMES, isConnectorTool } from './connectors/tools.js'
@@ -23,7 +25,14 @@ import {
 import type { CreateRuleProposalResult } from './proactive/rule-proposals.js'
 import { validateReportPayload, type ReportPayload } from './report.js'
 import { normalizeMode, type RoutineMode } from './routines.js'
-import { buildTools, OPERATOR_ONLY_TOOL_NAMES, PREPARE_TOOL_NAMES, WATCH_TOOL_NAMES } from './tools.js'
+import {
+  BACKGROUND_CONTROL_TOOL_NAMES,
+  BACKGROUND_TOOL_NAMES,
+  buildTools,
+  OPERATOR_ONLY_TOOL_NAMES,
+  PREPARE_TOOL_NAMES,
+  WATCH_TOOL_NAMES,
+} from './tools.js'
 import { WIKI_READ_TOOL_NAMES, WIKI_TOOL_NAMES } from './wiki/tools.js'
 
 export type AgentEvents = {
@@ -42,9 +51,9 @@ export type RuleGrant = { id: number; kind: ApprovalKind; target: string; expire
 
 /**
  * 这一回合是谁叫起来的。只有操作者自己开的头（发消息、拍板、答问题、问群）才认常驻授权；
- * routine、webhook、同事转交带来的活，里面可能是陌生人写的字，一律停下来问人。
+ * routine、webhook、同事转交、后台任务带来的活，里面可能是陌生人写的字，一律停下来问人。
  */
-export type TurnOrigin = 'operator' | 'routine' | 'webhook' | 'relay'
+export type TurnOrigin = 'operator' | 'routine' | 'webhook' | 'relay' | 'background'
 
 /** 这一回合为什么不认常驻授权：不是操作者开的头，或者上下文里还摆着外部载荷 */
 export type RuleBlock = Exclude<TurnOrigin, 'operator'> | 'outside-data' | 'unknown'
@@ -155,6 +164,26 @@ export type AgentDeps = {
   }) =>
     | Promise<{ text: string; ok: boolean; tainted?: boolean; summary: string }>
     | { text: string; ok: boolean; tainted?: boolean; summary: string }
+  /** 后台任务车道（AlterEgo）：非阻塞执行、不发 activity 卡片、禁止递归创建后台任务 */
+  isBackgroundTask?: boolean
+  historyLimit?: number
+  drainSteeringNotes?: () => string[]
+  onStepProgress?: (step: { tool: string; summary: string; ok: boolean; ms: number }) => void
+  onAcquireBrowser?: (toolName: string) => { ok: true } | { ok: false; reason: string }
+  onDelegateBackgroundTask?: (input: {
+    title: string
+    instructions: string
+  }) => Promise<{ ok: true; task: BackgroundTaskView } | { ok: false; error: string }>
+  onListBackgroundTasks?: () => Promise<BackgroundTaskView[]> | BackgroundTaskView[]
+  onSteerBackgroundTask?: (input: {
+    taskId: string
+    note: string
+  }) => Promise<{ ok: true; task: BackgroundTaskView } | { ok: false; error: string }>
+  onCancelBackgroundTask?: (input: {
+    taskId: string
+  }) => Promise<{ ok: true; task: BackgroundTaskView } | { ok: false; error: string }>
+  onFinalText?: (text: string) => void
+  onReportFiled?: (summary: string) => void
 }
 
 /**
@@ -186,7 +215,8 @@ function defaultPriority(origin: TurnOrigin | undefined): LlmPriority {
   switch (origin) {
     case 'routine': return 'routine'
     case 'relay':
-    case 'webhook': return 'background'
+    case 'webhook':
+    case 'background': return 'background'
     case 'operator':
     case undefined: return 'interactive'
   }
@@ -235,7 +265,10 @@ export async function runTurn(
   try {
     const canRelay = Boolean(deps.onMessageBot)
     const hasWiki = Boolean(deps.onWikiTool)
-    const rows = orderHistory(listMessages(db, threadId, HISTORY_LIMIT), opts.pendingIds, opts.hiddenIds)
+    const canBackgroundTasks = Boolean(deps.onDelegateBackgroundTask || deps.onListBackgroundTasks)
+    const isBackgroundTask = deps.isBackgroundTask === true
+    const historyLimit = deps.historyLimit && deps.historyLimit > 0 ? Math.floor(deps.historyLimit) : HISTORY_LIMIT
+    const rows = orderHistory(listMessages(db, threadId, historyLimit), opts.pendingIds, opts.hiddenIds)
     // 模型眼前还摆着 webhook / 受污染的转交载荷，或本回合读过外部数据时，就算是操作者开的头也不认规则：外部文字可能正是在诱导它
     const hasOutsideDataHistory = rows.some(
       (m) => m.kind === 'webhook' || (m.kind === 'bot_ref' && (m.payload as { tainted?: unknown } | null)?.tainted === true),
@@ -268,8 +301,20 @@ export async function runTurn(
       {
         role: 'system',
         content: buildSystemPrompt(bot, soul, {
-          hasComputer, hasWiki, computer: deps.computer, memory: deps.memory, group: deps.group, canRelay, manual: deps.manual, routines: deps.routines,
-          connectors: deps.connectors, mcpServers: deps.mcpServers, skills: deps.onReadSkill ? deps.skills : undefined, language: deps.language,
+          hasComputer,
+          hasWiki,
+          canBackgroundTasks,
+          isBackgroundTask,
+          computer: deps.computer,
+          memory: deps.memory,
+          group: deps.group,
+          canRelay,
+          manual: deps.manual,
+          routines: deps.routines,
+          connectors: deps.connectors,
+          mcpServers: deps.mcpServers,
+          skills: deps.onReadSkill ? deps.skills : undefined,
+          language: deps.language,
         }),
       },
       ...rows.map((m) => toChatMsg(m, bot.id, brief)),
@@ -286,6 +331,8 @@ export async function runTurn(
       canRelay,
       hasSkills,
       canProposeRule: Boolean(deps.onProposeMemoryRule),
+      canBackgroundTasks,
+      isBackgroundTask,
       watch: effectiveMode === 'watch',
       routineMode: effectiveMode,
       shell: deps.computer?.shell,
@@ -300,7 +347,7 @@ export async function runTurn(
     const priority = deps.priority ?? defaultPriority(deps.origin)
     const startedAt = Date.now()
     for (let step = 0; ; step++) {
-      if (signal?.aborted) return stopped(notify)
+      if (signal?.aborted) return stopped(notify, isBackgroundTask)
       const limit = step >= maxSteps ? stepLimit(maxSteps)
         : turnMs > 0 && Date.now() - startedAt >= turnMs ? timeLimit(turnMs) : null
       if (limit) return await closeOut(deps, messages, tools, limit, priority, say, notify)
@@ -308,6 +355,10 @@ export async function runTurn(
       if (overBudget) {
         sayBudget(overBudget, say, notify)
         return 'budget'
+      }
+      const steering = deps.drainSteeringNotes?.() ?? []
+      for (const note of steering) {
+        messages.push({ role: 'user', content: `[operator steering note for your background task] ${note}` })
       }
       const turn = await llm.chat(messages, tools, { signal, priority })
       if (!imagesSeen) {
@@ -319,7 +370,7 @@ export async function runTurn(
         messages.push(turn.raw)
         let latestImage: string | undefined
         for (const call of turn.toolCalls) {
-          if (signal?.aborted) return stopped(notify)
+          if (signal?.aborted) return stopped(notify, isBackgroundTask)
           const outcome = await execToolCall(ctx, call, events, activity, () => {
             taintedByOutsideData = true
             ctx.turnTainted = true
@@ -338,6 +389,7 @@ export async function runTurn(
         (effectiveMode === 'watch' && Boolean(text && WATCH_QUIET.test(text))) ||
         (effectiveMode === 'prepare' && Boolean(text && PREPARE_QUIET.test(text)))
       if (text && !silent) {
+        deps.onFinalText?.(text)
         if (deps.quietBuffer && deps.onQuietBuffer) {
           await deps.onQuietBuffer({ kind: 'text', summary: text, payload: { text } })
         } else {
@@ -347,7 +399,7 @@ export async function runTurn(
       return 'replied'
     }
   } catch (err) {
-    if (signal?.aborted) return stopped(notify)
+    if (signal?.aborted) return stopped(notify, deps.isBackgroundTask)
     notify({ notice: 'error', params: { name: bot.name, detail: err instanceof Error ? err.message : String(err) } })
     return 'error'
   } finally {
@@ -363,8 +415,8 @@ function orderHistory(rows: MessageRow[], pendingIds: number[] = [], hiddenIds: 
   return [...rest, ...rows.filter((m) => pending.has(m.id))]
 }
 
-function stopped(notify: (n: Notice) => void): 'stopped' {
-  notify({ notice: 'stopped' })
+function stopped(notify: (n: Notice) => void, silent?: boolean): 'stopped' {
+  if (!silent) notify({ notice: 'stopped' })
   return 'stopped'
 }
 
@@ -408,7 +460,7 @@ async function closeOut(
     const text = turn.content?.trim()
     notify({ notice: 'paused', params: limit, ...(text ? { lead: text } : {}) })
   } catch {
-    if (deps.signal?.aborted) return stopped(notify)
+    if (deps.signal?.aborted) return stopped(notify, deps.isBackgroundTask)
     notify({ notice: 'paused', params: limit })
   }
   return 'limit'
@@ -440,8 +492,8 @@ const WATCH_QUIET = /^nothing new\.?$/i
 const PREPARE_QUIET = /^nothing (?:new|to prepare)\.?$/i
 
 function createActivity(deps: AgentDeps, effectiveMode: RoutineMode, events: AgentEvents): Activity {
-  // watch 回合在后台定时跑，或 Quiet Hours 静音缓冲期间：每一步都进动作日志，但不在线程里铺 activity 卡片
-  if (effectiveMode === 'watch' || deps.quietBuffer === true) {
+  // watch 回合在后台定时跑，Quiet Hours 静音缓冲期间，或后台任务车道：每一步都进动作日志，但不在线程里铺 activity 卡片
+  if (effectiveMode === 'watch' || deps.quietBuffer === true || deps.isBackgroundTask === true) {
     return { start: (tool, summary) => ({ tool, summary }), finish: () => {}, close: () => {} }
   }
   let row: MessageRow | null = null
@@ -507,8 +559,12 @@ async function execToolCall(
 ): Promise<ToolOutcome> {
   const args = (call.args ?? {}) as Record<string, unknown>
   const started = Date.now()
-  const log = (ok: boolean, summaryOverride?: string) =>
-    deps.onAction?.({ tool: call.name, summary: summaryOverride || summarize(call.name, args), ok, ms: Date.now() - started })
+  const log = (ok: boolean, summaryOverride?: string) => {
+    const finalSummary = summaryOverride || summarize(call.name, args)
+    const ms = Date.now() - started
+    deps.onAction?.({ tool: call.name, summary: finalSummary, ok, ms })
+    deps.onStepProgress?.({ tool: call.name, summary: finalSummary, ok, ms })
+  }
   const failed = (err: unknown): ToolOutcome => {
     log(false)
     // 工具失败必须回喂模型（让它换招/如实汇报），而不是炸掉整个回合
@@ -535,6 +591,14 @@ async function execToolCall(
     log(false)
     return { text: operatorOnlyRefusal(call.name, deps.origin) }
   }
+  // 后台任务控制工具：只在操作者发起的前台 act 回合允许，杜绝后台递归派生或外部输入操控
+  if (
+    BACKGROUND_CONTROL_TOOL_NAMES.has(call.name) &&
+    (deps.origin !== 'operator' || deps.isBackgroundTask || deps.effectiveMode !== 'act')
+  ) {
+    log(false)
+    return { text: `${call.name} only works in a foreground turn your operator started.` }
+  }
   if (call.name === 'message_user') {
     try {
       const res = await execMessageUser(deps, args, events)
@@ -549,6 +613,15 @@ async function execToolCall(
       const text = await execReadSkill(deps, args)
       log(true)
       return { text }
+    } catch (err) {
+      return failed(err)
+    }
+  }
+  if (BACKGROUND_TOOL_NAMES.has(call.name)) {
+    try {
+      const res = await execBackgroundTool(deps, call.name, args)
+      log(res.ok)
+      return { text: truncate(res.text) }
     } catch (err) {
       return failed(err)
     }
@@ -619,6 +692,13 @@ async function execToolCall(
   }
   if (!COMPUTER_TOOL_NAMES.has(call.name)) return { text: `Unknown tool: ${call.name}` }
   if (!deps.getComputer) return { text: 'You have no computer attached right now — this tool is unavailable.' }
+  if (BROWSER_LEASE_TOOL_NAMES.has(call.name)) {
+    const lease = deps.onAcquireBrowser?.(call.name)
+    if (lease && !lease.ok) {
+      log(false)
+      return { text: lease.reason }
+    }
+  }
   if (BROWSER_OUTSIDE_DATA_TOOL_NAMES.has(call.name)) onOutsideDataRead?.()
   const step = ACTIVITY_TOOL_NAMES.has(call.name) ? activity.start(call.name, summarize(call.name, args)) : null
   try {
@@ -637,6 +717,7 @@ const STARTED_BY: Record<TurnOrigin, string> = {
   routine: 'one of your routines',
   webhook: 'a webhook',
   relay: 'a teammate handing you work',
+  background: 'a background task',
 }
 
 /** 告诉模型为什么这回合改不了，以及该怎么办：说给操作者听，由操作者来改 */
@@ -717,6 +798,14 @@ function summarize(tool: string, args: Record<string, unknown>): string {
     case 'stop_routine': return `#${pick('id')}`
     case 'message_bot': return `to ${pick('to')}`
     case 'read_skill': return pick('name')
+    case 'delegate_background_task': return pick('title')
+    case 'list_background_tasks': return 'list'
+    case 'steer_background_task': {
+      const taskId = pick('taskId')
+      const note = pick('note')
+      return `${taskId}${note ? `: ${note}` : ''}`.slice(0, 120)
+    }
+    case 'cancel_background_task': return pick('taskId')
     case 'message_user': {
       const payload = args.payload as { lines?: unknown[]; closing?: unknown } | undefined
       const closing = typeof payload?.closing === 'string' ? payload.closing : ''
@@ -808,7 +897,94 @@ async function execMessageUser(
     }
   }
   events.onMessage(insertMessage(deps.db, { threadId: deps.threadId, sender: deps.bot.id, kind: 'report', payload }))
+  deps.onReportFiled?.(reportSummary(payload))
   return { ok: true, text: 'Report delivered.' }
+}
+
+async function execBackgroundTool(
+  deps: TurnContext,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ ok: boolean; text: string }> {
+  switch (name) {
+    case 'delegate_background_task': {
+      if (!deps.onDelegateBackgroundTask) {
+        return { ok: false, text: 'Background tasks are not available on this gateway.' }
+      }
+      const title = typeof args.title === 'string' ? args.title.trim() : ''
+      const instructions = typeof args.instructions === 'string' ? args.instructions.trim() : ''
+      if (!title || !instructions) {
+        return { ok: false, text: 'delegate_background_task needs non-empty "title" and "instructions".' }
+      }
+      const res = await deps.onDelegateBackgroundTask({ title, instructions })
+      if (!res.ok) return { ok: false, text: res.error }
+      return {
+        ok: true,
+        text: JSON.stringify({
+          ok: true,
+          taskId: res.task.id,
+          title: res.task.title,
+          status: res.task.status,
+          note: `Background task ${res.task.id} is ${res.task.status} on your background lane. Reply concisely to your operator now — foreground chat is free immediately.`,
+        }),
+      }
+    }
+    case 'list_background_tasks': {
+      if (!deps.onListBackgroundTasks) {
+        return { ok: false, text: 'Background tasks are not available on this gateway.' }
+      }
+      const tasks = await deps.onListBackgroundTasks()
+      if (tasks.length === 0) return { ok: true, text: 'You have no background tasks.' }
+      return {
+        ok: true,
+        text: JSON.stringify(
+          tasks.map((t) => ({
+            id: t.id,
+            title: t.title,
+            status: t.status,
+            stepCount: t.stepCount,
+            lastStep: t.lastStep,
+            usesBrowser: t.usesBrowser,
+            ...(t.summary ? { summary: t.summary } : {}),
+            ...(t.error ? { error: t.error } : {}),
+          })),
+        ),
+      }
+    }
+    case 'steer_background_task': {
+      if (!deps.onSteerBackgroundTask) {
+        return { ok: false, text: 'Background tasks are not available on this gateway.' }
+      }
+      const taskId = typeof args.taskId === 'string' ? args.taskId.trim() : ''
+      const note = typeof args.note === 'string' ? args.note.trim() : ''
+      if (!taskId || !note) {
+        return { ok: false, text: 'steer_background_task needs non-empty "taskId" and "note".' }
+      }
+      const res = await deps.onSteerBackgroundTask({ taskId, note })
+      if (!res.ok) return { ok: false, text: res.error }
+      return {
+        ok: true,
+        text: `Steering note delivered to background task ${res.task.id} ("${res.task.title}", ${res.task.status}).`,
+      }
+    }
+    case 'cancel_background_task': {
+      if (!deps.onCancelBackgroundTask) {
+        return { ok: false, text: 'Background tasks are not available on this gateway.' }
+      }
+      const taskId = typeof args.taskId === 'string' ? args.taskId.trim() : ''
+      if (!taskId) {
+        return { ok: false, text: 'cancel_background_task needs a non-empty "taskId".' }
+      }
+      const res = await deps.onCancelBackgroundTask({ taskId })
+      if (!res.ok) return { ok: false, text: res.error }
+      return {
+        ok: true,
+        text: `Cancelled background task ${res.task.id} ("${res.task.title}").`,
+      }
+    }
+    default:
+      return { ok: false, text: `Unknown tool: ${name}` }
+  }
 }
 
 async function execWorkflowTool(
@@ -1185,6 +1361,25 @@ function quietDigestForModel(payload: unknown): string {
   })
 }
 
+function backgroundTaskForModel(payload: unknown): string {
+  const p = (payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}) as {
+    taskId?: unknown
+    title?: unknown
+    status?: unknown
+    usesBrowser?: unknown
+    summary?: unknown
+    error?: unknown
+  }
+  return JSON.stringify({
+    ...(typeof p.taskId === 'string' ? { taskId: p.taskId } : {}),
+    ...(typeof p.title === 'string' ? { title: p.title } : {}),
+    ...(typeof p.status === 'string' ? { status: p.status } : {}),
+    ...(typeof p.usesBrowser === 'boolean' ? { usesBrowser: p.usesBrowser } : {}),
+    ...(typeof p.summary === 'string' && p.summary ? { summary: p.summary } : {}),
+    ...(typeof p.error === 'string' && p.error ? { error: p.error } : {}),
+  })
+}
+
 function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): ChatMsg {
   if (m.kind === 'webhook') return { role: 'user', content: webhookForModel(m.payload) }
   // 操作者发来的文件：一行说明；图只在这位同事第一次见到它的回合带上，并在这一回合里钉住
@@ -1207,7 +1402,8 @@ function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): Chat
         : m.kind === 'approval_request' ? `[held for approval] ${approvalForModel(m.payload)}`
           : m.kind === 'rule_proposal' ? `[proposed rule] ${ruleProposalForModel(m.payload)}`
             : m.kind === 'quiet_digest' ? `[morning digest delivered] ${quietDigestForModel(m.payload)}`
-              : `[${m.kind}] ${JSON.stringify(m.payload)}`
+              : m.kind === 'background_task' ? `[background task] ${backgroundTaskForModel(m.payload)}`
+                : `[${m.kind}] ${JSON.stringify(m.payload)}`
     return { role: 'user', content: `@${m.sender}: ${body}` }
   }
   if (m.kind === 'activity') return { role: 'assistant', content: `[steps taken] ${describeSteps(m.payload)}` }
@@ -1218,6 +1414,7 @@ function toChatMsg(m: MessageRow, selfId: string, brief?: AttachmentBrief): Chat
   if (m.kind === 'routine_created') return { role: 'assistant', content: `[routine created] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'rule_proposal') return { role: 'assistant', content: `[proposed rule] ${ruleProposalForModel(m.payload)}` }
   if (m.kind === 'quiet_digest') return { role: 'assistant', content: `[morning digest delivered] ${quietDigestForModel(m.payload)}` }
+  if (m.kind === 'background_task') return { role: 'assistant', content: `[background task] ${backgroundTaskForModel(m.payload)}` }
   if (m.kind === 'bot_ref') return { role: 'user', content: `[message from teammate] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'login_request') return { role: 'assistant', content: `[asked for a sign-in] ${JSON.stringify(m.payload)}` }
   if (m.kind === 'question') return { role: 'assistant', content: `[asked your operator] ${JSON.stringify(m.payload)}` }
