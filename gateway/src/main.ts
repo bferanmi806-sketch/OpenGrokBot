@@ -105,6 +105,7 @@ const schedulerProxy: Scheduler = {
   add: (r) => schedulerBox.current?.add(r),
   remove: (id) => schedulerBox.current?.remove(id),
   load: (rs) => schedulerBox.current?.load(rs),
+  checkCatchUp: () => schedulerBox.current?.checkCatchUp?.() ?? 0,
   stopAll: () => schedulerBox.current?.stopAll(),
   size: () => schedulerBox.current?.size() ?? 0,
 }
@@ -142,6 +143,7 @@ const { app, hub } = gateway
 
 schedulerBox.current = createScheduler({
   timeZone: config.timeZone,
+  catchUp: true,
   run: async (routine) => {
     const outcome = await gateway.runRoutine(routine)
     if (outcome === 'skipped') {
