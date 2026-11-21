@@ -16,6 +16,13 @@ describe('RoutineChip', () => {
     expect(screen.getByText(/read-only tools/)).toBeInTheDocument()
   })
 
+  it('shows prepare routine label and context-gathering hint', () => {
+    render(<RoutineChip payload={{ routineId: 4, name: 'Overnight dossier prep', cron: '0 6 * * 1-5', human: 'weekdays at 06:00', mode: 'prepare' }} />)
+    expect(screen.getByText('Prepare routine created')).toBeInTheDocument()
+    expect(screen.getByText('Overnight dossier prep')).toBeInTheDocument()
+    expect(screen.getByText(/Gathers context into the team wiki and workspace/)).toBeInTheDocument()
+  })
+
   it('points to the panel for a webhook address', () => {
     render(<RoutineChip payload={{ routineId: 2, name: 'Triage', cron: '', human: 'when its webhook is called', webhook: true }} />)
     expect(screen.getByText('Created routine')).toBeInTheDocument()

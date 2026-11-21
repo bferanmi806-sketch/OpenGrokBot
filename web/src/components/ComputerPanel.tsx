@@ -94,7 +94,7 @@ function CopyWebhook({ routine }: { routine: ComputerRoutine }) {
 const TRIGGER: Record<string, MessageKey> = {
   you: 'panel.trigger.you', group: 'panel.trigger.group', handoff: 'panel.trigger.handoff',
   approval: 'panel.trigger.approval', question: 'panel.trigger.question', routine: 'panel.trigger.routine',
-  watch: 'panel.trigger.watch', webhook: 'panel.trigger.webhook',
+  watch: 'panel.trigger.watch', prepare: 'panel.trigger.prepare', webhook: 'panel.trigger.webhook',
 }
 
 function actionTime(ts: number, t: T, now = new Date()): string {
@@ -320,6 +320,7 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
                   <span className="panel-routine-when">
                     {t.lang === 'en' ? r.human : describeSchedule(t, r.cron, Boolean(r.webhook_path))}
                     {r.mode === 'watch' ? <span className="panel-routine-tag">{t('panel.watchTag')}</span> : null}
+                    {r.mode === 'prepare' ? <span className="panel-routine-tag prepare">{t('panel.prepareTag')}</span> : null}
                     {paused ? <span className="panel-routine-paused">{t('panel.paused')}</span> : null}
                   </span>
                   <CopyWebhook routine={r} />

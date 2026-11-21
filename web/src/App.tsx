@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiError, SignedOut, answerQuestion, checkSession, connectEvents, createBot, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
-  fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchUiPrefs, forgetMemoryRule, removeUpload, resolveApproval, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers,
+  fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchUiPrefs, forgetMemoryRule, removeUpload, resolveApproval, resolveRuleProposal, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers,
   setComputerShell, setComputerWindow, stopThread, updateRoutine, uploadFile,
 } from './api'
 import { BotModelChip, BotModelPicker, botModel, botSeesImages } from './components/BotModelPicker'
@@ -142,6 +142,7 @@ function Workspace({
   const [connectorsOpen, setConnectorsOpen] = useState(false)
   const [wikiOpen, setWikiOpen] = useState(false)
   const [wikiRefreshTick, setWikiRefreshTick] = useState(0)
+  const [quietDigestTick, setQuietDigestTick] = useState(0)
   const [pickerFor, setPickerFor] = useState<string | null>(null)
   /** 首次启动向导：网关说要（needsSetup）才出；走完之前一直开着，哪怕中途已经存好了 key */
   const [setup, setSetup] = useState<SetupInfo | null>(null)
@@ -325,6 +326,7 @@ function Workspace({
         void resync()
         if (panelFor.current) void loadPanel(panelFor.current)
         setWikiRefreshTick((n) => n + 1)
+        setQuietDigestTick((n) => n + 1)
         return
       }
       if (e.type === 'status') {
@@ -353,6 +355,10 @@ function Workspace({
         setWikiRefreshTick((n) => n + 1)
         return
       }
+      if (e.type === 'quiet_digest_changed') {
+        setQuietDigestTick((n) => n + 1)
+        return
+      }
       if (e.type !== 'message') return // 更新的网关发来不认识的事件，不归这里管
       if (e.message.sender !== 'user' && e.message.kind !== 'activity') postedRef.current.add(e.message.sender)
       // 就地更新的旧消息（activity 卡片收尾、审批 chip 翻转）不该顶掉更新的那条预览；没变就不换数组引用
@@ -367,8 +373,8 @@ function Workspace({
       if (['approval_request', 'approval_resolved', 'question'].includes(e.message.kind)) {
         void refreshConversations().catch(guard)
       }
-      // 面板开着时，记忆规则变动、放行规则落地或例行任务改动都实时刷新
-      if (panelFor.current && ['memory_updated', 'approval_resolved', 'activity'].includes(e.message.kind)) {
+      // 面板开着时，记忆规则变动、规矩提议、放行规则落地或例行任务改动都实时刷新
+      if (panelFor.current && ['memory_updated', 'approval_resolved', 'activity', 'rule_proposal'].includes(e.message.kind)) {
         void loadPanel(panelFor.current)
       }
       if (e.threadId === threadIdRef.current) {
@@ -440,6 +446,22 @@ function Workspace({
       guard(err)
     }
   }
+
+  const onResolveRuleProposal = useCallback(
+    async (proposalId: number, decision: 'accept' | 'dismiss', rule?: string) => {
+      try {
+        await resolveRuleProposal(proposalId, decision, rule)
+      } catch (err: unknown) {
+        if (err instanceof SignedOut) {
+          setSignedOut(true)
+          return
+        }
+        guard(err)
+        throw err
+      }
+    },
+    [guard],
+  )
 
   const onForgetRule = (rule: string) => {
     if (!panel) return
@@ -630,6 +652,7 @@ function Workspace({
             })
           )}
           onAnswer={(messageId, choices) => answerQuestion(messageId, choices).catch((err) => { guard(err); throw err })}
+          onResolveRuleProposal={onResolveRuleProposal}
           onOpenScreen={openScreen}
           onToggleScreen={toggleScreen}
           panelOpen={Boolean(selected.kind === 'dm' && selected.members[0] && panel?.botId === selected.members[0])}
@@ -681,6 +704,7 @@ function Workspace({
           onBrowser={setSetupBrowser}
           onModels={() => setModelsOpen(true)}
           onWizard={() => void reopenWizard()}
+          quietDigestTick={quietDigestTick}
           onSignedOut={signOut}
           onClose={() => setSettingsOpen(false)}
         />

@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ApiError, FieldErrors, SignedOut, downloadBrowser, fetchAbout, fetchSettings, fetchSetup, saveSettings } from '../api'
+import {
+  ApiError, FieldErrors, SignedOut, downloadBrowser, fetchAbout, fetchQuietDigest, fetchSettings, fetchSetup, flushQuietDigest, saveSettings,
+} from '../api'
 import { desktopApi, type DesktopInfo } from '../desktop'
 import { useT, type MessageKey } from '../i18n'
 import { errorText } from '../i18n/describe'
-import type { AboutInfo, BrowserStatus, ConnectionsState, FieldError, ProviderPreset, SettingsView, SetupInfo, ThemeSetting } from '../types'
+import type {
+  AboutInfo, BrowserStatus, ConnectionsState, FieldError, ProviderPreset, QuietDigestSummary, SettingsView, SetupInfo, ThemeSetting,
+} from '../types'
 import { connectionLabel, fieldText, isDefaultConnection } from './ModelsDialog'
 import { BrowserLine, type LanguageSetting } from './SetupWizard'
 import { StartAtLogin } from './StartAtLogin'
@@ -29,7 +33,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  * 被环境变量定死的项只读，说清楚去哪改；改了要重启才生效的，写明。
  * 桌面版多一块「桌面版」：开机自启（浏览器里打开没有这块）。
  */
-export function SettingsDialog({ llms, providers, browser, language, onLanguage, theme, onTheme, onBrowser, onModels, onWizard, onSignedOut, onClose }: {
+export function SettingsDialog({ llms, providers, browser, language, onLanguage, theme, onTheme, onBrowser, onModels, onWizard, quietDigestTick, onSignedOut, onClose }: {
   llms: ConnectionsState | null
   providers: ProviderPreset[]
   /** 浏览器此刻的状态（经 /ws 实时更新）；null = 还没收到过，用拉回来的那份 */
@@ -42,6 +46,8 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
   onModels: () => void
   /** 重开设置向导：换服务商、从演示模式接真模型 */
   onWizard: () => void
+  /** 经 /ws 推送的免打扰待投递变化计数 */
+  quietDigestTick?: number
   onSignedOut: () => void
   onClose: () => void
 }) {
@@ -55,6 +61,12 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
   const [loadError, setLoadError] = useState(false)
   const [errors, setErrors] = useState<FieldError[]>([])
   const [mirror, setMirror] = useState('')
+  const [quietStart, setQuietStart] = useState('22:00')
+  const [quietEnd, setQuietEnd] = useState('08:00')
+  const [quietDigest, setQuietDigest] = useState<QuietDigestSummary | null>(null)
+  const [delivering, setDelivering] = useState(false)
+  const [deliverMessage, setDeliverMessage] = useState<string | null>(null)
+  const [deliverError, setDeliverError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [downloading, setDownloading] = useState(false)
 
@@ -64,14 +76,21 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
     const desktopPromise: Promise<DesktopInfo | null> = api
       ? Promise.resolve(api.info()).catch(() => null)
       : Promise.resolve(null)
-    Promise.all([fetchSettings(), fetchSetup(), fetchAbout(), desktopPromise])
-      .then(([s, su, a, d]) => {
+    const digestPromise: Promise<QuietDigestSummary | null> = fetchQuietDigest().catch((err: unknown) => {
+      if (err instanceof SignedOut) throw err
+      return null
+    })
+    Promise.all([fetchSettings(), fetchSetup(), fetchAbout(), desktopPromise, digestPromise])
+      .then(([s, su, a, d, qd]) => {
         if (!live) return
         setSettings(s)
         setMirror(s.values.browserMirror)
+        setQuietStart(s.values.quietHoursStart ?? '22:00')
+        setQuietEnd(s.values.quietHoursEnd ?? '08:00')
         setSetup(su)
         setAbout(a)
         setDesktop(d)
+        setQuietDigest(qd)
       })
       .catch((err: unknown) => {
         if (err instanceof SignedOut) onSignedOut()
@@ -79,6 +98,45 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
       })
     return () => { live = false }
   }, [onSignedOut])
+
+  const prevDigestTick = useRef(quietDigestTick)
+  useEffect(() => {
+    if (prevDigestTick.current === quietDigestTick) return
+    prevDigestTick.current = quietDigestTick
+    let live = true
+    void fetchQuietDigest()
+      .then((qd) => { if (live) setQuietDigest(qd) })
+      .catch((err: unknown) => {
+        if (err instanceof SignedOut) onSignedOut()
+        else if (live) setQuietDigest(null)
+      })
+    return () => { live = false }
+  }, [quietDigestTick, onSignedOut])
+
+  const refreshQuietDigest = async () => {
+    try {
+      setQuietDigest(await fetchQuietDigest())
+    } catch (err: unknown) {
+      if (err instanceof SignedOut) onSignedOut()
+    }
+  }
+
+  const deliverNow = async () => {
+    setDelivering(true)
+    setDeliverMessage(null)
+    setDeliverError(null)
+    try {
+      const res = await flushQuietDigest()
+      setDeliverMessage(t('settings.quietHours.delivered', { count: res.flushed }))
+      await refreshQuietDigest()
+    } catch (err: unknown) {
+      if (err instanceof SignedOut) { onSignedOut(); return }
+      const msg = err instanceof ApiError ? errorText(t, err).trim() : ''
+      setDeliverError(msg || t('settings.quietHours.deliverFailed'))
+    } finally {
+      setDelivering(false)
+    }
+  }
 
   const save = async (patch: Record<string, unknown>) => {
     setSaving(true)
@@ -127,6 +185,10 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
   const whyKey = setup && setup.computers.choice === 'auto' && setup.computers.why && setup.computers.why !== 'chosen'
     ? (`setup.computer.why.${setup.computers.why}` as MessageKey) : null
   const why = (whyKey ? t(whyKey) : null) || (whyKey ? setup?.computers.reason ?? null : null)
+  const savedQuietEnabled = Boolean(settings?.values.quietHoursEnabled)
+  const savedQuietStart = settings?.values.quietHoursStart ?? '22:00'
+  const savedQuietEnd = settings?.values.quietHoursEnd ?? '08:00'
+  const quietDirty = quietStart !== savedQuietStart || quietEnd !== savedQuietEnd
   const scrimDown = useRef(false)
 
   return (
@@ -191,6 +253,112 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
                 ))}
               </div>
               {errorFor('theme')}
+            </Section>
+
+            <Section title={t('settings.quietHours.title')}>
+              <div className="settings-quiet-hours">
+                <label className="conn-check-row settings-quiet-toggle">
+                  <input
+                    type="checkbox"
+                    checked={savedQuietEnabled}
+                    disabled={saving}
+                    onChange={(e) => {
+                      const checked = e.target.checked
+                      setDeliverMessage(null)
+                      setDeliverError(null)
+                      void save({ quietHoursEnabled: checked }).then((next) => {
+                        if (next) return refreshQuietDigest()
+                      })
+                    }}
+                  />
+                  <span>{t('settings.quietHours.enable')}</span>
+                </label>
+                <p className="setup-hint">{t('settings.quietHours.hint')}</p>
+                {errorFor('quietHoursEnabled')}
+
+                <form
+                  className="settings-quiet-form"
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    setDeliverMessage(null)
+                    setDeliverError(null)
+                    void save({ quietHoursStart: quietStart, quietHoursEnd: quietEnd }).then((next) => {
+                      if (next) {
+                        setQuietStart(next.values.quietHoursStart ?? quietStart)
+                        setQuietEnd(next.values.quietHoursEnd ?? quietEnd)
+                        return refreshQuietDigest()
+                      }
+                    })
+                  }}
+                >
+                  <div className="settings-quiet-times">
+                    <label className="settings-quiet-time">
+                      <span className="conn-label">{t('settings.quietHours.start')}</span>
+                      <input
+                        type="time"
+                        value={quietStart}
+                        disabled={saving}
+                        onChange={(e) => setQuietStart(e.target.value)}
+                      />
+                    </label>
+                    <label className="settings-quiet-time">
+                      <span className="conn-label">{t('settings.quietHours.end')}</span>
+                      <input
+                        type="time"
+                        value={quietEnd}
+                        disabled={saving}
+                        onChange={(e) => setQuietEnd(e.target.value)}
+                      />
+                    </label>
+                    <div className="settings-buttons settings-quiet-save">
+                      <button
+                        type="submit"
+                        aria-label={`${t('settings.save')} (${t('settings.quietHours.title')})`}
+                        disabled={saving || !quietDirty}
+                      >
+                        {t('settings.save')}
+                      </button>
+                    </div>
+                  </div>
+                  {savedQuietEnabled && quietStart === quietEnd ? (
+                    <p className="settings-quiet-warning" role="status">{t('settings.quietHours.sameTimeWarning')}</p>
+                  ) : null}
+                  {errorFor('quietHoursStart')}
+                  {errorFor('quietHoursEnd')}
+                </form>
+
+                {quietDigest ? (
+                  <div className="settings-quiet-status">
+                    <div className="settings-quiet-meta">
+                      <span className="settings-quiet-tz">{t('settings.quietHours.timezone', { tz: quietDigest.timeZone })}</span>
+                      {quietDigest.active ? (
+                        <span className="settings-quiet-active-badge">{t('settings.quietHours.activeNow')}</span>
+                      ) : null}
+                    </div>
+                    <div className="settings-quiet-pending-row">
+                      <span className="settings-quiet-pending">
+                        {quietDigest.pendingCount === 0
+                          ? t('settings.quietHours.pendingNone')
+                          : quietDigest.pendingCount === 1
+                            ? t('settings.quietHours.pendingOne')
+                            : t('settings.quietHours.pendingMany', { count: quietDigest.pendingCount })}
+                      </span>
+                      {quietDigest.pendingCount > 0 ? (
+                        <button
+                          type="button"
+                          className="settings-quiet-deliver"
+                          disabled={delivering || saving}
+                          onClick={() => void deliverNow()}
+                        >
+                          {delivering ? t('settings.quietHours.delivering') : t('settings.quietHours.deliverNow')}
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+                {deliverMessage ? <p className="settings-quiet-delivered" role="status">{deliverMessage}</p> : null}
+                {deliverError ? <div className="form-error" role="alert">{deliverError}</div> : null}
+              </div>
             </Section>
 
             <Section title={t('setup.computer.title')}>

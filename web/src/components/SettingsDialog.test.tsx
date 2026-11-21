@@ -1,8 +1,8 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../i18n'
-import type { AboutInfo, ConnectionsState, ModelConnection, ProviderPreset, SettingsView, SetupInfo } from '../types'
+import type { AboutInfo, ConnectionsState, ModelConnection, ProviderPreset, QuietDigestSummary, SettingsView, SetupInfo } from '../types'
 import { SettingsDialog } from './SettingsDialog'
 
 const providers: ProviderPreset[] = [
@@ -250,5 +250,91 @@ describe('SettingsDialog', () => {
     await waitFor(() => expect(calls.at(-1)).toEqual({ method: 'PUT', path: '/api/settings', body: { theme: 'light' } }))
     await user.click(screen.getByLabelText('Follow system'))
     expect(p.onTheme).toHaveBeenCalledWith('system')
+  })
+
+  it('toggles Quiet Hours, saves start/end times, shows pending digest count, and delivers now', async () => {
+    let quietState: SettingsView['values'] = {
+      ...view().values,
+      quietHoursEnabled: false,
+      quietHoursStart: '22:00',
+      quietHoursEnd: '08:00',
+    }
+    let digestSummary: QuietDigestSummary = {
+      enabled: false,
+      active: false,
+      start: '22:00',
+      end: '08:00',
+      timeZone: 'America/Los_Angeles',
+      pendingCount: 2,
+      byBot: [{ botId: 'researcher', count: 2, latestAt: Date.now() }],
+    }
+
+    const calls = gateway(view(quietState), {
+      'GET /api/quiet-digest': () => ({ body: digestSummary }),
+      'PUT /api/settings': (b) => {
+        if ('quietHoursEnabled' in b) {
+          quietState = { ...quietState, quietHoursEnabled: Boolean(b.quietHoursEnabled) }
+          digestSummary = { ...digestSummary, enabled: quietState.quietHoursEnabled!, active: quietState.quietHoursEnabled! }
+        }
+        if ('quietHoursStart' in b) {
+          quietState = { ...quietState, quietHoursStart: String(b.quietHoursStart) }
+          digestSummary = { ...digestSummary, start: quietState.quietHoursStart! }
+        }
+        if ('quietHoursEnd' in b) {
+          quietState = { ...quietState, quietHoursEnd: String(b.quietHoursEnd) }
+          digestSummary = { ...digestSummary, end: quietState.quietHoursEnd! }
+        }
+        return { body: view(quietState, { quietHoursEnabled: 'saved', quietHoursStart: 'saved', quietHoursEnd: 'saved' }) }
+      },
+      'POST /api/quiet-digest/flush': () => {
+        const flushed = digestSummary.pendingCount
+        digestSummary = { ...digestSummary, pendingCount: 0, byBot: [] }
+        return { body: { flushed, threads: ['dm:researcher'] } }
+      },
+    })
+
+    const user = userEvent.setup()
+    show()
+
+    const toggle = await screen.findByLabelText('Hold non-urgent scheduled checks for a morning digest')
+    expect(toggle).not.toBeChecked()
+    expect(screen.getByText('Timezone: America/Los_Angeles')).toBeInTheDocument()
+    expect(screen.getByText('2 updates waiting for the morning digest')).toBeInTheDocument()
+
+    await user.click(toggle)
+    await waitFor(() => {
+      expect(calls).toContainEqual({ method: 'PUT', path: '/api/settings', body: { quietHoursEnabled: true } })
+    })
+    expect(await screen.findByText('Quiet Hours active now')).toBeInTheDocument()
+
+    const startInput = screen.getByLabelText('Starts') as HTMLInputElement
+    const endInput = screen.getByLabelText('Ends') as HTMLInputElement
+    const saveQuietBtn = screen.getByRole('button', { name: 'Save (Quiet Hours)' })
+    expect(saveQuietBtn).toBeDisabled()
+
+    fireEvent.change(startInput, { target: { value: '23:30' } })
+    fireEvent.change(endInput, { target: { value: '23:30' } })
+    expect(screen.getByText(/Start and end are the same/)).toBeInTheDocument()
+
+    fireEvent.change(endInput, { target: { value: '07:15' } })
+    expect(saveQuietBtn).not.toBeDisabled()
+    await user.click(saveQuietBtn)
+    await waitFor(() => {
+      expect(calls).toContainEqual({
+        method: 'PUT',
+        path: '/api/settings',
+        body: { quietHoursStart: '23:30', quietHoursEnd: '07:15' },
+      })
+    })
+    await waitFor(() => expect(saveQuietBtn).toBeDisabled())
+
+    const deliverBtn = screen.getByRole('button', { name: 'Deliver now' })
+    await user.click(deliverBtn)
+    await waitFor(() => {
+      expect(calls).toContainEqual({ method: 'POST', path: '/api/quiet-digest/flush', body: {} })
+    })
+    expect(await screen.findByText('Delivered 2 buffered updates.')).toBeInTheDocument()
+    expect(await screen.findByText('No updates waiting')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Deliver now' })).toBeNull()
   })
 })

@@ -192,4 +192,50 @@ describe('Sidebar', () => {
     await userEvent.click(wikiBtn)
     expect(onWiki).toHaveBeenCalledTimes(1)
   })
+
+  it('previews rule_proposal and quiet_digest messages', () => {
+    const proposal = conversation({
+      id: 'dm:chief',
+      title: 'Chief',
+      members: ['chief'],
+      last_message: {
+        id: 20,
+        thread_id: 'dm:chief',
+        sender: 'chief',
+        kind: 'rule_proposal',
+        content: '',
+        created_at: 20,
+        payload: {
+          proposalId: 5,
+          rule: 'Never email bob@acme.com without asking',
+          reason: 'Discarded twice',
+          source: 'discard_pattern',
+          sourceTainted: false,
+          status: 'pending',
+        },
+      },
+    })
+    const digest = conversation({
+      id: 'dm:researcher',
+      title: 'Scout',
+      members: ['researcher'],
+      last_message: {
+        id: 21,
+        thread_id: 'dm:researcher',
+        sender: 'researcher',
+        kind: 'quiet_digest',
+        content: '',
+        created_at: 21,
+        payload: {
+          windowStart: '22:00',
+          windowEnd: '08:00',
+          itemCount: 3,
+          items: [],
+        },
+      },
+    })
+    render(<Sidebar conversations={[proposal, digest]} selectedId={null} statuses={{}} onSelect={() => {}} onNewBot={() => {}} />)
+    expect(screen.getByText('💡 Never email bob@acme.com without asking')).toBeInTheDocument()
+    expect(screen.getByText('🌅 Morning digest (3 updates)')).toBeInTheDocument()
+  })
 })

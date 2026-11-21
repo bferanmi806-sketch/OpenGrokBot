@@ -1,6 +1,6 @@
 import type {
   ActivityPayload, ApprovalPayload, ApprovalResolvedPayload, AttachmentPayload, BotRefPayload, BotStatus, Conversation, LoginPayload,
-  MemoryPayload, QuestionPayload, ReportPayload, ResolvedTheme, RoutinePayload, ScreenshotPayload, WebhookPayload,
+  MemoryPayload, QuestionPayload, QuietDigestPayload, ReportPayload, ResolvedTheme, RoutinePayload, RuleProposalPayload, ScreenshotPayload, WebhookPayload,
 } from '../types'
 import { useT, type MessageKey, type T } from '../i18n'
 import { isNotice, noticeText } from '../i18n/describe'
@@ -77,6 +77,15 @@ function preview(c: Conversation, t: T): string {
       const payload = m.payload as ReportPayload | null
       const first = payload?.lines[0]
       return payload?.closing ?? (first ? `✓ ${first.system} → ${first.result}` : t('sidebar.preview.reportFiled'))
+    }
+    case 'rule_proposal': {
+      const p = m.payload as RuleProposalPayload | null
+      return `💡 ${p?.rule || t('sidebar.preview.ruleProposal')}`
+    }
+    case 'quiet_digest': {
+      const p = m.payload as QuietDigestPayload | null
+      const count = p?.itemCount ?? p?.items?.length ?? 0
+      return `🌅 ${count === 1 ? t('sidebar.preview.quietDigestOne') : t('sidebar.preview.quietDigestMany', { count })}`
     }
     default:
       if (m.kind === 'text' && isNotice(m.payload)) {
