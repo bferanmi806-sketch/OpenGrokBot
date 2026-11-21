@@ -35,6 +35,10 @@ function mockGateway(opts: {
   connectors?: unknown | (() => unknown)
   /** /api/mcp/servers 的回答；不给 = 老网关 */
   mcpServers?: unknown | (() => unknown)
+  /** /api/bots 的回答 */
+  bots?: unknown[]
+  /** /api/wiki/* 的回答 */
+  wiki?: (url: string, init?: RequestInit) => unknown | Promise<unknown>
 } = {}) {
   const calls: string[] = []
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -51,7 +55,10 @@ function mockGateway(opts: {
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
     if (url === '/api/session') return json({ ok: opts.session === undefined }, opts.session ?? 200)
     if (url === '/api/conversations') return json(opts.conversations ?? [conversation({})])
-    if (url === '/api/bots') return json([])
+    if (url === '/api/bots') return json(opts.bots ?? [])
+    if ((url === '/api/wiki' || url.startsWith('/api/wiki?') || url.startsWith('/api/wiki/')) && opts.wiki) {
+      return json(await opts.wiki(url, init))
+    }
     if (url === '/api/setup' && opts.setup) return json(opts.setup)
     if (url === '/api/connections' && opts.connections) return json(opts.connections)
     if (url === '/api/settings/providers' && opts.connections) return json([])
@@ -549,5 +556,205 @@ describe('App', () => {
     await act(async () => { socket.emit({ type: 'mcp_changed' }) })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Connectors' })).toBeInTheDocument())
     await waitFor(() => expect(calls.filter((u) => u === '/api/bots/researcher/computer').length).toBeGreaterThan(computerCallsBefore))
+  })
+
+  it('opens Team wiki from the sidebar, renders a page, and live-refreshes on wiki_changed', async () => {
+    let pageVersion = 1
+    let pageBody = 'Initial notes about Acme Corp.'
+    let extraPage = false
+
+    const calls = mockGateway({
+      bots: [{ id: 'researcher', name: 'Scout', role: 'research', emoji: '🔎', thread_id: 'dm:researcher', last_message: null }],
+      wiki: (url) => {
+        if (url === '/api/wiki?limit=200') {
+          const pages = [
+            {
+              id: 'client/acme',
+              kind: 'client',
+              slug: 'acme',
+              title: 'Acme Corp',
+              summary: 'Enterprise prospect',
+              tags: ['enterprise'],
+              sourceTainted: false,
+              updatedBy: 'researcher',
+              version: pageVersion,
+              createdAt: 1,
+              updatedAt: pageVersion,
+            },
+            ...(extraPage ? [{
+              id: 'contact/lin',
+              kind: 'contact',
+              slug: 'lin',
+              title: 'Lin Chen',
+              summary: 'VP Engineering',
+              tags: [],
+              sourceTainted: true,
+              updatedBy: 'researcher',
+              version: 1,
+              createdAt: 2,
+              updatedAt: 2,
+            }] : []),
+          ]
+          return { pages, total: pages.length }
+        }
+        if (url === '/api/wiki/client/acme') {
+          return {
+            page: {
+              id: 'client/acme',
+              kind: 'client',
+              slug: 'acme',
+              title: 'Acme Corp',
+              summary: 'Enterprise prospect',
+              tags: ['enterprise'],
+              body: pageBody,
+              sourceTainted: false,
+              updatedBy: 'researcher',
+              version: pageVersion,
+              createdAt: 1,
+              updatedAt: pageVersion,
+            },
+            revisions: [
+              {
+                id: pageVersion,
+                pageId: 'client/acme',
+                version: pageVersion,
+                title: 'Acme Corp',
+                summary: 'Enterprise prospect',
+                tags: ['enterprise'],
+                body: pageBody,
+                editedBy: 'researcher',
+                note: '',
+                sourceTainted: false,
+                createdAt: pageVersion,
+              },
+            ],
+          }
+        }
+        return { error: 'not found' }
+      },
+    })
+
+    render(<App />)
+    const socket = await ready()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Team wiki' }))
+    expect(await screen.findByRole('dialog', { name: 'Team wiki' })).toBeInTheDocument()
+
+    const acmeItem = await screen.findByRole('button', { name: /Acme Corp/ })
+    await userEvent.click(acmeItem)
+    expect(await screen.findByText('Initial notes about Acme Corp.')).toBeInTheDocument()
+    expect(screen.getByText('v1 · Updated by Scout')).toBeInTheDocument()
+
+    const listCallsBefore = calls.filter((u) => u === '/api/wiki?limit=200').length
+    const pageCallsBefore = calls.filter((u) => u === '/api/wiki/client/acme').length
+
+    pageVersion = 2
+    pageBody = 'Updated notes pushed by a teammate.'
+    extraPage = true
+    await act(async () => { socket.emit({ type: 'wiki_changed' }) })
+
+    expect(await screen.findByText('Updated notes pushed by a teammate.')).toBeInTheDocument()
+    expect(await screen.findByText('Lin Chen')).toBeInTheDocument()
+    expect(screen.getByText('v2 · Updated by Scout')).toBeInTheDocument()
+    expect(calls.filter((u) => u === '/api/wiki?limit=200').length).toBeGreaterThan(listCallsBefore)
+    expect(calls.filter((u) => u === '/api/wiki/client/acme').length).toBeGreaterThan(pageCallsBefore)
+  })
+
+  it('refreshes an open Team wiki dialog when WebSocket hello arrives after reconnect', async () => {
+    let pageVersion = 1
+    let pageBody = 'Before disconnect.'
+    let addedDuringOutage = false
+
+    const calls = mockGateway({
+      bots: [{ id: 'researcher', name: 'Scout', role: 'research', emoji: '🔎', thread_id: 'dm:researcher', last_message: null }],
+      wiki: (url) => {
+        if (url === '/api/wiki?limit=200') {
+          const pages = [
+            {
+              id: 'client/acme',
+              kind: 'client',
+              slug: 'acme',
+              title: 'Acme Corp',
+              summary: 'Enterprise prospect',
+              tags: ['enterprise'],
+              sourceTainted: false,
+              updatedBy: 'researcher',
+              version: pageVersion,
+              createdAt: 1,
+              updatedAt: pageVersion,
+            },
+            ...(addedDuringOutage ? [{
+              id: 'project/aurora',
+              kind: 'project',
+              slug: 'aurora',
+              title: 'Aurora Launch',
+              summary: 'Added while disconnected',
+              tags: [],
+              sourceTainted: false,
+              updatedBy: 'researcher',
+              version: 1,
+              createdAt: 2,
+              updatedAt: 2,
+            }] : []),
+          ]
+          return { pages, total: pages.length }
+        }
+        if (url === '/api/wiki/client/acme') {
+          return {
+            page: {
+              id: 'client/acme',
+              kind: 'client',
+              slug: 'acme',
+              title: 'Acme Corp',
+              summary: 'Enterprise prospect',
+              tags: ['enterprise'],
+              body: pageBody,
+              sourceTainted: false,
+              updatedBy: 'researcher',
+              version: pageVersion,
+              createdAt: 1,
+              updatedAt: pageVersion,
+            },
+            revisions: [
+              {
+                id: pageVersion,
+                pageId: 'client/acme',
+                version: pageVersion,
+                title: 'Acme Corp',
+                summary: 'Enterprise prospect',
+                tags: ['enterprise'],
+                body: pageBody,
+                editedBy: 'researcher',
+                note: '',
+                sourceTainted: false,
+                createdAt: pageVersion,
+              },
+            ],
+          }
+        }
+        return { error: 'not found' }
+      },
+    })
+
+    render(<App />)
+    const socket = await ready()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Team wiki' }))
+    await userEvent.click(await screen.findByRole('button', { name: /Acme Corp/ }))
+    expect(await screen.findByText('Before disconnect.')).toBeInTheDocument()
+
+    const listCallsBefore = calls.filter((u) => u === '/api/wiki?limit=200').length
+    const pageCallsBefore = calls.filter((u) => u === '/api/wiki/client/acme').length
+
+    pageVersion = 2
+    pageBody = 'Synced after reconnect.'
+    addedDuringOutage = true
+    await act(async () => { socket.emit({ type: 'hello', statuses: {} }) })
+
+    expect(await screen.findByText('Synced after reconnect.')).toBeInTheDocument()
+    expect(await screen.findByText('Aurora Launch')).toBeInTheDocument()
+    expect(screen.getByText('v2 · Updated by Scout')).toBeInTheDocument()
+    expect(calls.filter((u) => u === '/api/wiki?limit=200').length).toBeGreaterThan(listCallsBefore)
+    expect(calls.filter((u) => u === '/api/wiki/client/acme').length).toBeGreaterThan(pageCallsBefore)
   })
 })

@@ -163,4 +163,33 @@ describe('Sidebar', () => {
     )
     expect(screen.getByRole('button', { name: 'Switch to dark theme' })).toBeInTheDocument()
   })
+
+  it('renders the Team wiki button in the footer when onWiki is provided and invokes it on click', async () => {
+    const onWiki = vi.fn()
+    const { rerender } = render(
+      <Sidebar
+        conversations={[conversation()]}
+        selectedId={null}
+        statuses={{}}
+        onSelect={() => {}}
+        onNewBot={() => {}}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: 'Team wiki' })).toBeNull()
+
+    rerender(
+      <Sidebar
+        conversations={[conversation()]}
+        selectedId={null}
+        statuses={{}}
+        onSelect={() => {}}
+        onNewBot={() => {}}
+        onWiki={onWiki}
+      />,
+    )
+    const wikiBtn = screen.getByRole('button', { name: 'Team wiki' })
+    expect(wikiBtn).toBeInTheDocument()
+    await userEvent.click(wikiBtn)
+    expect(onWiki).toHaveBeenCalledTimes(1)
+  })
 })

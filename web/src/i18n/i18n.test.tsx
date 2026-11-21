@@ -4,16 +4,31 @@ import {
   ApiError,
   SignedOut,
   createMcpServer,
+  createWikiPage,
   deleteMcpServer,
+  deleteWikiPage,
   fetchMcpServers,
+  fetchWiki,
+  fetchWikiPage,
   importMcpServers,
   resolveApproval,
+  revertWikiPage,
+  saveWikiPage,
   setBotMcpServers,
   setMcpServerBots,
   testMcpServer,
   updateMcpServer,
 } from '../api'
-import type { ApprovalEditInput, McpServerView } from '../types'
+import type {
+  ApprovalEditInput,
+  BotRefPayload,
+  GatewayEvent,
+  McpServerView,
+  WikiListResponse,
+  WikiPageDetail,
+  WikiPageResponse,
+  WikiRevision,
+} from '../types'
 import { en, type MessageKey } from './en'
 import { I18nProvider, makeT, pickLang, translate, useT } from './index'
 import { zhCN } from './zh-CN'
@@ -268,6 +283,86 @@ describe('the Chinese dictionary', () => {
     expect(translate('en', 'approval.edit.invalidNumber', { field: 'limit' })).toBe('limit must be a valid number.')
     expect(translate('zh-CN', 'approval.edit.invalidNumber', { field: 'limit' })).toBe('limit必须是有效数字。')
   })
+
+  it('includes team wiki sidebar, dialog, taint badges, form fields, revisions, and error keys in both languages with placeholder parity', () => {
+    const requiredWikiKeys: MessageKey[] = [
+      'sidebar.wiki',
+      'wiki.title',
+      'wiki.subtitle',
+      'wiki.close',
+      'wiki.filter.all',
+      'wiki.filter.contact',
+      'wiki.filter.client',
+      'wiki.filter.project',
+      'wiki.filter.topic',
+      'wiki.kind.contact',
+      'wiki.kind.client',
+      'wiki.kind.project',
+      'wiki.kind.topic',
+      'wiki.searchPlaceholder',
+      'wiki.newPage',
+      'wiki.empty',
+      'wiki.noMatches',
+      'wiki.selectPrompt',
+      'wiki.countOne',
+      'wiki.count',
+      'wiki.loading',
+      'wiki.externalBadge',
+      'wiki.externalWarning',
+      'wiki.reviewAndVerify',
+      'wiki.saveAndVerify',
+      'wiki.versionMeta',
+      'wiki.byOperator',
+      'wiki.edit',
+      'wiki.save',
+      'wiki.saving',
+      'wiki.create',
+      'wiki.cancel',
+      'wiki.delete',
+      'wiki.confirmDelete',
+      'wiki.field.kind',
+      'wiki.field.title',
+      'wiki.field.slug',
+      'wiki.field.slugHint',
+      'wiki.field.summary',
+      'wiki.field.tags',
+      'wiki.field.tagsPlaceholder',
+      'wiki.field.body',
+      'wiki.field.note',
+      'wiki.field.notePlaceholder',
+      'wiki.history',
+      'wiki.revert',
+      'wiki.confirmRevert',
+      'wiki.currentVersion',
+      'wiki.emptyBody',
+      'wiki.error.already_exists',
+      'wiki.error.invalid_kind',
+      'wiki.error.invalid_slug',
+      'wiki.error.invalid_version',
+      'wiki.error.invalid_wiki',
+      'wiki.error.not_found',
+      'wiki.error.loadFailed',
+    ]
+    for (const key of requiredWikiKeys) {
+      expect(en[key]).toBeTruthy()
+      expect(zhCN[key]).toBeTruthy()
+      expect({ key, names: placeholders(zhCN[key]) }).toEqual({ key, names: placeholders(en[key]) })
+    }
+    expect(en['sidebar.wiki']).toBe('Team wiki')
+    expect(zhCN['sidebar.wiki']).toBe('团队知识库')
+    expect(en['wiki.externalBadge']).toBe('External source')
+    expect(zhCN['wiki.externalBadge']).toBe('外部来源')
+    expect(en['wiki.saveAndVerify']).toBe('Save & verify')
+    expect(zhCN['wiki.saveAndVerify']).toBe('保存并设为已核验')
+    expect(translate('en', 'wiki.versionMeta', { version: 3, who: 'you' })).toBe('v3 · Updated by you')
+    expect(translate('zh-CN', 'wiki.versionMeta', { version: 3, who: '你' })).toBe('v3 · 更新者：你')
+    expect(translate('en', 'wiki.confirmDelete', { title: 'Acme Corp' })).toBe('Delete “Acme Corp” from the team wiki?')
+    expect(translate('zh-CN', 'wiki.confirmDelete', { title: '极光科技' })).toBe('确定从团队知识库中删除「极光科技」？')
+    expect(translate('en', 'wiki.confirmRevert', { title: 'Acme Corp', version: 2 })).toBe('Revert “Acme Corp” to version 2?')
+    expect(translate('zh-CN', 'wiki.confirmRevert', { title: '极光科技', version: 2 })).toBe('确定将「极光科技」回滚到 v2？')
+    expect(translate('en', 'wiki.history', { count: 4 })).toBe('History (4)')
+    expect(translate('zh-CN', 'wiki.history', { count: 4 })).toBe('历史版本（4）')
+  })
 })
 
 describe('translate', () => {
@@ -481,5 +576,195 @@ describe('resolveApproval API client', () => {
 
     await expect(resolveApproval(42, 'approve', undefined, undefined, edit)).resolves.toBeUndefined()
     await expect(resolveApproval(42, 'approve', undefined, undefined, edit)).rejects.toBeInstanceOf(SignedOut)
+  })
+})
+
+describe('Wiki API client', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  const samplePage: WikiPageDetail = {
+    id: 'client/acme-corp',
+    kind: 'client',
+    slug: 'acme-corp',
+    title: 'Acme Corp',
+    summary: 'Enterprise SaaS client',
+    tags: ['enterprise', 'q3'],
+    sourceTainted: false,
+    updatedBy: 'operator',
+    version: 2,
+    createdAt: 1000,
+    updatedAt: 2000,
+    body: '# Acme Corp\n\nPrimary contact is Alice.',
+  }
+
+  const sampleRevisions: WikiRevision[] = [
+    {
+      id: 2,
+      pageId: 'client/acme-corp',
+      version: 2,
+      title: 'Acme Corp',
+      summary: 'Enterprise SaaS client',
+      tags: ['enterprise', 'q3'],
+      body: '# Acme Corp\n\nPrimary contact is Alice.',
+      editedBy: 'operator',
+      note: 'Verified notes',
+      sourceTainted: false,
+      createdAt: 2000,
+    },
+    {
+      id: 1,
+      pageId: 'client/acme-corp',
+      version: 1,
+      title: 'Acme Corp',
+      summary: 'Initial notes',
+      tags: ['enterprise'],
+      body: '# Acme Corp\n\nInitial web research.',
+      editedBy: 'researcher',
+      note: 'First draft',
+      sourceTainted: true,
+      createdAt: 1000,
+    },
+  ]
+
+  const samplePageResponse: WikiPageResponse = {
+    page: samplePage,
+    revisions: sampleRevisions,
+  }
+
+  it('builds query params cleanly in fetchWiki and handles 200, 400, and 401 responses', async () => {
+    const listResponse: WikiListResponse = {
+      pages: [{ ...samplePage, snippet: 'Primary contact is Alice.', score: 0.016 }],
+      total: 1,
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(listResponse), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(listResponse), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(listResponse), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Invalid wiki kind: nope', code: 'invalid_kind' }), { status: 400 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(await fetchWiki()).toEqual(listResponse)
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/wiki')
+
+    expect(await fetchWiki({ q: '   ' })).toEqual(listResponse)
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/wiki')
+
+    expect(await fetchWiki({ q: 'Acme | 极光', kind: 'client', limit: 25 })).toEqual(listResponse)
+    const url = new URL(String(fetchMock.mock.calls[2]![0]), 'http://localhost')
+    expect(url.pathname).toBe('/api/wiki')
+    expect(url.searchParams.get('q')).toBe('Acme | 极光')
+    expect(url.searchParams.get('kind')).toBe('client')
+    expect(url.searchParams.get('limit')).toBe('25')
+
+    const err = await fetchWiki().catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err).toMatchObject({ status: 400, code: 'invalid_kind', message: 'Invalid wiki kind: nope' })
+
+    await expect(fetchWiki()).rejects.toBeInstanceOf(SignedOut)
+  })
+
+  it('fetches, creates (throwing ApiError on 409 already_exists), saves, reverts, and deletes wiki pages', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(samplePageResponse), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Wiki page not found', code: 'not_found' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(samplePageResponse), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Wiki page already exists: client/acme-corp', code: 'already_exists' }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(samplePageResponse), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(samplePageResponse), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(samplePageResponse), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Wiki page not found', code: 'not_found' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    // fetchWikiPage (200 & 404)
+    expect(await fetchWikiPage('client', 'acme-corp')).toEqual(samplePageResponse)
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/wiki/client/acme-corp')
+
+    const notFoundErr = await fetchWikiPage('client', 'missing-slug').catch((e: unknown) => e)
+    expect(notFoundErr).toBeInstanceOf(ApiError)
+    expect(notFoundErr).toMatchObject({ status: 404, code: 'not_found', message: 'Wiki page not found' })
+
+    // createWikiPage (201 & 409 already_exists)
+    expect(await createWikiPage({
+      kind: 'client',
+      slug: 'acme-corp',
+      title: 'Acme Corp',
+      summary: 'Enterprise SaaS client',
+      tags: ['enterprise', 'q3'],
+      body: '# Acme Corp\n\nPrimary contact is Alice.',
+      note: 'Initial create',
+    })).toEqual(samplePageResponse)
+    expect(fetchMock.mock.calls[2]![0]).toBe('/api/wiki')
+    expect((fetchMock.mock.calls[2]![1] as RequestInit).method).toBe('POST')
+    expect(JSON.parse(String((fetchMock.mock.calls[2]![1] as RequestInit).body))).toEqual({
+      kind: 'client',
+      slug: 'acme-corp',
+      title: 'Acme Corp',
+      summary: 'Enterprise SaaS client',
+      tags: ['enterprise', 'q3'],
+      body: '# Acme Corp\n\nPrimary contact is Alice.',
+      note: 'Initial create',
+    })
+
+    const conflictErr = await createWikiPage({
+      kind: 'client',
+      slug: 'acme-corp',
+      title: 'Acme Corp',
+      body: 'Duplicate',
+    }).catch((e: unknown) => e)
+    expect(conflictErr).toBeInstanceOf(ApiError)
+    expect(conflictErr).toMatchObject({
+      status: 409,
+      code: 'already_exists',
+      message: 'Wiki page already exists: client/acme-corp',
+    })
+
+    // saveWikiPage
+    expect(await saveWikiPage('client', 'acme-corp', {
+      title: 'Acme Corp',
+      summary: 'Enterprise SaaS client',
+      tags: ['enterprise', 'q3'],
+      body: '# Acme Corp\n\nUpdated body.',
+      note: 'Verified by operator',
+    })).toEqual(samplePageResponse)
+    expect(fetchMock.mock.calls[4]![0]).toBe('/api/wiki/client/acme-corp')
+    expect((fetchMock.mock.calls[4]![1] as RequestInit).method).toBe('PUT')
+    expect(JSON.parse(String((fetchMock.mock.calls[4]![1] as RequestInit).body))).toEqual({
+      title: 'Acme Corp',
+      summary: 'Enterprise SaaS client',
+      tags: ['enterprise', 'q3'],
+      body: '# Acme Corp\n\nUpdated body.',
+      note: 'Verified by operator',
+    })
+
+    // revertWikiPage (without note and with note)
+    expect(await revertWikiPage('client', 'acme-corp', 1)).toEqual(samplePageResponse)
+    expect(fetchMock.mock.calls[5]![0]).toBe('/api/wiki/client/acme-corp/revert')
+    expect((fetchMock.mock.calls[5]![1] as RequestInit).method).toBe('POST')
+    expect(JSON.parse(String((fetchMock.mock.calls[5]![1] as RequestInit).body))).toEqual({ version: 1 })
+
+    expect(await revertWikiPage('client', 'acme-corp', 1, 'Restore v1')).toEqual(samplePageResponse)
+    expect(fetchMock.mock.calls[6]![0]).toBe('/api/wiki/client/acme-corp/revert')
+    expect(JSON.parse(String((fetchMock.mock.calls[6]![1] as RequestInit).body))).toEqual({ version: 1, note: 'Restore v1' })
+
+    // deleteWikiPage (200, 404, 401)
+    await expect(deleteWikiPage('client', 'acme-corp')).resolves.toBeUndefined()
+    expect(fetchMock.mock.calls[7]![0]).toBe('/api/wiki/client/acme-corp')
+    expect((fetchMock.mock.calls[7]![1] as RequestInit).method).toBe('DELETE')
+    expect((fetchMock.mock.calls[7]![1] as RequestInit).body).toBeUndefined()
+
+    const deleteErr = await deleteWikiPage('client', 'acme-corp').catch((e: unknown) => e)
+    expect(deleteErr).toBeInstanceOf(ApiError)
+    expect(deleteErr).toMatchObject({ status: 404, code: 'not_found' })
+
+    await expect(deleteWikiPage('client', 'acme-corp')).rejects.toBeInstanceOf(SignedOut)
+
+    // Verify GatewayEvent & BotRefPayload wiki/taint typings compile and hold expected values
+    const ev: GatewayEvent = { type: 'wiki_changed' }
+    const ref: BotRefPayload = { from: 'researcher', fromName: 'Researcher', content: 'Summary', tainted: true }
+    expect(ev.type).toBe('wiki_changed')
+    expect(ref.tainted).toBe(true)
   })
 })
