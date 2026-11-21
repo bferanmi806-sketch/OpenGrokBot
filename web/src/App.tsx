@@ -25,6 +25,7 @@ import { I18nProvider, browserLanguages, pickLang, useT, type Lang } from './i18
 import { errorText } from './i18n/describe'
 import { applyHello, applyStatus, clearDone } from './presence'
 import { applyTheme, hasStoredTheme, readStoredTheme, resolveTheme, systemTheme, writeStoredTheme } from './theme'
+import { createThreadCache } from './thread-cache'
 import type {
   BackgroundTaskPayload, BackgroundTaskView, BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, DispatchPlanPayload, DispatchPlanView, FeedSnapshot, GoalsSnapshot, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, RuleProposalPayload, SetupInfo, SpaceRole, SpacesSnapshot, ThemeSetting, VaultSnapshot,
 } from './types'
@@ -314,6 +315,14 @@ function Workspace({
   const livePlansDuringFetchRef = useRef(new Map<string, Map<string, DispatchPlanView>>())
   const inFlightFetches = useRef(0)
   const msgFetchSeq = useRef(0)
+  const threadCacheRef = useRef(createThreadCache(10))
+  const statusesRef = useRef<Record<string, BotStatus>>({})
+  statusesRef.current = statuses
+  const isThreadPinned = useCallback((id: string) => {
+    if (id === threadIdRef.current) return true
+    if (id.startsWith('dm:')) return statusesRef.current[id.slice(3)] === 'thinking'
+    return false
+  }, [])
   const loadMessages = useCallback(async (thread: string) => {
     const seq = ++msgFetchSeq.current
     inFlightFetches.current += 1
@@ -354,7 +363,9 @@ function Workspace({
               }
               return m
             })
-        return overlaid.sort((a, b) => a.id - b.id)
+        const sorted = overlaid.sort((a, b) => a.id - b.id)
+        threadCacheRef.current.set(thread, sorted, isThreadPinned)
+        return sorted
       })
     } finally {
       inFlightFetches.current -= 1
@@ -364,7 +375,7 @@ function Workspace({
         livePlansDuringFetchRef.current.clear()
       }
     }
-  }, [])
+  }, [isThreadPinned])
 
   const guard = useCallback((err: unknown) => {
     if (err instanceof SignedOut) setSignedOut(true)
@@ -557,6 +568,8 @@ function Workspace({
   /** 首次加载和每次重连都走这里：断线期间错过的消息、审批数、名册一次补齐。 */
   const resync = useCallback(async () => {
     try {
+      // 重连后清空后台线程的旧缓存，避免切回时看到断线期间漏掉消息的过期快照
+      threadCacheRef.current.clear(threadIdRef.current ?? undefined)
       await Promise.all([refreshConversations(), loadRoster(), loadLlms(), loadConnectors(), loadMcpServers(), loadVault(), loadFeed(), loadGoals(), loadSpaces()])
       const current = threadIdRef.current
       if (current) await loadMessages(current)
@@ -584,7 +597,8 @@ function Workspace({
 
   useEffect(() => {
     if (!threadId) return
-    setMessages([])
+    const cached = threadCacheRef.current.get(threadId)
+    setMessages(cached ?? [])
     loadMessages(threadId).catch(guard)
   }, [threadId, guard, loadMessages])
 
@@ -733,6 +747,7 @@ function Workspace({
           void loadPanel(panelFor.current)
         }
       }
+      threadCacheRef.current.upsertMessage(e.threadId, e.message)
       if (e.threadId === threadIdRef.current) {
         if (inFlightFetches.current > 0) {
           liveDuringFetch.current.set(e.message.id, e.message)
@@ -744,14 +759,13 @@ function Workspace({
         // 同 id 就替换：审批 chip 被放行、activity 卡片多了一步，都是就地更新
         setMessages((ms) => {
           const at = ms.findIndex((m) => m.id === e.message.id)
-          if (at === -1) return [...ms, e.message]
-          const next = [...ms]
-          next[at] = e.message
+          const next = at === -1 ? [...ms, e.message] : ms.map((m, idx) => (idx === at ? e.message : m))
+          threadCacheRef.current.set(e.threadId, next, isThreadPinned)
           return next
         })
       }
     }, { onSignedOut: signOut })
-  }, [signedOut, resync, refreshConversations, loadConnectors, loadMcpServers, loadVault, loadFeed, loadGoals, loadSpaces, loadPanel, applyBackgroundTaskUpdate, applyDispatchPlanUpdate, guard, signOut])
+  }, [signedOut, resync, refreshConversations, loadConnectors, loadMcpServers, loadVault, loadFeed, loadGoals, loadSpaces, loadPanel, applyBackgroundTaskUpdate, applyDispatchPlanUpdate, guard, signOut, isThreadPinned])
 
   const waiting = conversations.reduce((sum, c) => sum + (c.pending ?? 0), 0)
   useEffect(() => {
