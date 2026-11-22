@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  ApiError, SignedOut, answerQuestion, cancelBackgroundTask, cancelDispatchPlan, checkSession, connectEvents, createBot, fetchBackgroundTasks, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
+  ApiError, SignedOut, answerQuestion, cancelBackgroundTask, cancelDispatchPlan, cancelWorkflowRecording, checkSession, connectEvents, createBot, discardWorkflowDraft, fetchBackgroundTasks, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations, fetchWorkflowTraces,
   fetchFeed, fetchGoals, fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchSpaces, fetchUiPrefs, fetchVault, forgetMemoryRule, removeUpload, resolveApproval, resolveRuleProposal, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers, setBotSpaceRole, setBotVaultItems,
-  setComputerShell, setComputerWindow, startDispatchPlan, steerBackgroundTask, stopThread, updateRoutine, uploadFile,
+  runWorkflow, saveWorkflowDraft, setComputerShell, setComputerWindow, startDispatchPlan, startWorkflowRecording, steerBackgroundTask, stopThread, stopWorkflowRecording, stopWorkflowRun, updateRoutine, updateWorkflowDraft, uploadFile,
 } from './api'
 import { BotModelChip, BotModelPicker, botModel, botSeesImages } from './components/BotModelPicker'
 import { ConfirmDialog, useEscape } from './components/ConfirmDialog'
@@ -27,7 +27,7 @@ import { applyHello, applyStatus, clearDone } from './presence'
 import { applyTheme, hasStoredTheme, readStoredTheme, resolveTheme, systemTheme, writeStoredTheme } from './theme'
 import { createThreadCache } from './thread-cache'
 import type {
-  BackgroundTaskPayload, BackgroundTaskView, BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, DispatchPlanPayload, DispatchPlanView, FeedSnapshot, GoalsSnapshot, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, RuleProposalPayload, SetupInfo, SpaceRole, SpacesSnapshot, ThemeSetting, VaultSnapshot,
+  BackgroundTaskPayload, BackgroundTaskView, BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, DispatchPlanPayload, DispatchPlanView, FeedSnapshot, GoalsSnapshot, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, RuleProposalPayload, SetupInfo, SpaceRole, SpacesSnapshot, ThemeSetting, VaultSnapshot, WorkflowTrace,
 } from './types'
 
 const EMPTY_CONNECTORS: ConnectorsSnapshot = {
@@ -615,15 +615,15 @@ function Workspace({
     panelFetchSeqRef.current.set(botId, seq)
     bgInFlightRef.current.set(botId, (bgInFlightRef.current.get(botId) ?? 0) + 1)
     try {
-      const info = await fetchComputer(botId)
+      const [info, savedWorkflows] = await Promise.all([fetchComputer(botId), fetchWorkflowTraces(botId)])
       if (panelFetchSeqRef.current.get(botId) !== seq) return
       const liveSnapshot = new Map(liveBgDuringFetchRef.current.get(botId) ?? [])
       const mergedTasks = Array.isArray(info.backgroundTasks)
         ? overlayLiveBackgroundTasks(info.backgroundTasks, liveSnapshot)
         : undefined
       const mergedInfo: ComputerInfo = mergedTasks !== undefined
-        ? { ...info, backgroundTasks: mergedTasks }
-        : info
+        ? { ...info, backgroundTasks: mergedTasks, savedWorkflows }
+        : { ...info, savedWorkflows }
       if (mergedTasks !== undefined) {
         setBgTasksByBot((prev) => ({ ...prev, [botId]: mergedTasks }))
       }
@@ -990,6 +990,29 @@ function Workspace({
   }
   const onWindowDone = () => panelAction((botId) => setComputerWindow(botId, false))
   const onShell = (enabled: boolean) => panelAction((botId) => setComputerShell(botId, enabled))
+  const onWorkflowStartRecording = (title: string, intent: string) => panelAction(async (botId) => {
+    await startWorkflowRecording(botId, title, intent)
+    if (panel?.botId === botId && panel.info?.kind === 'local' && !panel.info.window) {
+      try {
+        await setComputerWindow(botId, true)
+      } catch (error) {
+        await cancelWorkflowRecording(botId).catch(() => {})
+        throw error
+      }
+    }
+  })
+  const onWorkflowStopRecording = () => panelAction(async (botId) => { await stopWorkflowRecording(botId) })
+  const onWorkflowCancelRecording = () => panelAction((botId) => cancelWorkflowRecording(botId))
+  const onWorkflowUpdateDraft = (draftId: string, trace: WorkflowTrace) =>
+    panelAction(async (botId) => { await updateWorkflowDraft(botId, draftId, trace) })
+  const onWorkflowSaveDraft = (draftId: string, trace: WorkflowTrace) =>
+    panelAction(async (botId) => { await saveWorkflowDraft(botId, draftId, trace) })
+  const onWorkflowDiscardDraft = (draftId: string) =>
+    panelAction((botId) => discardWorkflowDraft(botId, draftId))
+  const onWorkflowRun = (workflowId: string, bindings: Record<string, string>) =>
+    panelAction(async (botId) => { await runWorkflow(botId, workflowId, bindings) })
+  const onWorkflowStopRun = (runId: string) =>
+    panelAction((botId) => stopWorkflowRun(botId, runId))
   const onToggleConnector = (connectorId: string, granted: boolean) => panelAction(async (botId) => {
     const current = panel?.botId === botId && panel.info?.connectors
       ? panel.info.connectors.filter((c) => c.granted).map((c) => c.id)
@@ -1322,6 +1345,14 @@ function Workspace({
           onForgetRule={onForgetRule}
           onWindowDone={onWindowDone}
           onShell={onShell}
+          onWorkflowStartRecording={onWorkflowStartRecording}
+          onWorkflowStopRecording={onWorkflowStopRecording}
+          onWorkflowCancelRecording={onWorkflowCancelRecording}
+          onWorkflowUpdateDraft={onWorkflowUpdateDraft}
+          onWorkflowSaveDraft={onWorkflowSaveDraft}
+          onWorkflowDiscardDraft={onWorkflowDiscardDraft}
+          onWorkflowRun={onWorkflowRun}
+          onWorkflowStopRun={onWorkflowStopRun}
           onToggleConnector={onToggleConnector}
           onToggleMcpServer={onToggleMcpServer}
           onToggleVaultItem={onToggleVaultItem}

@@ -137,6 +137,8 @@ function mockGateway(opts: {
       const reply = opts.cancelDispatchPlan(url)
       return json(reply.body, reply.status ?? 200)
     }
+    if (/^\/api\/bots\/[^/]+\/workflows$/.test(url) && (!init?.method || init.method === 'GET')) return json([])
+    if (url.endsWith('/workflows/recording') && init?.method === 'POST') return json({ ok: true, recording: true }, 202)
     if (url.startsWith('/api/threads/')) return json(opts.messages ? await opts.messages(url) : [])
     if (url.includes('/computer')) {
       await opts.computerGate
@@ -293,6 +295,26 @@ describe('App', () => {
     await act(async () => { wake() })
     expect(await screen.findByText('Docker is not running.')).toBeInTheDocument()
     expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('opens the local browser window when a recording starts', async () => {
+    const calls = mockGateway({
+      computer: {
+        botId: 'researcher', running: true, kind: 'local', vncUrl: null,
+        screen: { kind: 'cdp', url: '/screen/researcher/ws' }, window: false, routines: [],
+      },
+    })
+    render(<App />)
+    await ready()
+    await userEvent.click(screen.getByRole('button', { name: 'Open its computer' }))
+    await screen.findByText("Scout's computer")
+    await userEvent.type(screen.getByRole('textbox', { name: 'Workflow name' }), 'Collect status')
+    await userEvent.click(screen.getByRole('button', { name: 'Start recording' }))
+    await waitFor(() => expect(calls).toContain('POST /api/bots/researcher/computer/window {"shown":true}'))
+    const recordingCall = calls.indexOf('POST /api/bots/researcher/workflows/recording {"title":"Collect status"}')
+    const windowCall = calls.indexOf('POST /api/bots/researcher/computer/window {"shown":true}')
+    expect(recordingCall).toBeGreaterThanOrEqual(0)
+    expect(windowCall).toBeGreaterThan(recordingCall)
   })
 
   it('does not reopen a panel whose computer woke up after you moved on', async () => {

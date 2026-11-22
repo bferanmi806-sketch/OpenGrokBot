@@ -92,7 +92,12 @@ describe('workflow replay API', () => {
       bindings: { recipient: runtimeValue },
     })
     expect(started.status).toBe(202)
-    expect(await started.json()).toMatchObject({ status: 'running' })
+    const startedBody = await started.json() as { runId: string; status: string }
+    expect(startedBody.status).toBe('running')
+    const computerStatus = await send(state.app.app, 'GET', `/api/bots/${bot.id}/computer`)
+    const computerSnapshot = await computerStatus.json()
+    expect(computerSnapshot).toMatchObject({ workflowRun: { runId: startedBody.runId, workflowId: saved.id } })
+    expect(JSON.stringify(computerSnapshot)).not.toContain(runtimeValue)
 
     await vi.waitFor(() => expect(state.db.prepare("SELECT count(*) AS n FROM approvals WHERE status = 'pending'").get()).toMatchObject({ n: 1 }))
     const approval = state.db.prepare("SELECT id FROM approvals WHERE status = 'pending'").get() as { id: number }

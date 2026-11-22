@@ -78,7 +78,7 @@ describe('workflow recording API', () => {
 
       expect(await (await app.request('/api/bots/researcher/workflows/recording/stop', { method: 'POST' })).json()).toEqual(draft)
       const pendingState = await app.request('/api/bots/researcher/computer')
-      expect(await pendingState.json()).toMatchObject({ workflowRecording: false, workflowDraft: true })
+      expect(await pendingState.json()).toMatchObject({ workflowRecording: false, workflowDraft: draft, workflowRun: null })
       expect((await app.request('/api/bots/researcher/workflows/recording', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Another one' }),
       })).status).toBe(409)
@@ -89,6 +89,15 @@ describe('workflow recording API', () => {
         ...draft.trace,
         steps: [{ type: 'fill', target: { candidates: [{ label: 'Customer email' }] }, value: { kind: 'placeholder', key: 'customerEmail' } }],
       }
+      const updateDraft = await app.request(`/api/bots/researcher/workflows/drafts/${draft.id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trace: reviewedTrace }),
+      })
+      expect(updateDraft.status).toBe(200)
+      expect(await updateDraft.json()).toEqual({ id: draft.id, trace: reviewedTrace })
+      const invalidDraftUpdate = await app.request(`/api/bots/researcher/workflows/drafts/${draft.id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trace: { ...reviewedTrace, version: 2 } }),
+      })
+      expect(invalidDraftUpdate.status).toBe(400)
       const invalidSave = await app.request('/api/bots/researcher/workflows', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ draftId: draft.id, trace: { ...reviewedTrace, steps: [{ ...reviewedTrace.steps[0], frame: '../private' }] } }),

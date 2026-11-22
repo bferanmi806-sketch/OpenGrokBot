@@ -5,7 +5,7 @@ import type {
   GoalsSnapshot, GoalUpdateItem, GoalView, IdeaItem, IdeaStatus, ImportMcpServersInput, ImportMcpServersResult, LlmPriority, LlmQueueEndpointView, LlmQueueSnapshot, McpServersSnapshot,
   McpServerView, Message, MilestoneStatus, ProviderPreset, QuietDigestBotSummary, QuietDigestFlushResponse, QuietDigestSummary, ResolveRuleProposalResponse, RoutineAction, RuleDuration, RuleProposalStatus, RuleProposalView,
   ServerEvent, SettingsView, SetupInfo, SpaceGrant, SpaceItem, SpaceItemData, SpaceRole, SpacesSnapshot, SpaceView, TeamCharterView, TodoItem, TodoStatus, UpdateGoalPatch, UpdateMcpServerPatch, UpdateSpacePatch, UpdateVaultItemPatch,
-  VaultItemView, VaultSnapshot, WikiCreateInput, WikiKind, WikiListResponse, WikiPageResponse, WikiSaveInput,
+  VaultItemView, VaultSnapshot, WikiCreateInput, WikiKind, WikiListResponse, WikiPageResponse, WikiSaveInput, WorkflowDraft, WorkflowTrace, SavedWorkflowTrace,
 } from './types'
 
 export type {
@@ -859,6 +859,48 @@ export async function setComputerShell(botId: string, enabled: boolean): Promise
 /** 本机电脑：登录完了把浏览器窗口收回后台（shown=false），或主动开出来（shown=true） */
 export async function setComputerWindow(botId: string, shown: boolean): Promise<void> {
   await send('POST', `/api/bots/${encodeURIComponent(botId)}/computer/window`, { shown }, { strict: true })
+}
+
+export const fetchWorkflowTraces = (botId: string) =>
+  getJson<SavedWorkflowTrace[]>(`/api/bots/${encodeURIComponent(botId)}/workflows`)
+
+export async function startWorkflowRecording(botId: string, title: string, intent?: string): Promise<void> {
+  await send('POST', `/api/bots/${encodeURIComponent(botId)}/workflows/recording`, {
+    title,
+    ...(intent?.trim() ? { intent: intent.trim() } : {}),
+  }, { strict: true })
+}
+
+export async function stopWorkflowRecording(botId: string): Promise<WorkflowDraft> {
+  const response = await send('POST', `/api/bots/${encodeURIComponent(botId)}/workflows/recording/stop`, undefined, { strict: true })
+  return response.json() as Promise<WorkflowDraft>
+}
+
+export async function cancelWorkflowRecording(botId: string): Promise<void> {
+  await send('DELETE', `/api/bots/${encodeURIComponent(botId)}/workflows/recording`, undefined, { strict: true })
+}
+
+export async function updateWorkflowDraft(botId: string, draftId: string, trace: WorkflowTrace): Promise<WorkflowDraft> {
+  const response = await send('PATCH', `/api/bots/${encodeURIComponent(botId)}/workflows/drafts/${encodeURIComponent(draftId)}`, { trace }, { strict: true })
+  return response.json() as Promise<WorkflowDraft>
+}
+
+export async function saveWorkflowDraft(botId: string, draftId: string, trace: WorkflowTrace): Promise<SavedWorkflowTrace> {
+  const response = await send('POST', `/api/bots/${encodeURIComponent(botId)}/workflows`, { draftId, trace }, { strict: true })
+  return response.json() as Promise<SavedWorkflowTrace>
+}
+
+export async function discardWorkflowDraft(botId: string, draftId: string): Promise<void> {
+  await send('DELETE', `/api/bots/${encodeURIComponent(botId)}/workflows/drafts/${encodeURIComponent(draftId)}`, undefined, { strict: true })
+}
+
+export async function runWorkflow(botId: string, workflowId: string, bindings: Record<string, string>): Promise<{ runId: string; status: 'running' }> {
+  const response = await send('POST', `/api/bots/${encodeURIComponent(botId)}/workflows/${encodeURIComponent(workflowId)}/run`, { bindings }, { strict: true })
+  return response.json() as Promise<{ runId: string; status: 'running' }>
+}
+
+export async function stopWorkflowRun(botId: string, runId: string): Promise<void> {
+  await send('DELETE', `/api/bots/${encodeURIComponent(botId)}/workflows/runs/${encodeURIComponent(runId)}`, undefined, { strict: true })
 }
 
 export async function updateRoutine(id: number, action: RoutineAction): Promise<void> {

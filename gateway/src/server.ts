@@ -3294,7 +3294,14 @@ Complete your step and post a concise summary of your findings or output in this
     }))
     const base = {
       botId, routines, usage, rules, memory, skills, actions, connectors, mcpServers, vaultItems, spaces,
-      workflowRecording: workflowRecordings.has(botId), workflowDraft: workflowDrafts.has(botId),
+      workflowRecording: workflowRecordings.has(botId),
+      workflowDraft: workflowDrafts.get(botId) ?? null,
+      workflowRun: (() => {
+        const active = workflowRuns.get(botId)
+        return active && active.phase.kind !== 'finished'
+          ? { runId: active.runId, workflowId: active.workflowId }
+          : null
+      })(),
     }
     if (!pool) {
       return c.json({
@@ -3490,6 +3497,21 @@ Complete your step and post a concise summary of your findings or output in this
     if (!draft || draft.id !== c.req.param('draftId')) return c.json({ error: 'unknown workflow draft' }, 404)
     workflowDrafts.delete(botId)
     return c.body(null, 204)
+  })
+
+  app.patch('/api/bots/:botId/workflows/drafts/:draftId', async (c) => {
+    const botId = c.req.param('botId')
+    if (!botById(botId)) return c.json({ error: 'unknown bot' }, 404)
+    const draft = workflowDrafts.get(botId)
+    if (!draft || draft.id !== c.req.param('draftId')) return c.json({ error: 'unknown workflow draft' }, 404)
+    const body = (await c.req.json().catch(() => null)) as { trace?: unknown } | null
+    try {
+      const updated = { id: draft.id, trace: parseWorkflowTrace(body?.trace) }
+      workflowDrafts.set(botId, updated)
+      return c.json(updated)
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : 'invalid workflow trace' }, 400)
+    }
   })
 
   app.get('/api/bots/:botId/workflows', async (c) => {
