@@ -356,7 +356,9 @@ describe('App', () => {
     expect(calls.some((call) => call.includes('/computer/window'))).toBe(false)
     await userEvent.click(screen.getByRole('button', { name: 'Finish recording' }))
     await waitFor(() => expect(calls).toContain('POST /api/bots/researcher/workflows/recording/stop '))
-    await waitFor(() => expect(screen.queryByText('Its browser is open as a window on your desktop — sign in there.')).toBeNull())
+    await waitFor(() => expect(screen.queryByText('Recording. Perform each step in the browser.')).toBeNull())
+    expect(screen.queryByText('Its browser is open as a window on your desktop — perform the recorded steps there.')).toBeNull()
+    expect(screen.queryByText('Its browser is open as a window on your desktop — sign in there.')).toBeNull()
     expect(calls.some((call) => call.includes('/computer/window'))).toBe(false)
   })
 
