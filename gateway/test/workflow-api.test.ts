@@ -21,17 +21,25 @@ describe('workflow recording API', () => {
     upsertBot(db, bot)
     let stopCalls = 0
     let startedIntent: string | undefined
+    let windowVisible = false
+    const lifecycle: string[] = []
     const computer = createFakeComputer({
+      kind: 'local',
+      showWindow: async () => { lifecycle.push('show'); windowVisible = true },
+      hideWindow: async () => { lifecycle.push('hide'); windowVisible = false },
+      windowShown: () => windowVisible,
       startWorkflowRecording: async (title, intent): Promise<WorkflowRecording> => {
+        lifecycle.push('start')
         startedIntent = intent
         return ({
         async reattach() {},
         async stop() {
+          lifecycle.push('stop')
           stopCalls += 1
           return parseWorkflowTrace({
             format: 'opensuperbot.workflow', version: 1, title, steps: [
               { type: 'fill', target: { candidates: [{ label: 'API token' }] }, value: { kind: 'literal', text: 'should-never-persist' } },
-              { type: 'click', target: { candidates: [{ role: { role: 'button', name: 'Save' } }] } },
+              { type: 'click', target: { candidates: [{ role: { role: 'button', name: 'Save' } }] }, approval: { kind: 'other', target: '' } },
             ],
           })
         },
@@ -58,6 +66,8 @@ describe('workflow recording API', () => {
       expect(start.status).toBe(202)
       expect(await start.json()).toEqual({ ok: true, recording: true })
       expect(startedIntent).toBe('Send the completed form')
+      expect(lifecycle).toEqual(['show', 'start'])
+      expect(windowVisible).toBe(true)
       expect(isBusy('researcher')).toBe(true)
       expect(await (await app.request('/api/summary')).json()).toMatchObject({ working: 0 })
       expect((await app.request('/api/bots/researcher/workflows/recording', {
@@ -74,6 +84,8 @@ describe('workflow recording API', () => {
       expect(draft.trace.steps).toHaveLength(2)
       expect(JSON.stringify(draft)).not.toContain('should-never-persist')
       expect(stopCalls).toBe(1)
+      expect(lifecycle).toEqual(['show', 'start', 'stop', 'hide'])
+      expect(windowVisible).toBe(false)
       expect(isBusy('researcher')).toBe(false)
 
       expect(await (await app.request('/api/bots/researcher/workflows/recording/stop', { method: 'POST' })).json()).toEqual(draft)
@@ -87,7 +99,10 @@ describe('workflow recording API', () => {
       expect(await list.json()).toEqual([])
       const reviewedTrace: WorkflowTrace = {
         ...draft.trace,
-        steps: [{ type: 'fill', target: { candidates: [{ label: 'Customer email' }] }, value: { kind: 'placeholder', key: 'customerEmail' } }],
+        steps: [
+          { type: 'fill', target: { candidates: [{ label: 'Customer email' }] }, value: { kind: 'placeholder', key: 'customerEmail' } },
+          { type: 'click', target: { candidates: [{ role: { role: 'button', name: 'Save' } }] }, approval: { kind: 'other', target: '' } },
+        ],
       }
       const updateDraft = await app.request(`/api/bots/researcher/workflows/drafts/${draft.id}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trace: reviewedTrace }),
@@ -237,13 +252,23 @@ describe('workflow recording API', () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'osb-workflow-cancel-'))
     const db = openDb(':memory:')
     upsertBot(db, bot)
-    const stop = vi.fn(async () => parseWorkflowTrace({
+    let windowVisible = false
+    const lifecycle: string[] = []
+    const stop = vi.fn(async () => {
+      lifecycle.push('stop')
+      return parseWorkflowTrace({
       format: 'opensuperbot.workflow', version: 1, title: 'Discarded recording', steps: [],
-    }))
+      })
+    })
     const computer = createFakeComputer({
-      startWorkflowRecording: async (): Promise<WorkflowRecording> => ({
-        async reattach() {}, stop,
-      }),
+      kind: 'local',
+      showWindow: async () => { lifecycle.push('show'); windowVisible = true },
+      hideWindow: async () => { lifecycle.push('hide'); windowVisible = false },
+      windowShown: () => windowVisible,
+      startWorkflowRecording: async (): Promise<WorkflowRecording> => {
+        lifecycle.push('start')
+        return { async reattach() {}, stop }
+      },
     })
     const pool = createPool({ dataDir, makeComputer: async () => computer })
     const { app, isBusy } = createApp({ db, llm, pool, dataDir })
@@ -252,10 +277,13 @@ describe('workflow recording API', () => {
       expect((await app.request('/api/bots/researcher/workflows/recording', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Discarded recording' }),
       })).status).toBe(202)
+      expect(lifecycle).toEqual(['show', 'start'])
 
       const cancel = await app.request('/api/bots/researcher/workflows/recording', { method: 'DELETE' })
       expect(cancel.status).toBe(204)
       expect(stop).toHaveBeenCalledTimes(1)
+      expect(lifecycle).toEqual(['show', 'start', 'stop', 'hide'])
+      expect(windowVisible).toBe(false)
       expect(isBusy('researcher')).toBe(false)
       expect((await app.request('/api/bots/researcher/workflows/recording/stop', { method: 'POST' })).status).toBe(409)
     } finally {
@@ -269,13 +297,23 @@ describe('workflow recording API', () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'osb-workflow-time-limit-'))
     const db = openDb(':memory:')
     upsertBot(db, bot)
-    const stop = vi.fn(async () => parseWorkflowTrace({
+    let windowVisible = false
+    const lifecycle: string[] = []
+    const stop = vi.fn(async () => {
+      lifecycle.push('stop')
+      return parseWorkflowTrace({
       format: 'opensuperbot.workflow', version: 1, title: 'Time-limited recording', steps: [],
-    }))
+      })
+    })
     const computer = createFakeComputer({
-      startWorkflowRecording: async (): Promise<WorkflowRecording> => ({
-        async reattach() {}, stop,
-      }),
+      kind: 'local',
+      showWindow: async () => { lifecycle.push('show'); windowVisible = true },
+      hideWindow: async () => { lifecycle.push('hide'); windowVisible = false },
+      windowShown: () => windowVisible,
+      startWorkflowRecording: async (): Promise<WorkflowRecording> => {
+        lifecycle.push('start')
+        return { async reattach() {}, stop }
+      },
     })
     const pool = createPool({ dataDir, makeComputer: async () => computer })
     const { app, isBusy } = createApp({ db, llm, pool, dataDir })
@@ -285,14 +323,108 @@ describe('workflow recording API', () => {
       expect((await app.request('/api/bots/researcher/workflows/recording', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Time-limited recording' }),
       })).status).toBe(202)
+      expect(lifecycle).toEqual(['show', 'start'])
 
       await vi.advanceTimersByTimeAsync(WORKFLOW_RECORDING_MAX_MS)
       expect(stop).toHaveBeenCalledTimes(1)
+      expect(lifecycle).toEqual(['show', 'start', 'stop', 'hide'])
+      expect(windowVisible).toBe(false)
       expect(isBusy('researcher')).toBe(false)
       const draft = await (await app.request('/api/bots/researcher/workflows/recording/stop', { method: 'POST' })).json() as { trace: WorkflowTrace }
       expect(draft.trace.truncated).toBe(true)
     } finally {
       vi.useRealTimers()
+      await pool.disposeAll()
+      db.close()
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps a local browser window open when it was already visible', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'osb-workflow-visible-window-'))
+    const db = openDb(':memory:')
+    upsertBot(db, bot)
+    let windowVisible = true
+    const lifecycle: string[] = []
+    const computer = createFakeComputer({
+      kind: 'local',
+      showWindow: async () => { lifecycle.push('show'); windowVisible = true },
+      hideWindow: async () => { lifecycle.push('hide'); windowVisible = false },
+      windowShown: () => windowVisible,
+      startWorkflowRecording: async (title): Promise<WorkflowRecording> => {
+        lifecycle.push('start')
+        return {
+          async reattach() {},
+          async stop() {
+            lifecycle.push('stop')
+            return parseWorkflowTrace({ format: 'opensuperbot.workflow', version: 1, title, steps: [] })
+          },
+        }
+      },
+    })
+    const pool = createPool({ dataDir, makeComputer: async () => computer })
+    const { app } = createApp({ db, llm, pool, dataDir })
+
+    try {
+      expect((await app.request('/api/bots/researcher/workflows/recording', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Use open browser' }),
+      })).status).toBe(202)
+      expect(lifecycle).toEqual(['start'])
+      expect((await app.request('/api/bots/researcher/workflows/recording/stop', { method: 'POST' })).status).toBe(200)
+      expect(lifecycle).toEqual(['start', 'stop'])
+      expect(windowVisible).toBe(true)
+    } finally {
+      await pool.disposeAll()
+      db.close()
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('cancels while the local browser window is opening without starting a recorder', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'osb-workflow-window-race-'))
+    const db = openDb(':memory:')
+    upsertBot(db, bot)
+    let windowVisible = false
+    let finishOpening: (() => void) | undefined
+    let recorderStarts = 0
+    const lifecycle: string[] = []
+    const opening = new Promise<void>((resolve) => {
+      finishOpening = () => {
+        windowVisible = true
+        resolve()
+      }
+    })
+    const computer = createFakeComputer({
+      kind: 'local',
+      showWindow: () => { lifecycle.push('show'); return opening },
+      hideWindow: async () => { lifecycle.push('hide'); windowVisible = false },
+      windowShown: () => windowVisible,
+      startWorkflowRecording: async (): Promise<WorkflowRecording> => {
+        recorderStarts += 1
+        return {
+          async reattach() {},
+          async stop() { return parseWorkflowTrace({ format: 'opensuperbot.workflow', version: 1, title: 'Cancelled', steps: [] }) },
+        }
+      },
+    })
+    const pool = createPool({ dataDir, makeComputer: async () => computer })
+    const { app } = createApp({ db, llm, pool, dataDir })
+
+    try {
+      const start = app.request('/api/bots/researcher/workflows/recording', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Cancelled' }),
+      })
+      await vi.waitFor(() => expect(lifecycle).toEqual(['show']))
+      const cancel = app.request('/api/bots/researcher/workflows/recording', { method: 'DELETE' })
+      finishOpening?.()
+
+      const [startResponse, cancelResponse] = await Promise.all([start, cancel])
+      expect(startResponse.status).toBe(409)
+      expect(cancelResponse.status).toBe(204)
+      expect(recorderStarts).toBe(0)
+      expect(lifecycle).toEqual(['show', 'hide'])
+      expect(windowVisible).toBe(false)
+    } finally {
       await pool.disposeAll()
       db.close()
       await rm(dataDir, { recursive: true, force: true })

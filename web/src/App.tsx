@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  ApiError, SignedOut, answerQuestion, cancelBackgroundTask, cancelDispatchPlan, cancelWorkflowRecording, checkSession, connectEvents, createBot, discardWorkflowDraft, fetchBackgroundTasks, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations, fetchWorkflowTraces,
+  ApiError, SignedOut, answerQuestion, cancelBackgroundTask, cancelDispatchPlan, cancelWorkflowRecording, checkSession, connectEvents, createBot, deleteWorkflow, discardWorkflowDraft, fetchBackgroundTasks, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations, fetchWorkflowTraces,
   fetchFeed, fetchGoals, fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchSpaces, fetchUiPrefs, fetchVault, forgetMemoryRule, removeUpload, resolveApproval, resolveRuleProposal, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers, setBotSpaceRole, setBotVaultItems,
   runWorkflow, saveWorkflowDraft, setComputerShell, setComputerWindow, startDispatchPlan, startWorkflowRecording, steerBackgroundTask, stopThread, stopWorkflowRecording, stopWorkflowRun, updateRoutine, updateWorkflowDraft, uploadFile,
 } from './api'
@@ -977,10 +977,10 @@ function Workspace({
   }
 
   /** 本机模式的两个动作：网关拒了（没沙箱、自检失败）就把原因抛回面板显示；不管成败都刷新面板 */
-  const panelAction = async (run: (botId: string) => Promise<void>) => {
+  const panelAction = async <T,>(run: (botId: string) => Promise<T>): Promise<T | undefined> => {
     if (!panel) return
     try {
-      await run(panel.botId)
+      return await run(panel.botId)
     } catch (err) {
       if (err instanceof SignedOut) { setSignedOut(true); return }
       throw err
@@ -990,25 +990,18 @@ function Workspace({
   }
   const onWindowDone = () => panelAction((botId) => setComputerWindow(botId, false))
   const onShell = (enabled: boolean) => panelAction((botId) => setComputerShell(botId, enabled))
-  const onWorkflowStartRecording = (title: string, intent: string) => panelAction(async (botId) => {
-    await startWorkflowRecording(botId, title, intent)
-    if (panel?.botId === botId && panel.info?.kind === 'local' && !panel.info.window) {
-      try {
-        await setComputerWindow(botId, true)
-      } catch (error) {
-        await cancelWorkflowRecording(botId).catch(() => {})
-        throw error
-      }
-    }
-  })
+  const onWorkflowStartRecording = (title: string, intent: string) =>
+    panelAction((botId) => startWorkflowRecording(botId, title, intent))
   const onWorkflowStopRecording = () => panelAction(async (botId) => { await stopWorkflowRecording(botId) })
   const onWorkflowCancelRecording = () => panelAction((botId) => cancelWorkflowRecording(botId))
   const onWorkflowUpdateDraft = (draftId: string, trace: WorkflowTrace) =>
-    panelAction(async (botId) => { await updateWorkflowDraft(botId, draftId, trace) })
+    panelAction((botId) => updateWorkflowDraft(botId, draftId, trace))
   const onWorkflowSaveDraft = (draftId: string, trace: WorkflowTrace) =>
     panelAction(async (botId) => { await saveWorkflowDraft(botId, draftId, trace) })
   const onWorkflowDiscardDraft = (draftId: string) =>
     panelAction((botId) => discardWorkflowDraft(botId, draftId))
+  const onWorkflowDelete = (workflowId: string) =>
+    panelAction((botId) => deleteWorkflow(botId, workflowId))
   const onWorkflowRun = (workflowId: string, bindings: Record<string, string>) =>
     panelAction(async (botId) => { await runWorkflow(botId, workflowId, bindings) })
   const onWorkflowStopRun = (runId: string) =>
@@ -1351,6 +1344,7 @@ function Workspace({
           onWorkflowUpdateDraft={onWorkflowUpdateDraft}
           onWorkflowSaveDraft={onWorkflowSaveDraft}
           onWorkflowDiscardDraft={onWorkflowDiscardDraft}
+          onWorkflowDelete={onWorkflowDelete}
           onWorkflowRun={onWorkflowRun}
           onWorkflowStopRun={onWorkflowStopRun}
           onToggleConnector={onToggleConnector}

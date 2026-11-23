@@ -367,6 +367,7 @@ export const en = {
   'panel.workflowEmpty': 'No workflows saved yet.',
   'panel.workflowTruncated': 'This recording reached its limit and cannot be run as-is.',
   'panel.workflowRun': 'Run workflow',
+  'panel.workflowDelete': 'Delete workflow',
   'panel.workflowRunActive': 'Workflow {id} is running.',
   'panel.workflowStopRun': 'Stop workflow',
   'panel.routines': 'Routines',

@@ -894,6 +894,10 @@ export async function discardWorkflowDraft(botId: string, draftId: string): Prom
   await send('DELETE', `/api/bots/${encodeURIComponent(botId)}/workflows/drafts/${encodeURIComponent(draftId)}`, undefined, { strict: true })
 }
 
+export async function deleteWorkflow(botId: string, workflowId: string): Promise<void> {
+  await send('DELETE', `/api/bots/${encodeURIComponent(botId)}/workflows/${encodeURIComponent(workflowId)}`, undefined, { strict: true })
+}
+
 export async function runWorkflow(botId: string, workflowId: string, bindings: Record<string, string>): Promise<{ runId: string; status: 'running' }> {
   const response = await send('POST', `/api/bots/${encodeURIComponent(botId)}/workflows/${encodeURIComponent(workflowId)}/run`, { bindings }, { strict: true })
   return response.json() as Promise<{ runId: string; status: 'running' }>

@@ -364,6 +364,7 @@ export const zhCN: Record<MessageKey, string> = {
   'panel.workflowEmpty': '还没有保存工作流。',
   'panel.workflowTruncated': '这段录制已达到上限，无法直接运行。',
   'panel.workflowRun': '运行工作流',
+  'panel.workflowDelete': '删除工作流',
   'panel.workflowRunActive': '工作流 {id} 正在运行。',
   'panel.workflowStopRun': '停止工作流',
   'panel.routines': '例行任务',

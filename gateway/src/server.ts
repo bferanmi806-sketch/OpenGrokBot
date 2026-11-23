@@ -266,7 +266,8 @@ type ActiveWorkflowRecording = {
   releaseBrowser: () => void
   timeout: ReturnType<typeof setTimeout> | null
   cancelled: boolean
-  released: boolean
+  restoreWindow: (() => Promise<void>) | null
+  releasePromise: Promise<void> | null
 }
 type WorkflowRunPhase =
   | { kind: 'running'; approvedStepIndex?: number }
@@ -744,15 +745,22 @@ export function createApp(deps: AppDeps): GatewayApp {
   const workflowRecordings = new Map<string, ActiveWorkflowRecording>()
   const workflowDrafts = new Map<string, WorkflowDraft>()
   const workflowRuns = new Map<string, ActiveWorkflowRun>()
-  const releaseWorkflowRecording = (botId: string, active: ActiveWorkflowRecording) => {
+  const releaseWorkflowRecording = (botId: string, active: ActiveWorkflowRecording): Promise<void> => {
+    if (active.releasePromise) return active.releasePromise
     if (active.timeout) clearTimeout(active.timeout)
     active.timeout = null
     if (workflowRecordings.get(botId) === active) workflowRecordings.delete(botId)
-    if (!active.released) {
-      active.released = true
-      active.releaseBrowser()
-      active.releaseTurns()
-    }
+    active.releasePromise = (async () => {
+      try {
+        await active.restoreWindow?.()
+      } catch (error) {
+        console.warn('[gateway] could not hide the local browser after workflow recording:', botId, error)
+      } finally {
+        active.releaseBrowser()
+        active.releaseTurns()
+      }
+    })()
+    return active.releasePromise
   }
   const stopWorkflowRecording = (active: ActiveWorkflowRecording, recorder: WorkflowRecording) =>
     active.stopping ??= Promise.resolve().then(() => recorder.stop())
@@ -3380,29 +3388,42 @@ Complete your step and post a concise summary of your findings or output in this
       releaseBrowser: () => { browserLeases.release(botId, recHolder) },
       timeout: null,
       cancelled: false,
-      released: false,
+      restoreWindow: null,
+      releasePromise: null,
     }
     workflowRecordings.set(botId, active)
     let computer: BotComputer
     try {
       computer = await pool.get(botId)
     } catch {
-      releaseWorkflowRecording(botId, active)
+      await releaseWorkflowRecording(botId, active)
       return c.json({ error: 'the bot browser is unavailable' }, 503)
     }
     if (active.cancelled || workflowRecordings.get(botId) !== active) {
-      releaseWorkflowRecording(botId, active)
+      await releaseWorkflowRecording(botId, active)
       return c.json({ error: 'workflow recording was cancelled before it started' }, 409)
     }
     if (!computer.startWorkflowRecording) {
-      releaseWorkflowRecording(botId, active)
+      await releaseWorkflowRecording(botId, active)
       return c.json({ error: 'this computer cannot record workflows' }, 409)
     }
     try {
+      if (computer.kind === 'local' && computer.showWindow && computer.hideWindow && !computer.windowShown?.()) {
+        const opening = computer.showWindow()
+        active.restoreWindow = async () => {
+          await opening.catch(() => {})
+          await computer.hideWindow?.()
+        }
+        await opening
+      }
+      if (active.cancelled || workflowRecordings.get(botId) !== active) {
+        await releaseWorkflowRecording(botId, active)
+        return c.json({ error: 'workflow recording was cancelled before it started' }, 409)
+      }
       const recorder = await computer.startWorkflowRecording(title, intent)
       if (active.cancelled || workflowRecordings.get(botId) !== active) {
         await recorder.stop().catch(() => {})
-        releaseWorkflowRecording(botId, active)
+        await releaseWorkflowRecording(botId, active)
         return c.json({ error: 'workflow recording was cancelled before it started' }, 409)
       }
       active.recorder = recorder
@@ -3419,7 +3440,7 @@ Complete your step and post a concise summary of your findings or output in this
       active.timeout.unref?.()
       return c.json({ ok: true, recording: true }, 202)
     } catch (error) {
-      releaseWorkflowRecording(botId, active)
+      await releaseWorkflowRecording(botId, active)
       return c.json({ error: error instanceof Error ? error.message : 'could not start workflow recording' }, 409)
     }
   })
@@ -3439,11 +3460,11 @@ Complete your step and post a concise summary of your findings or output in this
       if (active.cancelled) return c.json({ error: 'workflow recording was cancelled' }, 409)
       active.draft ??= { id: randomUUID(), trace }
       workflowDrafts.set(botId, active.draft)
-      releaseWorkflowRecording(botId, active)
+      await releaseWorkflowRecording(botId, active)
       return c.json(active.draft)
     } catch (error) {
       active.stopping = null
-      releaseWorkflowRecording(botId, active)
+      await releaseWorkflowRecording(botId, active)
       return c.json({ error: error instanceof Error ? error.message : 'could not stop workflow recording' }, 500)
     }
   })
@@ -3463,7 +3484,7 @@ Complete your step and post a concise summary of your findings or output in this
       await stopping.catch(() => {})
     }
     if (active.draft && workflowDrafts.get(botId) === active.draft) workflowDrafts.delete(botId)
-    releaseWorkflowRecording(botId, active)
+    await releaseWorkflowRecording(botId, active)
     return c.body(null, 204)
   })
 
@@ -4147,12 +4168,12 @@ Complete your step and post a concise summary of your findings or output in this
       const dpStop = dispatchPlans.stopAll()
       turns.stopAll()
       for (const active of workflowRuns.values()) releaseWorkflowRun(active, true)
-      for (const [botId, active] of workflowRecordings.entries()) releaseWorkflowRecording(botId, active)
+      const workflowRecordingStops = Array.from(workflowRecordings.entries(), ([botId, active]) => releaseWorkflowRecording(botId, active))
       waiting.clear()
       const bgStop = backgroundTasks.stopAll()
       mcpApi.stop()
       const mcpClose = mcpManager.closeAll().catch(() => {})
-      return Promise.all([bgStop, dpStop, mcpClose]).then(() => {})
+      return Promise.all([bgStop, dpStop, mcpClose, ...workflowRecordingStops]).then(() => {})
     },
   }
 }

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { ApiError } from '../api'
 import { useT } from '../i18n'
 import { errorText } from '../i18n/describe'
-import type { ComputerInfo, WorkflowApproval, WorkflowApprovalKind, WorkflowStep, WorkflowTrace } from '../types'
+import type { ComputerInfo, WorkflowApproval, WorkflowApprovalKind, WorkflowDraft, WorkflowStep, WorkflowTrace } from '../types'
 
 type ActionStep = Exclude<WorkflowStep, { type: 'navigate' | 'unrecorded-popup' }>
 type ValueStep = Extract<WorkflowStep, { type: 'fill' | 'select' }>
@@ -10,9 +10,10 @@ type WorkflowCallbacks = {
   onStartRecording?: (title: string, intent: string) => void | Promise<void>
   onStopRecording?: () => void | Promise<void>
   onCancelRecording?: () => void | Promise<void>
-  onUpdateDraft?: (draftId: string, trace: WorkflowTrace) => void | Promise<void>
+  onUpdateDraft?: (draftId: string, trace: WorkflowTrace) => void | WorkflowDraft | Promise<void | WorkflowDraft>
   onSaveDraft?: (draftId: string, trace: WorkflowTrace) => void | Promise<void>
   onDiscardDraft?: (draftId: string) => void | Promise<void>
+  onDeleteWorkflow?: (workflowId: string) => void | Promise<void>
   onRun?: (workflowId: string, bindings: Record<string, string>) => void | Promise<void>
   onStopRun?: (runId: string) => void | Promise<void>
 }
@@ -169,7 +170,11 @@ export function WorkflowSection({ info, ...callbacks }: { info: ComputerInfo } &
             type="button"
             className="panel-copy"
             disabled={busy || !recordTitle.trim()}
-            onClick={() => void run(() => callbacks.onStartRecording?.(recordTitle.trim(), recordIntent.trim()))}
+            onClick={() => void run(async () => {
+              await callbacks.onStartRecording?.(recordTitle.trim(), recordIntent.trim())
+              setRecordTitle('')
+              setRecordIntent('')
+            })}
           >
             {t('panel.workflowStartRecording')}
           </button>
@@ -266,7 +271,7 @@ export function WorkflowSection({ info, ...callbacks }: { info: ComputerInfo } &
                         disabled={busy}
                         onChange={(event) => setDraftTrace((current) => current ? updateStep(current, index, (currentStep) => updateApproval(
                           currentStep,
-                          event.target.checked ? { kind: 'other', target: '', action: '' } : null,
+                          event.target.checked ? { kind: 'other', target: '' } : null,
                         )) : current)}
                       />
                       <span>{t('panel.workflowApprovalRequired')}</span>
@@ -304,9 +309,14 @@ export function WorkflowSection({ info, ...callbacks }: { info: ComputerInfo } &
                           <input
                             value={step.approval.action ?? ''}
                             maxLength={200}
-                            onChange={(event) => setDraftTrace((current) => current ? updateStep(current, index, (currentStep) => isActionStep(currentStep) && currentStep.approval
-                              ? updateApproval(currentStep, { ...currentStep.approval, action: event.target.value })
-                              : currentStep) : current)}
+                            onChange={(event) => setDraftTrace((current) => current ? updateStep(current, index, (currentStep) => {
+                              if (!isActionStep(currentStep) || !currentStep.approval) return currentStep
+                              const approval = { ...currentStep.approval }
+                              const action = event.target.value
+                              if (action.trim()) approval.action = action
+                              else delete approval.action
+                              return updateApproval(currentStep, approval)
+                            }) : current)}
                           />
                         </label>
                       </>
@@ -318,7 +328,13 @@ export function WorkflowSection({ info, ...callbacks }: { info: ComputerInfo } &
             {draftTrace.steps.length === 0 ? <div className="panel-empty">{t('panel.workflowNoSteps')}</div> : null}
           </div>
           <div className="panel-workflow-actions">
-            <button type="button" className="panel-copy" disabled={busy || !readyToSave || !callbacks.onUpdateDraft} onClick={() => void run(() => callbacks.onUpdateDraft?.(draftId, draftTrace))}>
+            <button type="button" className="panel-copy" disabled={busy || !readyToSave || !callbacks.onUpdateDraft} onClick={() => void run(async () => {
+              const updated = await callbacks.onUpdateDraft?.(draftId, draftTrace)
+              if (updated) {
+                setDraftId(updated.id)
+                setDraftTrace(updated.trace)
+              }
+            })}>
               {t('panel.workflowSaveChanges')}
             </button>
             <button type="button" className="panel-copy" disabled={busy || !readyToSave || !callbacks.onSaveDraft} onClick={() => void run(() => callbacks.onSaveDraft?.(draftId, draftTrace))}>
@@ -333,7 +349,7 @@ export function WorkflowSection({ info, ...callbacks }: { info: ComputerInfo } &
 
       {activeRun ? (
         <div className="panel-workflow-status" role="status">
-          <span>{t('panel.workflowRunActive', { id: activeRun.workflowId })}</span>
+          <span>{t('panel.workflowRunActive', { id: saved.find((workflow) => workflow.id === activeRun.workflowId)?.trace.title ?? activeRun.workflowId })}</span>
           <button type="button" className="panel-copy" disabled={busy || !callbacks.onStopRun} onClick={() => void run(() => callbacks.onStopRun?.(activeRun.runId))}>
             {t('panel.workflowStopRun')}
           </button>
@@ -371,16 +387,28 @@ export function WorkflowSection({ info, ...callbacks }: { info: ComputerInfo } &
               onClick={() => {
                 const workflowId = selected.id
                 const values = { ...bindings }
-                setRunInputs((current) => {
-                  const next = { ...current }
-                  delete next[workflowId]
-                  return next
+                void run(async () => {
+                  await callbacks.onRun?.(workflowId, values)
+                  setRunInputs((current) => {
+                    const next = { ...current }
+                    delete next[workflowId]
+                    return next
+                  })
                 })
-                void run(() => callbacks.onRun?.(workflowId, values))
               }}
             >
               {t('panel.workflowRun')}
             </button>
+            {callbacks.onDeleteWorkflow ? (
+              <button
+                type="button"
+                className="panel-copy"
+                disabled={busy || activeRun?.workflowId === selected.id}
+                onClick={() => void run(() => callbacks.onDeleteWorkflow?.(selected.id))}
+              >
+                {t('panel.workflowDelete')}
+              </button>
+            ) : null}
           </div>
         ) : <div className="panel-empty">{t('panel.workflowEmpty')}</div>}
       </div>
