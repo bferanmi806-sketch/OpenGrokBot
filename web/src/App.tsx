@@ -193,8 +193,6 @@ function Workspace({
   const [bgTasksByBot, setBgTasksByBot] = useState<Record<string, BackgroundTaskView[]>>({})
   /** 电脑面板开给谁；info 为 null 表示那台电脑还在醒 */
   const [panel, setPanel] = useState<{ botId: string; info: ComputerInfo | null } | null>(null)
-  /** 本次录制自动打开的本地浏览器；录制结束后自动收回，原本打开的窗口不动 */
-  const workflowRecordingWindows = useRef(new Set<string>())
   const [hiring, setHiring] = useState(false)
   const [hireError, setHireError] = useState<string | undefined>()
   /** 模型连接和每位同事的选择；老网关没有这块就一直是 null */
@@ -992,22 +990,8 @@ function Workspace({
   }
   const onWindowDone = () => panelAction((botId) => setComputerWindow(botId, false))
   const onShell = (enabled: boolean) => panelAction((botId) => setComputerShell(botId, enabled))
-  const onWorkflowStartRecording = (title: string, intent: string) => panelAction(async (botId) => {
-    const shouldOpenWindow = panel?.botId === botId && panel.info?.kind === 'local' && !panel.info.window
-    await startWorkflowRecording(botId, title, intent)
-    if (!shouldOpenWindow) return
-    try {
-      await setComputerWindow(botId, true)
-      workflowRecordingWindows.current.add(botId)
-    } catch (error) {
-      try {
-        await cancelWorkflowRecording(botId)
-      } catch (cancelError) {
-        guard(cancelError)
-      }
-      throw error
-    }
-  })
+  const onWorkflowStartRecording = (title: string, intent: string) =>
+    panelAction((botId) => startWorkflowRecording(botId, title, intent))
   const onWorkflowStopRecording = () => panelAction(async (botId) => { await stopWorkflowRecording(botId) })
   const onWorkflowCancelRecording = () => panelAction((botId) => cancelWorkflowRecording(botId))
   const onWorkflowUpdateDraft = (draftId: string, trace: WorkflowTrace) =>
@@ -1023,17 +1007,6 @@ function Workspace({
   const onWorkflowStopRun = (runId: string) =>
     panelAction((botId) => stopWorkflowRun(botId, runId))
 
-  useEffect(() => {
-    const botId = panel?.botId
-    if (!botId || !panel.info) return
-    if (!panel.info.window) {
-      workflowRecordingWindows.current.delete(botId)
-      return
-    }
-    if (panel.info.workflowRecording) return
-    if (!workflowRecordingWindows.current.delete(botId)) return
-    void setComputerWindow(botId, false).catch(guard)
-  }, [guard, panel?.botId, panel?.info?.window, panel?.info?.workflowRecording])
   const onToggleConnector = (connectorId: string, granted: boolean) => panelAction(async (botId) => {
     const current = panel?.botId === botId && panel.info?.connectors
       ? panel.info.connectors.filter((c) => c.granted).map((c) => c.id)
