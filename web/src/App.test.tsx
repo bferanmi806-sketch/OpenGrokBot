@@ -61,6 +61,12 @@ function mockGateway(opts: {
   cancelDispatchPlan?: (url: string) => { status?: number; body: unknown }
 } = {}) {
   const calls: string[] = []
+  let computerState = opts.computer
+  const updateComputerState = (changes: Record<string, unknown>) => {
+    if (computerState && typeof computerState === 'object' && !Array.isArray(computerState)) {
+      computerState = { ...(computerState as Record<string, unknown>), ...changes }
+    }
+  }
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input)
     calls.push(url)
@@ -138,11 +144,27 @@ function mockGateway(opts: {
       return json(reply.body, reply.status ?? 200)
     }
     if (/^\/api\/bots\/[^/]+\/workflows$/.test(url) && (!init?.method || init.method === 'GET')) return json([])
-    if (url.endsWith('/workflows/recording') && init?.method === 'POST') return json({ ok: true, recording: true }, 202)
+    if (url.endsWith('/workflows/recording') && init?.method === 'POST') {
+      updateComputerState({ workflowRecording: true })
+      return json({ ok: true, recording: true }, 202)
+    }
+    if (url.endsWith('/workflows/recording/stop') && init?.method === 'POST') {
+      updateComputerState({ workflowRecording: false })
+      return json({ ok: true, draft: null })
+    }
+    if (url.endsWith('/workflows/recording') && init?.method === 'DELETE') {
+      updateComputerState({ workflowRecording: false })
+      return json({ ok: true })
+    }
+    if (url.endsWith('/computer/window') && init?.method === 'POST') {
+      const sent = JSON.parse(String(init.body)) as { shown: boolean }
+      updateComputerState({ window: sent.shown })
+      return json({ ok: true, window: sent.shown })
+    }
     if (url.startsWith('/api/threads/')) return json(opts.messages ? await opts.messages(url) : [])
     if (url.includes('/computer')) {
       await opts.computerGate
-      const val = typeof opts.computer === 'function' ? await (opts.computer as (u: string) => unknown)(url) : opts.computer
+      const val = typeof computerState === 'function' ? await (computerState as (u: string) => unknown)(url) : computerState
       return json(val ?? {})
     }
     return json({ error: 'unexpected' }, 404)
@@ -315,6 +337,27 @@ describe('App', () => {
     const windowCall = calls.indexOf('POST /api/bots/researcher/computer/window {"shown":true}')
     expect(recordingCall).toBeGreaterThanOrEqual(0)
     expect(windowCall).toBeGreaterThan(recordingCall)
+    await userEvent.click(screen.getByRole('button', { name: 'Finish recording' }))
+    await waitFor(() => expect(calls).toContain('POST /api/bots/researcher/computer/window {"shown":false}'))
+  })
+
+  it('leaves an already open local browser alone after recording', async () => {
+    const calls = mockGateway({
+      computer: {
+        botId: 'researcher', running: true, kind: 'local', vncUrl: null,
+        screen: { kind: 'cdp', url: '/screen/researcher/ws' }, window: true, routines: [],
+      },
+    })
+    render(<App />)
+    await ready()
+    await userEvent.click(screen.getByRole('button', { name: 'Open its computer' }))
+    await screen.findByText("Scout's computer")
+    await userEvent.type(screen.getByRole('textbox', { name: 'Workflow name' }), 'Collect status')
+    await userEvent.click(screen.getByRole('button', { name: 'Start recording' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Finish recording' }))
+    await waitFor(() => expect(calls).toContain('POST /api/bots/researcher/workflows/recording/stop '))
+    expect(calls).not.toContain('POST /api/bots/researcher/computer/window {"shown":true}')
+    expect(calls).not.toContain('POST /api/bots/researcher/computer/window {"shown":false}')
   })
 
   it('does not reopen a panel whose computer woke up after you moved on', async () => {
