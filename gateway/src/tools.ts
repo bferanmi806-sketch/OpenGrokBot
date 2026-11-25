@@ -316,7 +316,7 @@ const WORKFLOW_TOOLS: ToolDef[] = [
             enum: ['act', 'watch', 'prepare'],
             description:
               '"watch" gets read-only tools and stays silent unless something needs your operator ("Nothing new."). '
-              + '"prepare" gets read-only tools plus wiki_upsert and workspace write_file to prepare briefs/dossiers locally, and stays silent on "Nothing to prepare.". '
+              + '"prepare" gets read-only tools plus wiki_upsert / wiki_patch and workspace write_file to prepare briefs/dossiers locally, and stays silent on "Nothing to prepare.". '
               + 'Default "act".',
           },
           surface: {
@@ -473,12 +473,13 @@ export const WATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
 ])
 
 /**
- * prepare routine 的回合在 watch 只读工具之上额外给 wiki_upsert 和工作区 write_file，
+ * prepare routine 的回合在 watch 只读工具之上额外给 wiki_upsert / wiki_patch 和工作区 write_file，
  * 用于提前整理资料/简报草稿；仍禁止 shell、页面交互点击输入、同事转交和任何外部写入。
  */
 export const PREPARE_TOOL_NAMES: ReadonlySet<string> = new Set([
   ...WATCH_TOOL_NAMES,
   'wiki_upsert',
+  'wiki_patch',
   'write_file',
 ])
 

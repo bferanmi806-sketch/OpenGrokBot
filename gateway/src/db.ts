@@ -753,6 +753,17 @@ const MIGRATIONS: Migration[] = [
       if (text) insert.run(r.id, r.thread_id, text)
     }
   },
+  // v26：团队 Wiki 闲置自动同步游标与待消费污染标记（按线程记录已抽取的最大 message_id 与回合级 pending_taint）
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS wiki_sync_state (
+        thread_id TEXT PRIMARY KEY,
+        last_synced_message_id INTEGER NOT NULL DEFAULT 0,
+        pending_taint INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
+    `)
+  },
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

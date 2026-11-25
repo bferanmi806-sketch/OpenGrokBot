@@ -1242,6 +1242,13 @@ export type WikiCreateInput = WikiSaveInput & {
   slug?: string
 }
 
+export type WikiSyncResponse = {
+  ok: true
+  threadsSynced: number
+  pagesCreated: number
+  pagesUpdated: number
+}
+
 export type QuietDigestEntry = {
   id: number
   routineId: number | null

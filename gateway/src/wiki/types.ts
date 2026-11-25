@@ -93,6 +93,39 @@ export type WikiUpsertInput = {
   sourceTainted?: boolean
 }
 
+export type WikiOverviewPatch =
+  | { mode: 'keep' }
+  | {
+      mode: 'rewrite'
+      content: string
+      reason: string
+      droppedCitations?: Array<{ msgId: number; reason: string }>
+    }
+
+export type WikiListSectionPatch = {
+  add?: Array<{ text: string }>
+  update?: Array<{ id: string; text: string }>
+  remove?: Array<{ id: string; reason: string }>
+}
+
+export type WikiSectionPatch = {
+  overview?: WikiOverviewPatch
+  keyFacts?: WikiListSectionPatch
+  openItems?: WikiListSectionPatch
+  decisions?: WikiListSectionPatch
+}
+
+export type WikiPatchInput = WikiSectionPatch & {
+  kind: WikiKind
+  slug?: string
+  title?: string
+  summary?: string
+  tags?: string[]
+  note?: string
+  editedBy: string
+  sourceTainted?: boolean
+}
+
 export type WikiSearchHit = WikiPageSummary & {
   score: number
   snippet: string

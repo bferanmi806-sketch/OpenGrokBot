@@ -30,6 +30,8 @@ export type TurnQueue = {
   statuses(): Record<string, TurnState>
   /** 车道被占用（正在跑回合，或操作者正在录流程） */
   isBusy(laneId: string): boolean
+  /** 指定线程是否正在跑回合或有排队中的回合 */
+  isThreadBusy(threadId: string): boolean
   /** 同事自己正在跑回合（不含操作者录流程时的占位，免得侧栏误报「思考中」） */
   isWorking(laneId: string): boolean
 }
@@ -127,6 +129,13 @@ export function createTurnQueue(onStatus: (laneId: string, state: TurnState) => 
       [...lanes.entries()].filter(([, lane]) => !lane.held).map(([id]) => [id, 'thinking' as const]),
     ),
     isBusy: (laneId) => lanes.has(laneId),
+    isThreadBusy: (threadId) => {
+      for (const lane of lanes.values()) {
+        if (lane.running?.threadId === threadId) return true
+        if (lane.waiting.some((e) => e.threadId === threadId)) return true
+      }
+      return false
+    },
     isWorking: (laneId) => {
       const lane = lanes.get(laneId)
       return Boolean(lane && !lane.held)

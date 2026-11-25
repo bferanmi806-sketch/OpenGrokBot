@@ -5,6 +5,11 @@ const MAX_QUERY_CHARS = 200
 const DEFAULT_LIMIT = 8
 const MAX_LIMIT = 20
 const MAX_SNIPPET_CHARS = 420
+const HISTORY_RRF_K = 60
+const MAX_HISTORY_RRF_QUERIES = 6
+const DEFAULT_HISTORY_RRF_LIMIT = 6
+const MAX_HISTORY_RRF_LIMIT = 12
+const HISTORY_RRF_PER_QUERY_LIMIT = 30
 
 /**
  * 从一条消息里抽取可检索的安全纯文本（写入 FTS5 前脱敏）：
@@ -133,6 +138,12 @@ export type HistorySearchResult = {
   hasWebhookHit: boolean
 }
 
+export type HistoryRrfSearchResult = {
+  hits: HistoryHit[]
+  total: number
+  hasUntrustedHit: boolean
+}
+
 function parseRow(r: Record<string, unknown>): MessageRow {
   return { ...r, payload: r.payload ? JSON.parse(r.payload as string) : null } as MessageRow
 }
@@ -197,6 +208,9 @@ export function searchBotHistory(
     } else if (m.kind === 'approval_request') {
       snippet = `[held for approval] ${formatSnippet(safeApprovalSummary(m.payload), terms)}`
     } else {
+      if (m.kind === 'bot_ref' && (m.payload as { tainted?: unknown } | null)?.tainted === true) {
+        hasWebhookHit = true
+      }
       const text = extractSearchableText(m.kind, m.content, m.payload)
       snippet = formatSnippet(text, terms)
     }
@@ -211,6 +225,175 @@ export function searchBotHistory(
   })
 
   return { hits, truncated, hasWebhookHit }
+}
+
+/**
+ * 多查询 RRF 历史消息检索（严格限制在 accessibleThreadIds(db, botId) 内：仅自己的 DM + 自己参与的群聊，绝不跨同事私聊）：
+ * - 去重最多 6 条查询；
+ * - 所有空白切分词长度 ≥ 3 时走 FTS5 trigram，含 1–2 字短词（中文「报价」「张伟」等）走参数化 INSTR 子串回退；
+ * - 以 RRF (k = 60) 融合多查询排名，同分按 m.created_at DESC, m.id DESC 决胜；
+ * - 对 webhook 消息套 SHA-256 <<<webhook 围栏并置 hasUntrustedHit = true，对 tainted bot_ref 置 hasUntrustedHit = true，对 approval_request 脱敏。
+ */
+export function searchAccessibleHistoryRrf(
+  db: Db,
+  opts: {
+    botId: string
+    queries: readonly string[]
+    limit?: number
+  },
+): HistoryRrfSearchResult {
+  const botId = typeof opts.botId === 'string' ? opts.botId.trim() : ''
+  if (!botId || !Array.isArray(opts.queries) || opts.queries.length === 0) {
+    return { hits: [], total: 0, hasUntrustedHit: false }
+  }
+
+  const ftsExists = db
+    .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'`)
+    .get()
+  if (!ftsExists) {
+    return { hits: [], total: 0, hasUntrustedHit: false }
+  }
+
+  const threadIds = accessibleThreadIds(db, botId)
+  if (threadIds.length === 0) {
+    return { hits: [], total: 0, hasUntrustedHit: false }
+  }
+
+  const preparedQueries: Array<{ terms: string[] }> = []
+  const seenQueryKeys = new Set<string>()
+  for (const raw of opts.queries) {
+    if (typeof raw !== 'string') continue
+    const trimmed = raw.trim().slice(0, MAX_QUERY_CHARS)
+    if (!trimmed) continue
+    const terms = trimmed.split(/\s+/).filter(Boolean)
+    if (terms.length === 0) continue
+    const key = terms.map((t) => t.normalize('NFKC').toLowerCase()).join(' ')
+    if (seenQueryKeys.has(key)) continue
+    seenQueryKeys.add(key)
+    preparedQueries.push({ terms })
+    if (preparedQueries.length >= MAX_HISTORY_RRF_QUERIES) break
+  }
+
+  if (preparedQueries.length === 0) {
+    return { hits: [], total: 0, hasUntrustedHit: false }
+  }
+
+  const limit =
+    typeof opts.limit === 'number' && Number.isFinite(opts.limit)
+      ? Math.max(1, Math.min(MAX_HISTORY_RRF_LIMIT, Math.floor(opts.limit)))
+      : DEFAULT_HISTORY_RRF_LIMIT
+  const perQueryLimit = Math.max(HISTORY_RRF_PER_QUERY_LIMIT, limit)
+  const placeholders = threadIds.map(() => '?').join(',')
+
+  const runSubstringFallback = (terms: readonly string[]): Record<string, unknown>[] => {
+    const clauses = terms.map(() => 'INSTR(LOWER(f.searchable_text), LOWER(?)) > 0').join(' AND ')
+    return db
+      .prepare(
+        `SELECT m.* FROM messages_fts f
+         JOIN messages m ON m.id = f.message_id
+         WHERE f.thread_id IN (${placeholders}) AND ${clauses}
+         ORDER BY m.created_at DESC, m.id DESC
+         LIMIT ?`,
+      )
+      .all(...threadIds, ...terms, perQueryLimit) as Record<string, unknown>[]
+  }
+
+  const rrfScores = new Map<number, number>()
+  const rowsById = new Map<number, MessageRow>()
+
+  for (const q of preparedQueries) {
+    const canUseTrigram = q.terms.every((t) => [...t].length >= 3)
+    let rawRows: Record<string, unknown>[]
+    if (canUseTrigram) {
+      const matchExpr = q.terms.map((t) => `"${t.replaceAll('"', '""')}"`).join(' ')
+      try {
+        rawRows = db
+          .prepare(
+            `SELECT m.* FROM messages_fts f
+             JOIN messages m ON m.id = f.message_id
+             WHERE f.thread_id IN (${placeholders}) AND messages_fts MATCH ?
+             ORDER BY bm25(messages_fts), m.created_at DESC, m.id DESC
+             LIMIT ?`,
+          )
+          .all(...threadIds, matchExpr, perQueryLimit) as Record<string, unknown>[]
+      } catch {
+        rawRows = runSubstringFallback(q.terms)
+      }
+    } else {
+      rawRows = runSubstringFallback(q.terms)
+    }
+
+    const seenInQuery = new Set<number>()
+    let rank = 0
+    for (const rawRow of rawRows) {
+      const row = parseRow(rawRow)
+      if (seenInQuery.has(row.id)) continue
+      seenInQuery.add(row.id)
+      rank += 1
+      rrfScores.set(row.id, (rrfScores.get(row.id) ?? 0) + 1 / (HISTORY_RRF_K + rank))
+      if (!rowsById.has(row.id)) {
+        rowsById.set(row.id, row)
+      }
+    }
+  }
+
+  if (rrfScores.size === 0) {
+    return { hits: [], total: 0, hasUntrustedHit: false }
+  }
+
+  const scored: Array<{ row: MessageRow; score: number }> = []
+  for (const [id, score] of rrfScores) {
+    scored.push({ row: rowsById.get(id)!, score })
+  }
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score
+    if (b.row.created_at !== a.row.created_at) return b.row.created_at - a.row.created_at
+    return b.row.id - a.row.id
+  })
+
+  const allTerms: string[] = []
+  const seenTerms = new Set<string>()
+  for (const q of preparedQueries) {
+    for (const t of q.terms) {
+      const lower = t.toLowerCase()
+      if (!seenTerms.has(lower)) {
+        seenTerms.add(lower)
+        allTerms.push(t)
+      }
+    }
+  }
+
+  let hasUntrustedHit = false
+  const hits: HistoryHit[] = scored.slice(0, limit).map(({ row: m }) => {
+    let snippet: string
+    if (m.kind === 'webhook') {
+      hasUntrustedHit = true
+      const rawBody = extractSearchableText(m.kind, m.content, m.payload)
+      snippet = formatWebhookSnippet(formatSnippet(rawBody, allTerms))
+    } else if (m.kind === 'approval_request') {
+      snippet = `[held for approval] ${formatSnippet(safeApprovalSummary(m.payload), allTerms)}`
+    } else {
+      if (m.kind === 'bot_ref' && (m.payload as { tainted?: unknown } | null)?.tainted === true) {
+        hasUntrustedHit = true
+      }
+      const text = extractSearchableText(m.kind, m.content, m.payload)
+      snippet = formatSnippet(text, allTerms)
+    }
+    return {
+      id: m.id,
+      threadId: m.thread_id,
+      sender: m.sender,
+      kind: m.kind,
+      createdAt: m.created_at,
+      snippet,
+    }
+  })
+
+  return {
+    hits,
+    total: scored.length,
+    hasUntrustedHit,
+  }
 }
 
 export function formatHistorySearchResult(result: HistorySearchResult, query: string): string {

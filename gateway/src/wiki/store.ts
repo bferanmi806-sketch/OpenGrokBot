@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto'
 import type { Db } from '../db.js'
 import { removeWikiMirror, writeWikiMirror } from './mirror.js'
+import {
+  applyWikiSectionPatch,
+  containsWikiSecret,
+  scrubWikiSecrets,
+  stripModelChangeLogSections,
+} from './sections.js'
 import { buildSearchText } from './tokenize.js'
 import {
   isWikiKind,
@@ -19,6 +25,7 @@ import {
   type WikiKind,
   type WikiPageDetail,
   type WikiPageSummary,
+  type WikiPatchInput,
   type WikiRevision,
   type WikiUpsertInput,
 } from './types.js'
@@ -211,6 +218,9 @@ export function allocateWikiSlug(
     if (!trimmed || trimmed.includes('..') || trimmed.includes('/') || trimmed.includes('\\')) {
       throw new WikiValidationError(`Invalid wiki slug: ${requestedSlug}`)
     }
+    if (containsWikiSecret(trimmed)) {
+      throw new WikiValidationError('Wiki slug must not contain secret tokens or API keys')
+    }
     const normalized = normalizeWikiSlug(trimmed)
     if (!isWikiSlug(normalized)) {
       throw new WikiValidationError(`Invalid wiki slug: ${requestedSlug}`)
@@ -218,7 +228,8 @@ export function allocateWikiSlug(
     return normalized
   }
 
-  const base = normalizeWikiSlug(title)
+  const safeTitle = scrubWikiSecrets(title)
+  const base = normalizeWikiSlug(safeTitle)
   if (!isWikiSlug(base)) {
     throw new WikiValidationError(`Cannot derive valid wiki slug from title: ${title}`)
   }
@@ -254,7 +265,13 @@ export function upsertWikiPage(
   if (input.slug !== undefined && typeof input.slug !== 'string') {
     throw new WikiValidationError('Wiki slug must be a string')
   }
-  const title = typeof input.title === 'string' ? input.title.trim() : ''
+
+  const editedBy = typeof input.editedBy === 'string' ? input.editedBy.trim() : ''
+  if (!editedBy) throw new WikiValidationError('Wiki editedBy is required')
+  const isOperator = editedBy === 'operator'
+
+  const rawTitle = typeof input.title === 'string' ? input.title.trim() : ''
+  const title = isOperator ? rawTitle : scrubWikiSecrets(rawTitle).trim()
   if (!title) throw new WikiValidationError('Wiki title is required')
   if (title.length > MAX_WIKI_TITLE_CHARS) {
     throw new WikiValidationError(`Wiki title exceeds ${MAX_WIKI_TITLE_CHARS} characters`)
@@ -263,7 +280,8 @@ export function upsertWikiPage(
   if (input.summary !== undefined && typeof input.summary !== 'string') {
     throw new WikiValidationError('Wiki summary must be a string')
   }
-  const summary = (input.summary ?? '').trim()
+  const rawSummary = (input.summary ?? '').trim()
+  const summary = isOperator ? rawSummary : scrubWikiSecrets(rawSummary).trim()
   if (summary.length > MAX_WIKI_SUMMARY_CHARS) {
     throw new WikiValidationError(`Wiki summary exceeds ${MAX_WIKI_SUMMARY_CHARS} characters`)
   }
@@ -271,22 +289,27 @@ export function upsertWikiPage(
   if (typeof input.body !== 'string') {
     throw new WikiValidationError('Wiki body must be a string')
   }
-  if (input.body.length > MAX_WIKI_BODY_CHARS) {
+  const body = isOperator
+    ? input.body
+    : stripModelChangeLogSections(scrubWikiSecrets(input.body))
+  if (body.length > MAX_WIKI_BODY_CHARS) {
     throw new WikiValidationError(`Wiki body exceeds ${MAX_WIKI_BODY_CHARS} characters`)
   }
 
   if (input.note !== undefined && typeof input.note !== 'string') {
     throw new WikiValidationError('Wiki note must be a string')
   }
-  const note = (input.note ?? '').trim()
+  const rawNote = (input.note ?? '').trim()
+  const note = isOperator ? rawNote : scrubWikiSecrets(rawNote).trim()
   if (note.length > MAX_WIKI_NOTE_CHARS) {
     throw new WikiValidationError(`Wiki note exceeds ${MAX_WIKI_NOTE_CHARS} characters`)
   }
 
-  const editedBy = typeof input.editedBy === 'string' ? input.editedBy.trim() : ''
-  if (!editedBy) throw new WikiValidationError('Wiki editedBy is required')
-
-  const tags = sanitizeTags(input.tags)
+  const rawTags =
+    !isOperator && Array.isArray(input.tags)
+      ? input.tags.map((t) => (typeof t === 'string' ? scrubWikiSecrets(t) : t))
+      : input.tags
+  const tags = sanitizeTags(rawTags)
   const tagsJson = JSON.stringify(tags)
   const now = opts.now ?? Date.now()
 
@@ -308,7 +331,7 @@ export function upsertWikiPage(
           ? 1
           : 0
 
-    const searchText = buildSearchText([title, slug, tags.join(' '), summary, input.body])
+    const searchText = buildSearchText([title, slug, tags.join(' '), summary, body])
 
     if (!existing) {
       db.prepare(
@@ -323,7 +346,7 @@ export function upsertWikiPage(
         title,
         summary,
         tagsJson,
-        input.body,
+        body,
         searchText,
         nextTainted,
         editedBy,
@@ -341,7 +364,7 @@ export function upsertWikiPage(
         title,
         summary,
         tagsJson,
-        input.body,
+        body,
         searchText,
         nextTainted,
         editedBy,
@@ -356,13 +379,193 @@ export function upsertWikiPage(
          page_id, version, title, summary, tags_json, body,
          edited_by, note, source_tainted, created_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, nextVersion, title, summary, tagsJson, input.body, editedBy, note, nextTainted, now)
+    ).run(id, nextVersion, title, summary, tagsJson, body, editedBy, note, nextTainted, now)
 
     pruneRevisions(db, id)
-    syncWikiFts(db, { id, title, tags, summary, body: input.body, searchText })
+    syncWikiFts(db, { id, title, tags, summary, body, searchText })
 
     const row = db.prepare('SELECT * FROM wiki_pages WHERE id = ?').get(id) as RawWikiPageRow
     return { page: mapDetailRow(row), created }
+  })()
+
+  writeWikiMirror(opts.dataDir, result.page)
+  return result
+}
+
+export function patchWikiPage(
+  db: Db,
+  input: WikiPatchInput,
+  opts: { dataDir?: string; now?: number } = {},
+): { page: WikiPageDetail; created: boolean; changeSummary: string } {
+  if (!isWikiKind(input.kind)) {
+    throw new WikiValidationError(`Invalid wiki kind: ${String(input.kind)}`)
+  }
+  if (input.slug !== undefined && typeof input.slug !== 'string') {
+    throw new WikiValidationError('Wiki slug must be a string')
+  }
+  if (input.title !== undefined && typeof input.title !== 'string') {
+    throw new WikiValidationError('Wiki title must be a string')
+  }
+  if (input.summary !== undefined && typeof input.summary !== 'string') {
+    throw new WikiValidationError('Wiki summary must be a string')
+  }
+  if (input.note !== undefined && typeof input.note !== 'string') {
+    throw new WikiValidationError('Wiki note must be a string')
+  }
+
+  const editedBy = typeof input.editedBy === 'string' ? input.editedBy.trim() : ''
+  if (!editedBy) throw new WikiValidationError('Wiki editedBy is required')
+
+  const requestedSlug = input.slug !== undefined && input.slug.trim() !== '' ? input.slug : undefined
+  const providedTitle = input.title !== undefined ? scrubWikiSecrets(input.title).trim() : ''
+  if (providedTitle.length > MAX_WIKI_TITLE_CHARS) {
+    throw new WikiValidationError(`Wiki title exceeds ${MAX_WIKI_TITLE_CHARS} characters`)
+  }
+
+  const hasSummary = input.summary !== undefined
+  const providedSummary = hasSummary ? scrubWikiSecrets(input.summary!).trim() : ''
+  if (providedSummary.length > MAX_WIKI_SUMMARY_CHARS) {
+    throw new WikiValidationError(`Wiki summary exceeds ${MAX_WIKI_SUMMARY_CHARS} characters`)
+  }
+
+  const providedNote = input.note !== undefined ? scrubWikiSecrets(input.note).trim() : ''
+  if (providedNote.length > MAX_WIKI_NOTE_CHARS) {
+    throw new WikiValidationError(`Wiki note exceeds ${MAX_WIKI_NOTE_CHARS} characters`)
+  }
+
+  const scrubbedTags =
+    input.tags !== undefined
+      ? Array.isArray(input.tags)
+        ? input.tags.map((t) => (typeof t === 'string' ? scrubWikiSecrets(t) : t))
+        : input.tags
+      : undefined
+  const validatedTags = scrubbedTags !== undefined ? sanitizeTags(scrubbedTags) : undefined
+
+  const now = opts.now ?? Date.now()
+
+  const result = db.transaction((): { page: WikiPageDetail; created: boolean; changeSummary: string } => {
+    let slug: string
+    if (requestedSlug !== undefined) {
+      slug = allocateWikiSlug(db, input.kind, requestedSlug, providedTitle || requestedSlug)
+    } else {
+      if (!providedTitle) {
+        throw new WikiValidationError('Wiki patch requires "slug" or "title"')
+      }
+      slug = allocateWikiSlug(db, input.kind, undefined, providedTitle)
+    }
+
+    const id = `${input.kind}/${slug}`
+    const existing = db.prepare('SELECT * FROM wiki_pages WHERE id = ?').get(id) as RawWikiPageRow | undefined
+    const isActiveExisting = Boolean(existing && existing.archived_at === null)
+    const created = !isActiveExisting
+
+    const finalTitle = providedTitle || (isActiveExisting ? existing!.title : '')
+    if (!finalTitle) {
+      throw new WikiValidationError(`Wiki page not found: ${id} (provide "title" to create a new page)`)
+    }
+
+    const finalSummary = hasSummary ? providedSummary : isActiveExisting ? existing!.summary : ''
+    const finalTags =
+      validatedTags !== undefined ? validatedTags : isActiveExisting ? parseTagsJson(existing!.tags_json) : []
+    const tagsJson = JSON.stringify(finalTags)
+
+    const metaChanges: string[] = []
+    if (created) {
+      metaChanges.push('created page')
+    } else {
+      if (finalTitle !== existing!.title) metaChanges.push('updated title')
+      if (finalSummary !== existing!.summary) metaChanges.push('updated summary')
+      if (tagsJson !== existing!.tags_json) metaChanges.push('updated tags')
+    }
+
+    const patched = applyWikiSectionPatch(
+      isActiveExisting ? existing!.body : '',
+      {
+        ...(input.overview !== undefined ? { overview: input.overview } : {}),
+        ...(input.keyFacts !== undefined ? { keyFacts: input.keyFacts } : {}),
+        ...(input.openItems !== undefined ? { openItems: input.openItems } : {}),
+        ...(input.decisions !== undefined ? { decisions: input.decisions } : {}),
+      },
+      {
+        actor: editedBy,
+        at: now,
+        ...(providedNote ? { note: providedNote } : {}),
+        ...(metaChanges.length > 0 ? { fallbackNote: metaChanges.join(', ') } : {}),
+      },
+    )
+
+    if (!created && !patched.changed && metaChanges.length === 0) {
+      throw new WikiValidationError('Wiki patch contains no changes')
+    }
+
+    if (patched.body.length > MAX_WIKI_BODY_CHARS) {
+      throw new WikiValidationError(`Wiki body exceeds ${MAX_WIKI_BODY_CHARS} characters`)
+    }
+
+    const nextVersion = existing ? existing.version + 1 : 1
+    const nextTainted =
+      editedBy === 'operator'
+        ? 0
+        : (isActiveExisting && existing!.source_tainted === 1) || Boolean(input.sourceTainted)
+          ? 1
+          : 0
+
+    const revNote = (providedNote || patched.changeSummary).slice(0, MAX_WIKI_NOTE_CHARS)
+    const searchText = buildSearchText([finalTitle, slug, finalTags.join(' '), finalSummary, patched.body])
+
+    if (!existing) {
+      db.prepare(
+        `INSERT INTO wiki_pages (
+           id, kind, slug, title, summary, tags_json, body, search_text,
+           source_tainted, updated_by, version, created_at, updated_at, archived_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      ).run(
+        id,
+        input.kind,
+        slug,
+        finalTitle,
+        finalSummary,
+        tagsJson,
+        patched.body,
+        searchText,
+        nextTainted,
+        editedBy,
+        nextVersion,
+        now,
+        now,
+      )
+    } else {
+      db.prepare(
+        `UPDATE wiki_pages
+         SET title = ?, summary = ?, tags_json = ?, body = ?, search_text = ?,
+             source_tainted = ?, updated_by = ?, version = ?, updated_at = ?, archived_at = NULL
+         WHERE id = ?`,
+      ).run(
+        finalTitle,
+        finalSummary,
+        tagsJson,
+        patched.body,
+        searchText,
+        nextTainted,
+        editedBy,
+        nextVersion,
+        now,
+        id,
+      )
+    }
+
+    db.prepare(
+      `INSERT INTO wiki_revisions (
+         page_id, version, title, summary, tags_json, body,
+         edited_by, note, source_tainted, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, nextVersion, finalTitle, finalSummary, tagsJson, patched.body, editedBy, revNote, nextTainted, now)
+
+    pruneRevisions(db, id)
+    syncWikiFts(db, { id, title: finalTitle, tags: finalTags, summary: finalSummary, body: patched.body, searchText })
+
+    const row = db.prepare('SELECT * FROM wiki_pages WHERE id = ?').get(id) as RawWikiPageRow
+    return { page: mapDetailRow(row), created, changeSummary: patched.changeSummary }
   })()
 
   writeWikiMirror(opts.dataDir, result.page)

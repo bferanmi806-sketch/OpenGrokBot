@@ -23,6 +23,11 @@ export type WikiApiDeps = {
   dataDir: string
   hub?: Hub
   now?: () => Date
+  syncFromChats?: () => Promise<{
+    threadsSynced: number
+    pagesCreated: number
+    pagesUpdated: number
+  }>
 }
 
 const DEFAULT_LIST_LIMIT = 50
@@ -121,6 +126,32 @@ export function mountWiki(app: Hono, deps: WikiApiDeps): void {
         return c.json({ error: err.message, code: 'invalid_wiki' }, 400)
       }
       throw err
+    }
+  })
+
+  app.post('/api/wiki/sync', async (c) => {
+    if (!deps.syncFromChats) {
+      return c.json({ error: 'Wiki chat sync is not available on this gateway', code: 'not_implemented' }, 501)
+    }
+    try {
+      const res = await deps.syncFromChats()
+      return c.json(
+        {
+          ok: true,
+          threadsSynced: res.threadsSynced,
+          pagesCreated: res.pagesCreated,
+          pagesUpdated: res.pagesUpdated,
+        },
+        200,
+      )
+    } catch (err) {
+      return c.json(
+        {
+          error: err instanceof Error ? err.message : String(err),
+          code: 'sync_failed',
+        },
+        502,
+      )
     }
   })
 

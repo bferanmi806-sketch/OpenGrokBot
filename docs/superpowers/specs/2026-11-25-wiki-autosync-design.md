@@ -35,6 +35,7 @@ Append migration step `v26` to `MIGRATIONS`:
 CREATE TABLE IF NOT EXISTS wiki_sync_state (
   thread_id TEXT PRIMARY KEY,
   last_synced_message_id INTEGER NOT NULL DEFAULT 0,
+  pending_taint INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL
 );
 ```

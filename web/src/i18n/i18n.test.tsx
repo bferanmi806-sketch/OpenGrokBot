@@ -29,6 +29,7 @@ import {
   setMcpServerBots,
   startDispatchPlan,
   steerBackgroundTask,
+  syncWikiFromChats,
   testMcpServer,
   updateMcpServer,
 } from '../api'
@@ -65,6 +66,7 @@ import type {
   WikiPageDetail,
   WikiPageResponse,
   WikiRevision,
+  WikiSyncResponse,
 } from '../types'
 import { en, type MessageKey } from './en'
 import { I18nProvider, makeT, pickLang, translate, useT } from './index'
@@ -350,6 +352,12 @@ describe('the Chinese dictionary', () => {
       'wiki.saveAndVerify',
       'wiki.versionMeta',
       'wiki.byOperator',
+      'wiki.byAutoSync',
+      'wiki.sync',
+      'wiki.syncing',
+      'wiki.syncDoneOne',
+      'wiki.syncDoneMany',
+      'wiki.syncEmpty',
       'wiki.edit',
       'wiki.save',
       'wiki.saving',
@@ -379,6 +387,8 @@ describe('the Chinese dictionary', () => {
       'wiki.error.invalid_wiki',
       'wiki.error.not_found',
       'wiki.error.loadFailed',
+      'wiki.error.sync_failed',
+      'wiki.error.not_implemented',
     ]
     for (const key of requiredWikiKeys) {
       expect(en[key]).toBeTruthy()
@@ -391,8 +401,16 @@ describe('the Chinese dictionary', () => {
     expect(zhCN['wiki.externalBadge']).toBe('外部来源')
     expect(en['wiki.saveAndVerify']).toBe('Save & verify')
     expect(zhCN['wiki.saveAndVerify']).toBe('保存并设为已核验')
+    expect(en['wiki.sync']).toBe('Sync from chats')
+    expect(zhCN['wiki.sync']).toBe('从对话同步')
+    expect(en['wiki.byAutoSync']).toBe('auto-sync')
+    expect(zhCN['wiki.byAutoSync']).toBe('自动同步')
+    expect(translate('en', 'wiki.syncDoneMany', { count: 3 })).toBe('Updated 3 wiki pages from recent chats.')
+    expect(translate('zh-CN', 'wiki.syncDoneMany', { count: 3 })).toBe('已从近期对话更新 3 篇知识库页面。')
     expect(translate('en', 'wiki.versionMeta', { version: 3, who: 'you' })).toBe('v3 · Updated by you')
     expect(translate('zh-CN', 'wiki.versionMeta', { version: 3, who: '你' })).toBe('v3 · 更新者：你')
+    expect(translate('en', 'wiki.versionMeta', { version: 2, who: zhCN['wiki.byAutoSync'] })).toBe('v2 · Updated by 自动同步')
+    expect(translate('zh-CN', 'wiki.versionMeta', { version: 2, who: zhCN['wiki.byAutoSync'] })).toBe('v2 · 更新者：自动同步')
     expect(translate('en', 'wiki.confirmDelete', { title: 'Acme Corp' })).toBe('Delete “Acme Corp” from the team wiki?')
     expect(translate('zh-CN', 'wiki.confirmDelete', { title: '极光科技' })).toBe('确定从团队知识库中删除「极光科技」？')
     expect(translate('en', 'wiki.confirmRevert', { title: 'Acme Corp', version: 2 })).toBe('Revert “Acme Corp” to version 2?')
@@ -1037,6 +1055,31 @@ describe('Wiki API client', () => {
     const ref: BotRefPayload = { from: 'researcher', fromName: 'Researcher', content: 'Summary', tainted: true }
     expect(ev.type).toBe('wiki_changed')
     expect(ref.tainted).toBe(true)
+  })
+
+  it('syncs wiki from chats via POST /api/wiki/sync and surfaces ApiError and SignedOut', async () => {
+    const syncRes: WikiSyncResponse = {
+      ok: true,
+      threadsSynced: 2,
+      pagesCreated: 1,
+      pagesUpdated: 1,
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(syncRes), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'LLM unavailable', code: 'sync_failed' }), { status: 500 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(await syncWikiFromChats()).toEqual(syncRes)
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/wiki/sync')
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).method).toBe('POST')
+    expect(JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body))).toEqual({})
+
+    const syncErr = await syncWikiFromChats().catch((e: unknown) => e)
+    expect(syncErr).toBeInstanceOf(ApiError)
+    expect(syncErr).toMatchObject({ status: 500, code: 'sync_failed', message: 'LLM unavailable' })
+
+    await expect(syncWikiFromChats()).rejects.toBeInstanceOf(SignedOut)
   })
 })
 

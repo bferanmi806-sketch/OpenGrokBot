@@ -168,6 +168,12 @@ const flushQuietDigests = () => {
 flushQuietDigests()
 setInterval(flushQuietDigests, 60_000).unref()
 
+// 闲置超过 30 分钟的对话在后台以最低优先级（P3 low）增量抽取实体事实入团队 Wiki
+const wikiSyncTimer = setInterval(() => {
+  void gateway.syncWikiFromChats({ force: false }).catch(() => {})
+}, 5 * 60_000)
+wikiSyncTimer.unref()
+
 // 动作日志和截图证据留 90 天：启动时清一次，之后每天清一次
 const ACTION_LOG_DAYS = 90
 const pruneOldActions = () => {
@@ -274,6 +280,7 @@ if (config.idleStopMinutes > 0) {
 // 收摊：Ctrl-C、SIGTERM、桌面壳的 stop 都走这里。先停调度、活跃回合和接新连接，再收电脑（本机 Chrome 跟着关）并关库；
 // bot 的 Docker 电脑该长期在线：只断 CDP 连接，容器留着（也保住浏览器登录态）
 onShutdown(runtime, async () => {
+  clearInterval(wikiSyncTimer)
   schedulerProxy.stopAll()
   const stoppingGateway = gateway.stopAll()
   killActiveSandboxes()

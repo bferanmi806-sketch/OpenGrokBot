@@ -893,4 +893,339 @@ describe('WikiDialog', () => {
     expect(screen.getByText('v2 · Updated by you')).toBeInTheDocument()
     expect(detailFetches).toBe(fetchesWhileEditing + 1)
   })
+
+  it('syncs from chats via POST /api/wiki/sync, shows loading & count/empty notices, refreshes list and open page detail, and resolves auto-sync editor', async () => {
+    let resolveFirstSync!: (res: Response) => void
+    let syncStep = 0
+    let currentPages: WikiPageSummary[] = [acmeSummary]
+    let currentAcme: WikiPageDetail = acmeDetailTainted
+    let currentAcmeRevs: WikiRevision[] = acmeRevisions
+    const calls: { method: string; url: string }[] = []
+
+    const montereySummary: WikiPageSummary = {
+      id: 'project/monterey-offsite',
+      kind: 'project',
+      slug: 'monterey-offsite',
+      title: 'Monterey Offsite',
+      summary: 'Q4 leadership retreat',
+      tags: ['offsite'],
+      sourceTainted: false,
+      updatedBy: 'auto-sync',
+      version: 1,
+      createdAt: 400,
+      updatedAt: 400,
+    }
+
+    vi.stubGlobal('fetch', vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      calls.push({ method, url })
+
+      if (method === 'GET' && url === '/api/wiki?limit=200') {
+        return Promise.resolve(jsonResponse({ pages: currentPages, total: currentPages.length }))
+      }
+      if (method === 'GET' && url === '/api/wiki/client/acme-corp') {
+        return Promise.resolve(jsonResponse({ page: currentAcme, revisions: currentAcmeRevs }))
+      }
+      if (method === 'POST' && url === '/api/wiki/sync') {
+        syncStep += 1
+        if (syncStep === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveFirstSync = resolve
+          })
+        }
+        if (syncStep === 2) {
+          return Promise.resolve(jsonResponse({
+            ok: true,
+            threadsSynced: 1,
+            pagesCreated: 0,
+            pagesUpdated: 0,
+          }))
+        }
+        if (syncStep === 3) {
+          currentAcme = {
+            ...currentAcme,
+            version: 4,
+            updatedBy: 'auto-sync',
+          }
+          return Promise.resolve(jsonResponse({
+            ok: true,
+            threadsSynced: 1,
+            pagesCreated: 0,
+            pagesUpdated: 1,
+          }))
+        }
+      }
+      return Promise.resolve(jsonResponse({ error: 'not found' }, 404))
+    }))
+
+    render(<WikiDialog roster={rosterArray} onClose={() => {}} />)
+
+    // Open Acme Corp in view mode first
+    await userEvent.click(await screen.findByRole('button', { name: /Acme Corp/ }))
+    expect(await screen.findByText('v2 · Updated by Scout')).toBeInTheDocument()
+
+    // 1. Click Sync from chats -> shows Syncing… state and disables concurrent clicks
+    const syncBtn = screen.getByRole('button', { name: 'Sync from chats' })
+    await userEvent.click(syncBtn)
+    await waitFor(() => expect(resolveFirstSync).toBeTypeOf('function'))
+
+    const syncingBtn = screen.getByRole('button', { name: 'Syncing…' })
+    expect(syncingBtn).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'New page' })).toBeDisabled()
+    fireEvent.click(syncingBtn)
+    expect(calls.filter((c) => c.method === 'POST' && c.url === '/api/wiki/sync')).toHaveLength(1)
+
+    // Update server state before resolving sync (1 created + 1 updated = 2 pages)
+    currentAcme = {
+      ...currentAcme,
+      version: 3,
+      updatedBy: 'auto-sync',
+      body: '## Key Facts\n\n- [f1] Agreed on $48k annual contract ([#msg:142])\n\n## Change Log\n\n- 2026-11-25 15:00Z · auto-sync · +1 in Key Facts',
+    }
+    currentAcmeRevs = [
+      {
+        id: 3,
+        pageId: 'client/acme-corp',
+        version: 3,
+        title: currentAcme.title,
+        summary: currentAcme.summary,
+        tags: currentAcme.tags,
+        body: currentAcme.body,
+        editedBy: 'auto-sync',
+        note: '+1 in Key Facts',
+        sourceTainted: true,
+        createdAt: 400,
+      },
+      ...acmeRevisions,
+    ]
+    currentPages = [
+      { ...acmeSummary, version: 3, updatedBy: 'auto-sync' },
+      montereySummary,
+    ]
+
+    await act(async () => {
+      resolveFirstSync(jsonResponse({
+        ok: true,
+        threadsSynced: 2,
+        pagesCreated: 1,
+        pagesUpdated: 1,
+      }))
+    })
+
+    // Shows plural count notice, refreshes sidebar list + open page detail, and renders auto-sync editor cleanly
+    expect(await screen.findByText('Updated 2 wiki pages from recent chats.')).toBeInTheDocument()
+    expect(await screen.findByText('Monterey Offsite')).toBeInTheDocument()
+    expect(await screen.findByText('v3 · Updated by auto-sync')).toBeInTheDocument()
+    expect(screen.getByText(/Agreed on \$48k annual contract/)).toBeInTheDocument()
+
+    // Expand History -> auto-sync revision editor also renders cleanly
+    await userEvent.click(screen.getByRole('button', { name: 'History (3)' }))
+    expect(screen.getByText('+1 in Key Facts')).toBeInTheDocument()
+    expect(screen.getByText('auto-sync')).toBeInTheDocument()
+
+    // 2. Second click when 0 pages changed -> shows empty sync notice and skips redundant detail reload
+    const detailGetsBeforeZeroSync = calls.filter((c) => c.method === 'GET' && c.url === '/api/wiki/client/acme-corp').length
+    await userEvent.click(screen.getByRole('button', { name: 'Sync from chats' }))
+    expect(await screen.findByText('Everything in recent chats is already synced.')).toBeInTheDocument()
+    expect(calls.filter((c) => c.method === 'GET' && c.url === '/api/wiki/client/acme-corp')).toHaveLength(detailGetsBeforeZeroSync)
+
+    // 3. Third click when 1 page changed -> shows singular count notice
+    await userEvent.click(screen.getByRole('button', { name: 'Sync from chats' }))
+    expect(await screen.findByText('Updated 1 wiki page from recent chats.')).toBeInTheDocument()
+    expect(await screen.findByText('v4 · Updated by auto-sync')).toBeInTheDocument()
+  })
+
+  it('handles sync errors cleanly in both English and Chinese (including auto-sync editor label and 401 SignedOut)', async () => {
+    const onSignedOut = vi.fn()
+    let mode: 'sync_failed' | 'unauthorized' = 'sync_failed'
+
+    const autoSyncedPage: WikiPageDetail = {
+      ...linDetail,
+      updatedBy: 'auto-sync',
+      version: 2,
+    }
+
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (method === 'GET' && url === '/api/wiki?limit=200') {
+        return jsonResponse({ pages: [{ ...linSummary, updatedBy: 'auto-sync', version: 2 }], total: 1 })
+      }
+      if (method === 'GET' && url === '/api/wiki/contact/lin-chen') {
+        return jsonResponse({ page: autoSyncedPage, revisions: linRevisions })
+      }
+      if (method === 'POST' && url === '/api/wiki/sync') {
+        if (mode === 'unauthorized') return jsonResponse({ error: 'sign in' }, 401)
+        return jsonResponse({ error: 'Sync failed upstream', code: 'sync_failed' }, 500)
+      }
+      return jsonResponse({ error: 'not found' }, 404)
+    }))
+
+    render(
+      <I18nProvider lang="zh-CN">
+        <WikiDialog roster={{}} onClose={() => {}} onSignedOut={onSignedOut} />
+      </I18nProvider>,
+    )
+
+    await userEvent.click(await screen.findByRole('button', { name: /Lin Chen/ }))
+    expect(await screen.findByText('v2 · 更新者：自动同步')).toBeInTheDocument()
+
+    // Trigger sync_failed error
+    await userEvent.click(screen.getByRole('button', { name: '从对话同步' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('从对话同步知识库失败。')
+
+    // Trigger 401 SignedOut
+    mode = 'unauthorized'
+    await userEvent.click(screen.getByRole('button', { name: '从对话同步' }))
+    await waitFor(() => expect(onSignedOut).toHaveBeenCalledTimes(1))
+  })
+
+  it('reloads stale previously-selected page when cancelling Create mode after sync or refreshTick updated it', async () => {
+    let remoteVersion = 1
+    let remoteBody = 'Original Lin profile v1'
+    let detailFetches = 0
+
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (method === 'GET' && url === '/api/wiki?limit=200') {
+        return jsonResponse({
+          pages: [{ ...linSummary, version: remoteVersion, updatedBy: remoteVersion > 1 ? 'auto-sync' : 'operator' }],
+          total: 1,
+        })
+      }
+      if (method === 'GET' && url === '/api/wiki/contact/lin-chen') {
+        detailFetches += 1
+        return jsonResponse({
+          page: {
+            ...linDetail,
+            version: remoteVersion,
+            body: remoteBody,
+            updatedBy: remoteVersion > 1 ? 'auto-sync' : 'operator',
+          },
+          revisions: linRevisions,
+        })
+      }
+      if (method === 'POST' && url === '/api/wiki/sync') {
+        remoteVersion = 2
+        remoteBody = 'Auto-synced Lin profile v2'
+        return jsonResponse({ ok: true, threadsSynced: 1, pagesCreated: 0, pagesUpdated: 1 })
+      }
+      return jsonResponse({ error: 'not found' }, 404)
+    }))
+
+    const { rerender } = render(<WikiDialog roster={{}} refreshTick={0} onClose={() => {}} />)
+
+    // Select Lin Chen first so selectedKey + detail are populated
+    await userEvent.click(await screen.findByRole('button', { name: /Lin Chen/ }))
+    expect(await screen.findByText('Original Lin profile v1')).toBeInTheDocument()
+
+    // Enter Create mode and start typing a draft
+    await userEvent.click(screen.getByRole('button', { name: 'New page' }))
+    await userEvent.type(screen.getByLabelText('Title'), 'Draft New Topic')
+
+    // 1. Sync from chats while in Create mode updates Lin Chen on server without clobbering Create draft
+    const fetchesWhileCreating = detailFetches
+    await userEvent.click(screen.getByRole('button', { name: 'Sync from chats' }))
+    expect(await screen.findByText('Updated 1 wiki page from recent chats.')).toBeInTheDocument()
+    expect(screen.getByLabelText('Title')).toHaveValue('Draft New Topic')
+    expect(detailFetches).toBe(fetchesWhileCreating)
+
+    // Cancel Create -> returns to Lin Chen and reloads fresh v2 detail
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByText('Auto-synced Lin profile v2')).toBeInTheDocument()
+    expect(screen.getByText('v2 · Updated by auto-sync')).toBeInTheDocument()
+
+    // 2. Enter Create mode again; refreshTick arrives -> Cancel reloads fresh v3 detail
+    await userEvent.click(screen.getByRole('button', { name: 'New page' }))
+    remoteVersion = 3
+    remoteBody = 'Live refreshed Lin profile v3'
+    rerender(<WikiDialog roster={{}} refreshTick={1} onClose={() => {}} />)
+    await waitFor(() => expect(screen.getByText('v3')).toBeInTheDocument())
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByText('Live refreshed Lin profile v3')).toBeInTheDocument()
+    expect(screen.getByText('v3 · Updated by auto-sync')).toBeInTheDocument()
+  })
+
+  it('preserves concurrent refreshTick detail reload when syncWikiFromChats is in flight (even on 502 error or 0 changes) and localizes not_implemented', async () => {
+    let resolveSync!: (res: Response) => void
+    let syncCall = 0
+    let remoteVersion = 1
+    let remoteBody = 'Initial body v1'
+
+    vi.stubGlobal('fetch', vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (method === 'GET' && url === '/api/wiki?limit=200') {
+        return Promise.resolve(jsonResponse({
+          pages: [{ ...linSummary, version: remoteVersion, updatedBy: remoteVersion > 1 ? 'auto-sync' : 'operator' }],
+          total: 1,
+        }))
+      }
+      if (method === 'GET' && url === '/api/wiki/contact/lin-chen') {
+        return Promise.resolve(jsonResponse({
+          page: {
+            ...linDetail,
+            version: remoteVersion,
+            body: remoteBody,
+            updatedBy: remoteVersion > 1 ? 'auto-sync' : 'operator',
+          },
+          revisions: linRevisions,
+        }))
+      }
+      if (method === 'POST' && url === '/api/wiki/sync') {
+        syncCall += 1
+        if (syncCall === 1 || syncCall === 2) {
+          return new Promise<Response>((resolve) => {
+            resolveSync = resolve
+          })
+        }
+        return Promise.resolve(jsonResponse({ error: 'Not implemented', code: 'not_implemented' }, 501))
+      }
+      return Promise.resolve(jsonResponse({ error: 'not found' }, 404))
+    }))
+
+    const { rerender } = render(<WikiDialog roster={{}} refreshTick={0} onClose={() => {}} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /Lin Chen/ }))
+    expect(await screen.findByText('Initial body v1')).toBeInTheDocument()
+
+    // 1. Start sync; Thread 1 updates page & emits wiki_changed (refreshTick=1), then Thread 2 fails with 502
+    await userEvent.click(screen.getByRole('button', { name: 'Sync from chats' }))
+    await waitFor(() => expect(syncCall).toBe(1))
+
+    remoteVersion = 2
+    remoteBody = 'Updated by Thread 1 before 502'
+    rerender(<WikiDialog roster={{}} refreshTick={1} onClose={() => {}} />)
+
+    await act(async () => {
+      resolveSync(jsonResponse({ error: 'Bad gateway on thread 2' }, 502))
+    })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bad gateway on thread 2')
+    expect(await screen.findByText('Updated by Thread 1 before 502')).toBeInTheDocument()
+    expect(screen.getByText('v2 · Updated by auto-sync')).toBeInTheDocument()
+
+    // 2. Start second sync; teammate edits page concurrently (refreshTick=2), sync resolves with 0 changes
+    await userEvent.click(screen.getByRole('button', { name: 'Sync from chats' }))
+    await waitFor(() => expect(syncCall).toBe(2))
+
+    remoteVersion = 3
+    remoteBody = 'Updated concurrently by teammate v3'
+    rerender(<WikiDialog roster={{}} refreshTick={2} onClose={() => {}} />)
+
+    await act(async () => {
+      resolveSync(jsonResponse({ ok: true, threadsSynced: 0, pagesCreated: 0, pagesUpdated: 0 }))
+    })
+
+    expect(await screen.findByText('Everything in recent chats is already synced.')).toBeInTheDocument()
+    expect(await screen.findByText('Updated concurrently by teammate v3')).toBeInTheDocument()
+    expect(screen.getByText('v3 · Updated by auto-sync')).toBeInTheDocument()
+
+    // 3. Third sync returns 501 code: 'not_implemented' -> renders localized message
+    await userEvent.click(screen.getByRole('button', { name: 'Sync from chats' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Chat sync is not available on this gateway.')
+  })
 })

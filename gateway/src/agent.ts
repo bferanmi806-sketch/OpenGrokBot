@@ -242,7 +242,7 @@ export type AgentDeps = {
   /** 安全只读公网搜索与抓取（始终标记本回合含外部数据 outside-data） */
   onWebSearch?: (args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>
   onWebFetch?: (args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>
-  /** 共享团队知识库工具（wiki_search / wiki_read / wiki_upsert） */
+  /** 共享团队知识库工具（wiki_search / wiki_read / wiki_patch / wiki_upsert） */
   onWikiTool?: (input: {
     name: string
     args: Record<string, unknown>
@@ -928,7 +928,7 @@ async function execToolCall(
   if (deps.effectiveMode === 'prepare' && !PREPARE_TOOL_NAMES.has(call.name) && !deps.activeMcpReadToolNames.has(call.name)) {
     log(false)
     return {
-      text: `${call.name} is not available in a prepare routine: this run allows reading, wiki_upsert, write_file, `
+      text: `${call.name} is not available in a prepare routine: this run allows reading, wiki_upsert, wiki_patch, write_file, `
         + 'propose_memory_rule, and hold_for_approval, but not shell commands, browser interaction, teammate relays, '
         + 'or external writes.',
     }
@@ -1536,7 +1536,8 @@ function summarize(tool: string, args: Record<string, unknown>): string {
     }
     case 'wiki_read':
       return pick('id') || 'page'
-    case 'wiki_upsert': {
+    case 'wiki_upsert':
+    case 'wiki_patch': {
       const kind = pick('kind')
       const slug = pick('slug')
       const title = pick('title')

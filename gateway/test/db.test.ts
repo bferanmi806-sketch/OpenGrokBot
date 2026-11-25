@@ -204,6 +204,30 @@ describe('schema migrations', () => {
     future.close()
     expect(() => openDb(path)).toThrow(/newer OpenSuperBot/)
   })
+
+  it('migrates v25 databases to v26 with wiki_sync_state table', () => {
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(26)
+    const path = tempDb()
+    const initial = openDb(path)
+    initial.exec('DROP TABLE IF EXISTS wiki_sync_state;')
+    initial.pragma('user_version = 25')
+    initial.close()
+
+    const migrated: [number, number][] = []
+    const upgraded = openDb(path, { onMigrate: (from, to) => migrated.push([from, to]) })
+    expect(migrated).toEqual([[25, SCHEMA_VERSION]])
+    expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION)
+    upgraded
+      .prepare('INSERT INTO wiki_sync_state (thread_id, last_synced_message_id, updated_at) VALUES (?, ?, ?)')
+      .run('dm:researcher', 42, 1764000000000)
+    expect(upgraded.prepare('SELECT * FROM wiki_sync_state WHERE thread_id = ?').get('dm:researcher')).toEqual({
+      thread_id: 'dm:researcher',
+      last_synced_message_id: 42,
+      pending_taint: 0,
+      updated_at: 1764000000000,
+    })
+    upgraded.close()
+  })
 })
 
 describe('the per-teammate shell switch (schema v4)', () => {

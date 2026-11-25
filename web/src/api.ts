@@ -5,7 +5,7 @@ import type {
   GoalsSnapshot, GoalUpdateItem, GoalView, IdeaItem, IdeaStatus, ImportMcpServersInput, ImportMcpServersResult, LlmPriority, LlmQueueEndpointView, LlmQueueSnapshot, McpServersSnapshot,
   McpServerView, Message, MilestoneStatus, ProviderPreset, QuietDigestBotSummary, QuietDigestFlushResponse, QuietDigestSummary, ResolveRuleProposalResponse, RoutineAction, RuleDuration, RuleProposalStatus, RuleProposalView,
   ServerEvent, SettingsView, SetupInfo, SpaceGrant, SpaceItem, SpaceItemData, SpaceRole, SpacesSnapshot, SpaceView, TeamCharterView, TodoItem, TodoStatus, UpdateGoalPatch, UpdateMcpServerPatch, UpdateSpacePatch, UpdateVaultItemPatch,
-  VaultItemView, VaultSnapshot, WikiCreateInput, WikiKind, WikiListResponse, WikiPageResponse, WikiSaveInput, WorkflowDraft, WorkflowTrace, SavedWorkflowTrace,
+  VaultItemView, VaultSnapshot, WikiCreateInput, WikiKind, WikiListResponse, WikiPageResponse, WikiSaveInput, WikiSyncResponse, WorkflowDraft, WorkflowTrace, SavedWorkflowTrace,
 } from './types'
 
 export type {
@@ -45,6 +45,7 @@ export type {
   WikiListResponse,
   WikiPageResponse,
   WikiSaveInput,
+  WikiSyncResponse,
 } from './types'
 
 /** 网关说「先登录」：界面换成锁屏说明，而不是一片空白。 */
@@ -713,6 +714,11 @@ export async function revertWikiPage(kind: WikiKind, slug: string, version: numb
 
 export async function deleteWikiPage(kind: WikiKind, slug: string): Promise<void> {
   await send('DELETE', `/api/wiki/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}`, undefined, { strict: true })
+}
+
+export async function syncWikiFromChats(): Promise<WikiSyncResponse> {
+  const res = await send('POST', '/api/wiki/sync', {}, { strict: true })
+  return res.json() as Promise<WikiSyncResponse>
 }
 
 /** 免打扰晨报摘要与待投递数量 */

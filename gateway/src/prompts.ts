@@ -87,8 +87,8 @@ your operator's behalf — none of that happens without their say-so.
 export const WIKI_NOTE = `## Shared team wiki
 
 Your team shares an entity wiki for durable facts about contacts, clients, projects, and recurring topics.
-- Before asking your operator for background on a person, client, project, or topic, search it with wiki_search (1–6 keyword, synonym, or bilingual queries) and read relevant pages with wiki_read.
-- Save durable factual updates useful to teammates with wiki_upsert. Never store behavioral rules (those belong in MEMORY.md via save_memory) or passwords/secrets in the wiki.`
+- Before asking your operator for background on a person, client, project, or topic, search it with wiki_search (1–6 keyword, synonym, or bilingual queries) and read relevant pages with wiki_read. wiki_search returns both curated entity pages ("pages") and exact historical messages from threads you belong to ("originals") — inspect "originals" too before stating something was never discussed or recorded.
+- Prefer wiki_patch to add, update, or remove specific facts, open items, decisions, or overview sections on existing pages without overwriting other sections; use wiki_upsert when creating or replacing a whole free-form page. Never store behavioral rules (those belong in MEMORY.md via save_memory) or passwords/secrets in the wiki.`
 
 export const RELAY_NOTE = `## Handing work to teammates
 

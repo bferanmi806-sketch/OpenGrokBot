@@ -8,6 +8,7 @@ import {
   fetchWikiPage,
   revertWikiPage,
   saveWikiPage,
+  syncWikiFromChats,
 } from '../api'
 import { useT, type MessageKey, type T } from '../i18n'
 import { en } from '../i18n/en'
@@ -22,7 +23,7 @@ import type {
   WikiSaveInput,
 } from '../types'
 import { ConfirmDialog, useEscape } from './ConfirmDialog'
-import { ChevronRightIcon, PlusIcon, XIcon } from './Icons'
+import { ChevronRightIcon, PlusIcon, RotateCwIcon, XIcon } from './Icons'
 import { Markdown } from './Markdown'
 
 export type WikiRoster = Record<string, { name: string; emoji?: string }> | readonly Pick<Bot, 'id' | 'name'>[]
@@ -53,6 +54,7 @@ function wikiErrorMessage(t: T, err: unknown, fallbackKey?: MessageKey): string 
 
 function resolveEditorName(updatedBy: string, roster: WikiRoster, t: T): string {
   if (updatedBy === 'operator') return t('wiki.byOperator')
+  if (updatedBy === 'auto-sync') return t('wiki.byAutoSync')
   const lookupId = updatedBy.startsWith('bot:') ? updatedBy.slice(4) : updatedBy
   if (Array.isArray(roster)) {
     return roster.find((b) => b.id === lookupId)?.name ?? updatedBy
@@ -131,12 +133,17 @@ export function WikiDialog({
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [revertingVersion, setRevertingVersion] = useState<number | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const [syncNotice, setSyncNotice] = useState<string | null>(null)
+  const [syncError, setSyncError] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<WikiPageDetail | null>(null)
   const [confirmRevert, setConfirmRevert] = useState<{ page: WikiPageDetail; version: number } | null>(null)
-  const busy = saving || deleting || revertingVersion !== null
+  const busy = saving || deleting || revertingVersion !== null || syncing
 
   const mountedRef = useRef(true)
   const mutatingRef = useRef(false)
+  const syncingRef = useRef(false)
+  const syncExternalRefreshRef = useRef(false)
   const detailStaleRef = useRef(false)
   const listSeqRef = useRef(0)
   const pageSeqRef = useRef(0)
@@ -232,8 +239,12 @@ export function WikiDialog({
     if (refreshTick === prevTickRef.current) return
     prevTickRef.current = refreshTick
     void loadList(queryRef.current, kindRef.current, { silent: true })
+    if (syncingRef.current) {
+      syncExternalRefreshRef.current = true
+      return
+    }
     if (mutatingRef.current) return
-    if (modeRef.current === 'edit') {
+    if (modeRef.current === 'edit' || modeRef.current === 'create') {
       if (selectedKeyRef.current) detailStaleRef.current = true
       return
     }
@@ -243,15 +254,18 @@ export function WikiDialog({
   }, [refreshTick, loadList, loadPage])
 
   const cancelForm = useCallback(() => {
-    if (saving) return
-    const target = modeRef.current === 'edit' && detailStaleRef.current ? selectedKeyRef.current : null
+    if (saving || syncing) return
+    const target =
+      (modeRef.current === 'edit' || modeRef.current === 'create') && detailStaleRef.current
+        ? selectedKeyRef.current
+        : null
     detailStaleRef.current = false
     setMode('view')
     setFormError(null)
     if (target) {
       void loadPage(target.kind, target.slug, { silent: true })
     }
-  }, [saving, loadPage])
+  }, [saving, syncing, loadPage])
 
   useEscape(mode !== 'view' ? cancelForm : onClose)
 
@@ -454,6 +468,62 @@ export function WikiDialog({
     }
   }
 
+  const handleSync = async () => {
+    if (busy || mutatingRef.current) return
+    mutatingRef.current = true
+    syncingRef.current = true
+    syncExternalRefreshRef.current = false
+    setSyncing(true)
+    setSyncNotice(null)
+    setSyncError(null)
+    let signedOut = false
+    let needsDetailRefresh = false
+    let listReloaded = false
+    try {
+      const res = await syncWikiFromChats()
+      if (!mountedRef.current) return
+      const changed = res.pagesCreated + res.pagesUpdated
+      setSyncNotice(
+        changed === 0
+          ? tRef.current('wiki.syncEmpty')
+          : changed === 1
+            ? tRef.current('wiki.syncDoneOne')
+            : tRef.current('wiki.syncDoneMany', { count: changed }),
+      )
+      void loadList(queryRef.current, kindRef.current, { silent: true })
+      listReloaded = true
+      needsDetailRefresh = changed > 0 || syncExternalRefreshRef.current
+    } catch (err) {
+      if (!mountedRef.current) return
+      if (err instanceof SignedOut) {
+        signedOut = true
+        onSignedOutRef.current?.()
+        return
+      }
+      setSyncError(wikiErrorMessage(tRef.current, err, 'wiki.error.sync_failed'))
+      needsDetailRefresh = syncExternalRefreshRef.current
+    } finally {
+      syncingRef.current = false
+      mutatingRef.current = false
+      if (mountedRef.current) {
+        setSyncing(false)
+        if (!signedOut) {
+          if (syncExternalRefreshRef.current && !listReloaded) {
+            void loadList(queryRef.current, kindRef.current, { silent: true })
+          }
+          if ((needsDetailRefresh || syncExternalRefreshRef.current) && selectedKeyRef.current) {
+            if (modeRef.current === 'edit' || modeRef.current === 'create') {
+              detailStaleRef.current = true
+            } else if (modeRef.current === 'view') {
+              void loadPage(selectedKeyRef.current.kind, selectedKeyRef.current.slug, { silent: true })
+            }
+          }
+        }
+      }
+      syncExternalRefreshRef.current = false
+    }
+  }
+
   const hasFilterOrSearch = Boolean(activeQuery.trim()) || kindFilter !== 'all'
   const countLabel = total === 1 ? t('wiki.countOne') : t('wiki.count', { count: total })
 
@@ -528,7 +598,22 @@ export function WikiDialog({
 
             <div className="wiki-list-meta">
               <span>{loadingList && pages.length === 0 ? t('wiki.loading') : countLabel}</span>
+              <button
+                type="button"
+                className="wiki-sync-btn"
+                disabled={busy}
+                onClick={() => { void handleSync() }}
+              >
+                <RotateCwIcon size={11} className={`wiki-sync-icon${syncing ? ' spinning' : ''}`} />
+                <span>{syncing ? t('wiki.syncing') : t('wiki.sync')}</span>
+              </button>
             </div>
+
+            {syncError ? (
+              <div className="form-error wiki-list-error" role="alert">{syncError}</div>
+            ) : syncNotice ? (
+              <div className="wiki-sync-notice" role="status">{syncNotice}</div>
+            ) : null}
 
             {listError ? (
               <div className="form-error wiki-list-error" role="alert">{listError}</div>
@@ -689,13 +774,13 @@ export function WikiDialog({
 
                 <div className="conn-form-buttons">
                   <span className="spacer" />
-                  <button type="button" disabled={saving} onClick={cancelForm}>
+                  <button type="button" disabled={busy} onClick={cancelForm}>
                     {t('wiki.cancel')}
                   </button>
                   <button
                     type="submit"
                     className="primary"
-                    disabled={saving || !formTitle.trim() || !formBody.trim()}
+                    disabled={busy || !formTitle.trim() || !formBody.trim()}
                   >
                     {saving
                       ? t('wiki.saving')

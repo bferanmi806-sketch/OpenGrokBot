@@ -126,6 +126,11 @@ import {
   type ImageNote, type UploadRow,
 } from './uploads.js'
 import { mountWiki } from './wiki/api.js'
+import {
+  markWikiSyncThreadTainted,
+  syncWikiFromChats as runWikiChatSync,
+  type WikiSyncResult,
+} from './wiki/auto-sync.js'
 import { runWikiToolCall } from './wiki/tools.js'
 import type { WorkflowRecording } from './workflow-recorder.js'
 import { deleteWorkflowTrace, listWorkflowTraces, parseWorkflowTrace, readWorkflowTrace, saveWorkflowTrace, type WorkflowTrace } from './workflows.js'
@@ -242,6 +247,8 @@ export type GatewayApp = {
   isBusy(botId: string): boolean
   /** Quiet Hours 结束后投递积压的晨报；仍在静音时段内时返回 flushed: 0 */
   flushQuietDigestsIfDue(): QuietDigestFlushResult
+  /** 从闲置（或手动强制）对话增量同步实体事实到团队 Wiki */
+  syncWikiFromChats(opts?: { force?: boolean }): Promise<WikiSyncResult>
   /** 收拾上传目录：没挂到消息上的过期上传、对不上账的文件。启动时和之后每小时跑一次 */
   sweepUploads(): Promise<{ orphans: number; strays: number; missing: number }>
   /** 网关收摊时停掉全部正在跑和排队的回合，并关闭活跃的 MCP 会话 */
@@ -455,6 +462,9 @@ export function createApp(deps: AppDeps): GatewayApp {
   const AMBIENT_FEED_MIN_GAP_MS = 40 * 60_000
   let feedPollTimer: ReturnType<typeof setInterval> | null = null
   let feedStartupTimer: ReturnType<typeof setTimeout> | null = null
+  let gatewayStopping = false
+  const wikiSyncAbort = new AbortController()
+  let activeWikiSync: Promise<void> = Promise.resolve()
 
   async function sweepAmbientFeedTopics(): Promise<void> {
     const at = now().getTime()
@@ -864,6 +874,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       const ids = waiting.get(threadId) ?? new Set<number>()
       for (const row of stored) ids.add(row.id)
       waiting.set(threadId, ids)
+      if (item.tainted) markWikiSyncThreadTainted(db, threadId, now().getTime())
       void startTurn(bot, threadId, text, {
         origin: 'operator',
         alreadyStored: true,
@@ -874,6 +885,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     },
     startIncubation: (bot, idea) => {
       const threadId = ensureDmThread(db, bot.id)
+      if (idea.tainted) markWikiSyncThreadTainted(db, threadId, now().getTime())
       const prompt = [
         `Read-only idea incubation for: "${idea.title}"`,
         idea.notes ? `Context: ${idea.notes}` : '',
@@ -918,6 +930,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       const ids = waiting.get(threadId) ?? new Set<number>()
       for (const row of stored) ids.add(row.id)
       waiting.set(threadId, ids)
+      if (idea.tainted) markWikiSyncThreadTainted(db, threadId, now().getTime())
       void startTurn(bot, threadId, text, {
         origin: 'operator',
         alreadyStored: true,
@@ -994,6 +1007,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       const ids = waiting.get(threadId) ?? new Set<number>()
       for (const row of stored) ids.add(row.id)
       waiting.set(threadId, ids)
+      if (hasTaintedItems) markWikiSyncThreadTainted(db, threadId, now().getTime())
       void startTurn(bot, threadId, text, {
         origin: 'operator',
         alreadyStored: true,
@@ -1004,7 +1018,63 @@ export function createApp(deps: AppDeps): GatewayApp {
       return { threadId }
     },
   })
-  mountWiki(app, { db, dataDir, hub, now })
+  function isThreadBusyForWikiSync(threadId: string): boolean {
+    if (waiting.has(threadId) || turns.isThreadBusy(threadId) || rounds.isThreadBusy(threadId)) {
+      return true
+    }
+    for (const active of workflowRuns.values()) {
+      if (active.threadId === threadId && active.phase.kind === 'running') return true
+    }
+    if (!db.open) return false
+    const hasBg = db
+      .prepare(`SELECT 1 FROM background_tasks WHERE thread_id = ? AND status IN ('queued', 'running') LIMIT 1`)
+      .get(threadId)
+    if (hasBg) return true
+    const hasStep = db
+      .prepare(
+        `SELECT 1
+         FROM dispatch_plans p
+         JOIN dispatch_plan_steps s ON s.plan_id = p.id
+         WHERE p.thread_id = ? AND p.status = 'running' AND s.status = 'running'
+         LIMIT 1`,
+      )
+      .get(threadId)
+    return Boolean(hasStep)
+  }
+
+  function syncWikiFromChats(opts?: { force?: boolean }): Promise<WikiSyncResult> {
+    const runPromise = runWikiChatSync(
+      {
+        db,
+        dataDir,
+        hub,
+        llm,
+        llmForThread: (threadId, threadBotId) => {
+          const dmBotId = threadId.startsWith('dm:') ? threadId.slice(3) : ''
+          const botId = threadBotId || dmBotId || chiefId
+          return deps.llmFor?.(botId).llm ?? llm
+        },
+        isThreadBusy: isThreadBusyForWikiSync,
+        isStopping: () => gatewayStopping,
+        signal: wikiSyncAbort.signal,
+        now: () => now().getTime(),
+      },
+      opts,
+    )
+    activeWikiSync = runPromise.then(
+      () => {},
+      () => {},
+    )
+    return runPromise
+  }
+
+  mountWiki(app, {
+    db,
+    dataDir,
+    hub,
+    now,
+    syncFromChats: () => syncWikiFromChats({ force: true }),
+  })
 
   const botById = (id: string) => db.prepare('SELECT * FROM bots WHERE id = ?').get(id) as BotRow | undefined
   const computerKind: ComputerKind = deps.computers?.kind ?? 'docker'
@@ -1571,6 +1641,10 @@ export function createApp(deps: AppDeps): GatewayApp {
       taskId: ctx.task.id,
       title: ctx.task.title,
     }
+    let bgTainted = Boolean(ctx.task.sourceTainted)
+    if (bgTainted) {
+      markWikiSyncThreadTainted(db, ctx.task.threadId, now().getTime())
+    }
     let finalText = ''
     let reportSummary = ''
     try {
@@ -1584,6 +1658,14 @@ export function createApp(deps: AppDeps): GatewayApp {
         trigger: 'background',
         effectiveMode: 'act',
         ...(ctx.task.sourceTainted ? { tainted: true } : {}),
+        onTainted: () => {
+          bgTainted = true
+          try {
+            markWikiSyncThreadTainted(db, ctx.task.threadId, now().getTime())
+          } catch {
+            // Ignore closed DB during shutdown
+          }
+        },
         ...(group ? { group } : {}),
         isBackgroundTask: true,
         historyLimit: 12,
@@ -1626,6 +1708,13 @@ export function createApp(deps: AppDeps): GatewayApp {
       }
       return { status: 'completed', summary: finalText || reportSummary || 'Completed.' }
     } finally {
+      if (bgTainted) {
+        try {
+          markWikiSyncThreadTainted(db, ctx.task.threadId, now().getTime())
+        } catch {
+          // Ignore closed DB during shutdown
+        }
+      }
       browserLeases.release(bot.id, bgHolder)
       try {
         publishPresence(bot.id)
@@ -1816,6 +1905,9 @@ export function createApp(deps: AppDeps): GatewayApp {
 
       const waitCapture = captureTurnWaits(ctx.plan.threadId)
       let stepTainted = ctx.initialTainted
+      if (stepTainted) {
+        markWikiSyncThreadTainted(db, ctx.plan.threadId, now().getTime())
+      }
       let finalText = ''
       let reportSummary = ''
 
@@ -1844,7 +1936,14 @@ Complete your step and post a concise summary of your findings or output in this
           includeBackgroundControls: false,
           ...(group ? { group } : {}),
           ...(ctx.initialTainted ? { tainted: true } : {}),
-          onTainted: () => { stepTainted = true },
+          onTainted: () => {
+            stepTainted = true
+            try {
+              markWikiSyncThreadTainted(db, ctx.plan.threadId, now().getTime())
+            } catch {
+              // Ignore closed DB during shutdown
+            }
+          },
           onFinalText: (t) => { finalText = t },
           onReportFiled: (s) => { reportSummary = s },
           onAcquireBrowser: () => {
@@ -1918,6 +2017,13 @@ Complete your step and post a concise summary of your findings or output in this
               tainted: stepTainted,
             }
       } finally {
+        if (stepTainted) {
+          try {
+            markWikiSyncThreadTainted(db, ctx.plan.threadId, now().getTime())
+          } catch {
+            // Ignore closed DB during shutdown
+          }
+        }
         browserLeases.release(bot.id, fgHolder)
         try {
           publishPresence(bot.id)
@@ -1938,6 +2044,9 @@ Complete your step and post a concise summary of your findings or output in this
   })
 
   function startTurn(bot: BotRow, threadId: string, text: string, opts: TurnOpts): Promise<void> {
+    if (opts.tainted === true || opts.origin === 'webhook') {
+      markWikiSyncThreadTainted(db, threadId, now().getTime())
+    }
     let notifiedFinished = false
     const done = turns.run(bot.id, threadId, async (signal) => {
       const waitingHere = [...(waiting.get(threadId) ?? [])]
@@ -1960,7 +2069,10 @@ Complete your step and post a concise summary of your findings or output in this
         opts.priority ?? (opts.origin === 'operator' ? 'interactive' : opts.origin === 'routine' ? 'routine' : 'background')
       const fgHolder: BrowserLeaseHolder = { kind: 'foreground', token: randomUUID(), label: 'foreground chat' }
       const waitCapture = opts.onTurnFinished ? captureTurnWaits(threadId) : null
-      let turnTainted = opts.tainted === true
+      let turnTainted = opts.tainted === true || opts.origin === 'webhook'
+      if (turnTainted) {
+        markWikiSyncThreadTainted(db, threadId, now().getTime())
+      }
       let finalText = ''
       let reportSummary = ''
       let outcome: TurnOutcome = 'error'
@@ -1980,6 +2092,11 @@ Complete your step and post a concise summary of your findings or output in this
           ...(opts.tainted ? { tainted: true } : {}),
           onTainted: () => {
             turnTainted = true
+            try {
+              markWikiSyncThreadTainted(db, threadId, now().getTime())
+            } catch {
+              // Ignore closed DB during shutdown
+            }
             opts.onTainted?.()
           },
           ...(opts.quietBuffer ? { quietBuffer: true } : {}),
@@ -2020,6 +2137,13 @@ Complete your step and post a concise summary of your findings or output in this
         turnError = err instanceof Error ? err.message : String(err)
         throw err
       } finally {
+        if (turnTainted) {
+          try {
+            markWikiSyncThreadTainted(db, threadId, now().getTime())
+          } catch {
+            // Ignore closed DB during shutdown
+          }
+        }
         browserLeases.release(bot.id, fgHolder)
         if (opts.onTurnFinished) {
           notifiedFinished = true
@@ -2074,6 +2198,9 @@ Complete your step and post a concise summary of your findings or output in this
     if (!target) return { delivered: false, reason: `There is no teammate called ${to}.` }
 
     const targetThread = ensureDmThread(db, target.id)
+    if (tainted) {
+      markWikiSyncThreadTainted(db, targetThread, now().getTime())
+    }
     const chip = insertMessage(db, {
       threadId: targetThread, sender: from.id, kind: 'bot_ref',
       payload: { from: from.id, fromName: from.name, content, ...(tainted ? { tainted: true } : {}) },
@@ -3050,10 +3177,10 @@ Complete your step and post a concise summary of your findings or output in this
       const goalNote = linkedGoal ? ` (for active goal "${linkedGoal.title}" [${linkedGoal.id}])` : ''
       const feedSurface = fresh.surface ?? (watch ? 'both' : 'thread')
       const goalOpt = linkedGoal ? { goalId: linkedGoal.id } : {}
-      // prepare 回合用于提前整理简报与本地草稿：只读工具 + wiki_upsert + 工作区 write_file，禁止 shell 与外部写入
+      // prepare 回合用于提前整理简报与本地草稿：只读工具 + wiki_upsert / wiki_patch + 工作区 write_file，禁止 shell 与外部写入
       const prepareNote = prepare
         ? '\n\nThis is a prepare run: assemble briefs, dossiers, or local drafts ahead of time. You have read-only tools '
-          + 'plus wiki_upsert and workspace write_file, but cannot run shell commands, interact with web pages, relay to '
+          + 'plus wiki_upsert, wiki_patch, and workspace write_file, but cannot run shell commands, interact with web pages, relay to '
           + 'teammates, or write to external apps. If nothing needs preparing, reply with exactly "Nothing to prepare." '
           + 'and nothing else. If something should be sent or changed externally, hold it for approval.'
         : ''
@@ -4160,8 +4287,11 @@ Complete your step and post a concise summary of your findings or output in this
       || backgroundTasks.hasActive(botId)
       || dispatchPlans.hasActive(botId),
     flushQuietDigestsIfDue,
+    syncWikiFromChats,
     sweepUploads: async () => (uploads ? uploads.sweep(markUploadRemoved) : { orphans: 0, strays: 0, missing: 0 }),
     stopAll: () => {
+      gatewayStopping = true
+      wikiSyncAbort.abort()
       if (feedPollTimer) { clearInterval(feedPollTimer); feedPollTimer = null }
       if (feedStartupTimer) { clearTimeout(feedStartupTimer); feedStartupTimer = null }
       rounds.stopAll()
@@ -4173,7 +4303,7 @@ Complete your step and post a concise summary of your findings or output in this
       const bgStop = backgroundTasks.stopAll()
       mcpApi.stop()
       const mcpClose = mcpManager.closeAll().catch(() => {})
-      return Promise.all([bgStop, dpStop, mcpClose, ...workflowRecordingStops]).then(() => {})
+      return Promise.all([bgStop, dpStop, mcpClose, activeWikiSync, ...workflowRecordingStops]).then(() => {})
     },
   }
 }
