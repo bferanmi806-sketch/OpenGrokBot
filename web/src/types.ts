@@ -339,6 +339,45 @@ export type ApprovalRule = {
 
 export type UsageTotals = { prompt: number; completion: number; cached: number; total: number }
 
+export type WorkflowLocator =
+  | { role: { role: string; name: string } }
+  | { label: string }
+  | { placeholder: string }
+  | { text: string }
+  | { testId: string }
+  | { css: string }
+
+export type WorkflowTarget = { candidates: WorkflowLocator[] }
+export type WorkflowValue =
+  | { kind: 'literal'; text: string }
+  | { kind: 'placeholder'; key: string }
+  | { kind: 'redacted'; reason: 'sensitive-input' }
+  | { kind: 'vault'; itemId: string; field: string }
+export type WorkflowApprovalKind = 'email' | 'message' | 'post' | 'purchase' | 'booking' | 'other'
+export type WorkflowApproval = { kind: WorkflowApprovalKind; target: string; action?: string }
+type WorkflowStepContext = { intent?: string; page?: string; frame?: string }
+type WorkflowActionContext = WorkflowStepContext & { expect?: { url: string }; approval?: WorkflowApproval }
+export type WorkflowStep = WorkflowStepContext & (
+  | { type: 'navigate'; url: string }
+  | (WorkflowActionContext & { type: 'click'; target: WorkflowTarget })
+  | (WorkflowActionContext & { type: 'check' | 'uncheck'; target: WorkflowTarget })
+  | (WorkflowActionContext & { type: 'press'; key: 'Enter'; target: WorkflowTarget })
+  | (WorkflowActionContext & { type: 'fill'; target: WorkflowTarget; value: WorkflowValue })
+  | (WorkflowActionContext & { type: 'select'; target: WorkflowTarget; value: WorkflowValue })
+  | { type: 'unrecorded-popup' }
+)
+export type WorkflowTrace = {
+  format: 'opensuperbot.workflow'
+  version: 1
+  title: string
+  intent?: string
+  truncated?: true
+  steps: WorkflowStep[]
+}
+export type WorkflowDraft = { id: string; trace: WorkflowTrace }
+export type SavedWorkflowTrace = { id: string; trace: WorkflowTrace }
+export type ActiveWorkflowRun = { runId: string; workflowId: string }
+
 export type ComputerInfo = {
   botId: string
   running: boolean
@@ -376,6 +415,12 @@ export type ComputerInfo = {
   spaces?: BotSpaceItem[]
   /** 后台任务列表（运行中/排队中在前，最新在前） */
   backgroundTasks?: BackgroundTaskView[]
+  /** 网关中尚未完成的浏览器工作流状态；运行状态从不包括运行时 bindings。 */
+  workflowRecording?: boolean
+  workflowDraft?: WorkflowDraft | null
+  workflowRun?: ActiveWorkflowRun | null
+  /** 由面板单独读取的已保存工作流列表。 */
+  savedWorkflows?: SavedWorkflowTrace[]
 }
 
 export type ComputerView = ComputerInfo

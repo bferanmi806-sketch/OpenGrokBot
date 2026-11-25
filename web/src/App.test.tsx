@@ -59,8 +59,17 @@ function mockGateway(opts: {
   startDispatchPlan?: (url: string) => { status?: number; body: unknown }
   /** POST /api/dispatch-plans/:id/cancel 的回答 */
   cancelDispatchPlan?: (url: string) => { status?: number; body: unknown }
+  /** 本地浏览器在录制请求抵达前被另一个操作者打开 */
+  openWindowBeforeWorkflowRecording?: boolean
 } = {}) {
   const calls: string[] = []
+  let computerState = opts.computer
+  let restoreWindowAfterWorkflowRecording = false
+  const updateComputerState = (changes: Record<string, unknown>) => {
+    if (computerState && typeof computerState === 'object' && !Array.isArray(computerState)) {
+      computerState = { ...(computerState as Record<string, unknown>), ...changes }
+    }
+  }
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input)
     calls.push(url)
@@ -137,10 +146,44 @@ function mockGateway(opts: {
       const reply = opts.cancelDispatchPlan(url)
       return json(reply.body, reply.status ?? 200)
     }
+    if (/^\/api\/bots\/[^/]+\/workflows$/.test(url) && (!init?.method || init.method === 'GET')) return json([])
+    if (url.endsWith('/workflows/recording') && init?.method === 'POST') {
+      const localComputer = computerState && typeof computerState === 'object' && !Array.isArray(computerState)
+        ? computerState as Record<string, unknown>
+        : null
+      if (localComputer?.kind === 'local') {
+        if (opts.openWindowBeforeWorkflowRecording && !localComputer.window) {
+          // Model another tab opening the browser after the panel's last poll.
+          updateComputerState({ window: true })
+        } else if (!localComputer.window) {
+          restoreWindowAfterWorkflowRecording = true
+          updateComputerState({ window: true })
+        }
+      }
+      updateComputerState({ workflowRecording: true })
+      return json({ ok: true, recording: true }, 202)
+    }
+    if (url.endsWith('/workflows/recording/stop') && init?.method === 'POST') {
+      if (restoreWindowAfterWorkflowRecording) updateComputerState({ window: false })
+      restoreWindowAfterWorkflowRecording = false
+      updateComputerState({ workflowRecording: false })
+      return json({ ok: true, draft: null })
+    }
+    if (url.endsWith('/workflows/recording') && init?.method === 'DELETE') {
+      if (restoreWindowAfterWorkflowRecording) updateComputerState({ window: false })
+      restoreWindowAfterWorkflowRecording = false
+      updateComputerState({ workflowRecording: false })
+      return json({ ok: true })
+    }
+    if (url.endsWith('/computer/window') && init?.method === 'POST') {
+      const sent = JSON.parse(String(init.body)) as { shown: boolean }
+      updateComputerState({ window: sent.shown })
+      return json({ ok: true, window: sent.shown })
+    }
     if (url.startsWith('/api/threads/')) return json(opts.messages ? await opts.messages(url) : [])
     if (url.includes('/computer')) {
       await opts.computerGate
-      const val = typeof opts.computer === 'function' ? await (opts.computer as (u: string) => unknown)(url) : opts.computer
+      const val = typeof computerState === 'function' ? await (computerState as (u: string) => unknown)(url) : computerState
       return json(val ?? {})
     }
     return json({ error: 'unexpected' }, 404)
@@ -293,6 +336,50 @@ describe('App', () => {
     await act(async () => { wake() })
     expect(await screen.findByText('Docker is not running.')).toBeInTheDocument()
     expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('lets the gateway open and restore a hidden local browser for recording', async () => {
+    const calls = mockGateway({
+      computer: {
+        botId: 'researcher', running: true, kind: 'local', vncUrl: null,
+        screen: { kind: 'cdp', url: '/screen/researcher/ws' }, window: false, routines: [],
+      },
+    })
+    render(<App />)
+    await ready()
+    await userEvent.click(screen.getByRole('button', { name: 'Open its computer' }))
+    await screen.findByText("Scout's computer")
+    await userEvent.type(screen.getByRole('textbox', { name: 'Workflow name' }), 'Collect status')
+    await userEvent.click(screen.getByRole('button', { name: 'Start recording' }))
+    expect(await screen.findByText('Recording. Perform each step in the browser.')).toBeInTheDocument()
+    expect(await screen.findByText('Its browser is open as a window on your desktop — perform the recorded steps there.')).toBeInTheDocument()
+    expect(calls.some((call) => call.includes('/computer/window'))).toBe(false)
+    await userEvent.click(screen.getByRole('button', { name: 'Finish recording' }))
+    await waitFor(() => expect(calls).toContain('POST /api/bots/researcher/workflows/recording/stop '))
+    await waitFor(() => expect(screen.queryByText('Recording. Perform each step in the browser.')).toBeNull())
+    expect(screen.queryByText('Its browser is open as a window on your desktop — perform the recorded steps there.')).toBeNull()
+    expect(screen.queryByText('Its browser is open as a window on your desktop — sign in there.')).toBeNull()
+    expect(calls.some((call) => call.includes('/computer/window'))).toBe(false)
+  })
+
+  it('does not close a local browser another tab opened before recording', async () => {
+    const calls = mockGateway({
+      computer: {
+        botId: 'researcher', running: true, kind: 'local', vncUrl: null,
+        screen: { kind: 'cdp', url: '/screen/researcher/ws' }, window: false, routines: [],
+      },
+      openWindowBeforeWorkflowRecording: true,
+    })
+    render(<App />)
+    await ready()
+    await userEvent.click(screen.getByRole('button', { name: 'Open its computer' }))
+    await screen.findByText("Scout's computer")
+    await userEvent.type(screen.getByRole('textbox', { name: 'Workflow name' }), 'Collect status')
+    await userEvent.click(screen.getByRole('button', { name: 'Start recording' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Finish recording' }))
+    await waitFor(() => expect(calls).toContain('POST /api/bots/researcher/workflows/recording/stop '))
+    expect(await screen.findByText('Its browser is open as a window on your desktop — sign in there.')).toBeInTheDocument()
+    expect(calls.some((call) => call.includes('/computer/window'))).toBe(false)
   })
 
   it('does not reopen a panel whose computer woke up after you moved on', async () => {

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../i18n'
 import type { ComputerInfo } from '../types'
 import { ComputerPanel } from './ComputerPanel'
+import { WorkflowSection } from './WorkflowSection'
 
 const SCREEN = 'http://127.0.0.1:53314/vnc.html?autoconnect=1&resize=scale&reconnect=1&password=pw12345x'
 const running: ComputerInfo = {
@@ -13,6 +14,150 @@ const running: ComputerInfo = {
   routines: [{ id: 1, name: 'Morning digest', cron: '0 9 * * *', human: 'every day at 09:00', last_run_at: null, enabled: 1 }],
   usage: { today: { prompt: 12000, completion: 345, cached: 8000, total: 12345 }, budget: 200000 },
 }
+
+describe('browser workflows', () => {
+  const draft = {
+    id: 'draft-1',
+    trace: {
+      format: 'opensuperbot.workflow' as const,
+      version: 1 as const,
+      title: 'Submit a form',
+      steps: [
+        { type: 'fill' as const, target: { candidates: [{ label: 'Email' }] }, value: { kind: 'literal' as const, text: 'customer@example.test' } },
+        { type: 'click' as const, target: { candidates: [{ label: 'Submit' }] } },
+      ],
+    },
+  }
+
+  it('restores a pending draft, converts values to inputs, adds approval, and saves edits', async () => {
+    const onUpdateDraft = vi.fn().mockResolvedValue(undefined)
+    const onSaveDraft = vi.fn().mockResolvedValue(undefined)
+    render(<WorkflowSection
+      info={{ ...running, kind: 'docker', workflowDraft: draft, savedWorkflows: [] }}
+      onStartRecording={() => {}}
+      onUpdateDraft={onUpdateDraft}
+      onSaveDraft={onSaveDraft}
+    />)
+
+    expect(screen.getByRole('textbox', { name: 'Workflow name' })).toHaveValue('Submit a form')
+    await userEvent.click(screen.getByRole('button', { name: 'Use an input instead' }))
+    expect(screen.getByRole('textbox', { name: 'Input name' })).toHaveValue('input1')
+    const approvalChecks = screen.getAllByRole('checkbox', { name: 'Ask for approval before this step' })
+    await userEvent.click(approvalChecks[1]!)
+    await userEvent.type(screen.getByRole('textbox', { name: 'Recipient or destination' }), 'customer@example.test')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save draft edits' }))
+    const updated = onUpdateDraft.mock.calls[0]?.[1]
+    expect(updated.steps[0]).toMatchObject({ value: { kind: 'placeholder', key: 'input1' } })
+    expect(updated.steps[1]).toMatchObject({ approval: { kind: 'other', target: 'customer@example.test' } })
+    expect(updated.steps[1].approval).not.toHaveProperty('action')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save workflow' }))
+    expect(onSaveDraft).toHaveBeenCalledWith('draft-1', updated)
+  })
+
+  it('drops a step and restores active run controls from the computer snapshot', async () => {
+    const onUpdateDraft = vi.fn().mockResolvedValue(undefined)
+    const onStopRun = vi.fn().mockResolvedValue(undefined)
+    render(<WorkflowSection
+      info={{
+        ...running,
+        kind: 'docker',
+        workflowDraft: draft,
+        workflowRun: { runId: 'run-1', workflowId: 'workflow-1' },
+        savedWorkflows: [{ id: 'workflow-1', trace: { ...draft.trace, title: 'Saved workflow' } }],
+      }}
+      onStartRecording={() => {}}
+      onUpdateDraft={onUpdateDraft}
+      onStopRun={onStopRun}
+    />)
+    await userEvent.click(screen.getByRole('button', { name: 'Drop step 1' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Save draft edits' }))
+    expect(onUpdateDraft.mock.calls[0]?.[1].steps).toHaveLength(1)
+    expect(screen.getByText('Workflow Saved workflow is running.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Run workflow' })).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: 'Stop workflow' }))
+    expect(onStopRun).toHaveBeenCalledWith('run-1')
+  })
+
+  it('collects placeholder bindings only when running a saved workflow', async () => {
+    const onRun = vi.fn().mockResolvedValue(undefined)
+    const trace = {
+      format: 'opensuperbot.workflow' as const,
+      version: 1 as const,
+      title: 'Sign in',
+      steps: [{ type: 'fill' as const, target: { candidates: [{ label: 'Password' }] }, value: { kind: 'placeholder' as const, key: 'password' } }],
+    }
+    render(<WorkflowSection
+      info={{ ...running, kind: 'docker', workflowRecording: false, workflowDraft: null, savedWorkflows: [{ id: 'workflow-2', trace }] }}
+      onStartRecording={() => {}}
+      onRun={onRun}
+    />)
+    const password = screen.getByLabelText('password')
+    expect(password).toHaveAttribute('type', 'password')
+    await userEvent.type(password, 's3cret-value')
+    await userEvent.click(screen.getByRole('button', { name: 'Run workflow' }))
+    expect(onRun).toHaveBeenCalledWith('workflow-2', { password: 's3cret-value' })
+    expect(password).toHaveValue('')
+  })
+
+  it('keeps run inputs when the gateway rejects a workflow run', async () => {
+    const onRun = vi.fn().mockRejectedValue(new Error('the teammate is busy'))
+    const trace = {
+      format: 'opensuperbot.workflow' as const,
+      version: 1 as const,
+      title: 'Sign in',
+      steps: [{ type: 'fill' as const, target: { candidates: [{ label: 'Password' }] }, value: { kind: 'placeholder' as const, key: 'password' } }],
+    }
+    render(<WorkflowSection
+      info={{ ...running, kind: 'docker', workflowRecording: false, workflowDraft: null, savedWorkflows: [{ id: 'workflow-2', trace }] }}
+      onStartRecording={() => {}}
+      onRun={onRun}
+    />)
+    const password = screen.getByLabelText('password')
+    await userEvent.type(password, 's3cret-value')
+    await userEvent.click(screen.getByRole('button', { name: 'Run workflow' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('the teammate is busy')
+    expect(password).toHaveValue('s3cret-value')
+  })
+
+  it('clears recording details after a successful start', async () => {
+    const onStartRecording = vi.fn().mockResolvedValue(undefined)
+    render(<WorkflowSection info={{ ...running, kind: 'docker', workflowRecording: false, workflowDraft: null, savedWorkflows: [] }} onStartRecording={onStartRecording} />)
+    const title = screen.getByRole('textbox', { name: 'Workflow name' })
+    const intent = screen.getByRole('textbox', { name: 'Goal (optional)' })
+    await userEvent.type(title, 'Daily report')
+    await userEvent.type(intent, 'Collect the latest updates')
+    await userEvent.click(screen.getByRole('button', { name: 'Start recording' }))
+    expect(onStartRecording).toHaveBeenCalledWith('Daily report', 'Collect the latest updates')
+    expect(title).toHaveValue('')
+    expect(intent).toHaveValue('')
+  })
+
+  it('uses the normalized draft returned by the gateway', async () => {
+    const normalized = { ...draft.trace, title: 'Normalized title' }
+    const onUpdateDraft = vi.fn().mockResolvedValue({ id: draft.id, trace: normalized })
+    render(<WorkflowSection info={{ ...running, kind: 'docker', workflowDraft: draft, savedWorkflows: [] }} onStartRecording={() => {}} onUpdateDraft={onUpdateDraft} />)
+    await userEvent.click(screen.getByRole('button', { name: 'Save draft edits' }))
+    expect(screen.getByRole('textbox', { name: 'Workflow name' })).toHaveValue('Normalized title')
+  })
+
+  it('deletes a selected saved workflow and disables deletion while it is running', async () => {
+    const onDeleteWorkflow = vi.fn().mockResolvedValue(undefined)
+    const trace = {
+      format: 'opensuperbot.workflow' as const,
+      version: 1 as const,
+      title: 'Saved workflow',
+      steps: [],
+    }
+    const info = { ...running, kind: 'docker' as const, workflowDraft: null, savedWorkflows: [{ id: 'workflow-2', trace }] }
+    const { rerender } = render(<WorkflowSection info={info} onStartRecording={() => {}} onDeleteWorkflow={onDeleteWorkflow} />)
+    await userEvent.click(screen.getByRole('button', { name: 'Delete workflow' }))
+    expect(onDeleteWorkflow).toHaveBeenCalledWith('workflow-2')
+    rerender(<WorkflowSection info={{ ...info, workflowRun: { runId: 'run-1', workflowId: 'workflow-2' } }} onStartRecording={() => {}} onDeleteWorkflow={onDeleteWorkflow} />)
+    expect(screen.getByRole('button', { name: 'Delete workflow' })).toBeDisabled()
+  })
+})
 
 describe('ComputerPanel', () => {
   it('embeds the live screen and lists what is scheduled', () => {
@@ -206,6 +351,16 @@ describe('a local computer', () => {
     expect(screen.getByText(/open as a window on your desktop/)).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: "I\u2019m done signing in" }))
     expect(done).toHaveBeenCalledTimes(1)
+    vi.unstubAllGlobals()
+  })
+
+  it('tells the operator to perform recorded steps in the open window', () => {
+    vi.stubGlobal('WebSocket', class { close() {} })
+    render(<ComputerPanel info={{ ...local, window: true, workflowRecording: true }} botName="Scout" onClose={() => {}} onWindowDone={() => {}} onWorkflowStartRecording={() => {}} />)
+    expect(screen.getByText(/perform the recorded steps there/)).toBeInTheDocument()
+    expect(screen.queryByText(/sign in there/)).toBeNull()
+    expect(screen.getByText('The screen is watch-only.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: "I’m done signing in" })).toBeNull()
     vi.unstubAllGlobals()
   })
 })

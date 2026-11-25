@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  ApiError, SignedOut, answerQuestion, cancelBackgroundTask, cancelDispatchPlan, checkSession, connectEvents, createBot, fetchBackgroundTasks, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations,
+  ApiError, SignedOut, answerQuestion, cancelBackgroundTask, cancelDispatchPlan, cancelWorkflowRecording, checkSession, connectEvents, createBot, deleteWorkflow, discardWorkflowDraft, fetchBackgroundTasks, fetchBots, fetchComputer, fetchConnections, fetchConnectors, fetchConversations, fetchWorkflowTraces,
   fetchFeed, fetchGoals, fetchMcpServers, fetchMessages, fetchProviders, fetchSetup, fetchSpaces, fetchUiPrefs, fetchVault, forgetMemoryRule, removeUpload, resolveApproval, resolveRuleProposal, revokeRule, saveSettings, sendMessage, setBotConnectors, setBotMcpServers, setBotSpaceRole, setBotVaultItems,
-  setComputerShell, setComputerWindow, startDispatchPlan, steerBackgroundTask, stopThread, updateRoutine, uploadFile,
+  runWorkflow, saveWorkflowDraft, setComputerShell, setComputerWindow, startDispatchPlan, startWorkflowRecording, steerBackgroundTask, stopThread, stopWorkflowRecording, stopWorkflowRun, updateRoutine, updateWorkflowDraft, uploadFile,
 } from './api'
 import { BotModelChip, BotModelPicker, botModel, botSeesImages } from './components/BotModelPicker'
 import { ConfirmDialog, useEscape } from './components/ConfirmDialog'
@@ -27,7 +27,7 @@ import { applyHello, applyStatus, clearDone } from './presence'
 import { applyTheme, hasStoredTheme, readStoredTheme, resolveTheme, systemTheme, writeStoredTheme } from './theme'
 import { createThreadCache } from './thread-cache'
 import type {
-  BackgroundTaskPayload, BackgroundTaskView, BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, DispatchPlanPayload, DispatchPlanView, FeedSnapshot, GoalsSnapshot, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, RuleProposalPayload, SetupInfo, SpaceRole, SpacesSnapshot, ThemeSetting, VaultSnapshot,
+  BackgroundTaskPayload, BackgroundTaskView, BotStatus, BrowserStatus, ComputerInfo, ConnectionsState, ConnectorsSnapshot, Conversation, DispatchPlanPayload, DispatchPlanView, FeedSnapshot, GoalsSnapshot, McpServersSnapshot, Message, ProviderPreset, ResolvedTheme, RoutineAction, RuleProposalPayload, SetupInfo, SpaceRole, SpacesSnapshot, ThemeSetting, VaultSnapshot, WorkflowTrace,
 } from './types'
 
 const EMPTY_CONNECTORS: ConnectorsSnapshot = {
@@ -615,15 +615,15 @@ function Workspace({
     panelFetchSeqRef.current.set(botId, seq)
     bgInFlightRef.current.set(botId, (bgInFlightRef.current.get(botId) ?? 0) + 1)
     try {
-      const info = await fetchComputer(botId)
+      const [info, savedWorkflows] = await Promise.all([fetchComputer(botId), fetchWorkflowTraces(botId)])
       if (panelFetchSeqRef.current.get(botId) !== seq) return
       const liveSnapshot = new Map(liveBgDuringFetchRef.current.get(botId) ?? [])
       const mergedTasks = Array.isArray(info.backgroundTasks)
         ? overlayLiveBackgroundTasks(info.backgroundTasks, liveSnapshot)
         : undefined
       const mergedInfo: ComputerInfo = mergedTasks !== undefined
-        ? { ...info, backgroundTasks: mergedTasks }
-        : info
+        ? { ...info, backgroundTasks: mergedTasks, savedWorkflows }
+        : { ...info, savedWorkflows }
       if (mergedTasks !== undefined) {
         setBgTasksByBot((prev) => ({ ...prev, [botId]: mergedTasks }))
       }
@@ -977,10 +977,10 @@ function Workspace({
   }
 
   /** 本机模式的两个动作：网关拒了（没沙箱、自检失败）就把原因抛回面板显示；不管成败都刷新面板 */
-  const panelAction = async (run: (botId: string) => Promise<void>) => {
+  const panelAction = async <T,>(run: (botId: string) => Promise<T>): Promise<T | undefined> => {
     if (!panel) return
     try {
-      await run(panel.botId)
+      return await run(panel.botId)
     } catch (err) {
       if (err instanceof SignedOut) { setSignedOut(true); return }
       throw err
@@ -990,6 +990,23 @@ function Workspace({
   }
   const onWindowDone = () => panelAction((botId) => setComputerWindow(botId, false))
   const onShell = (enabled: boolean) => panelAction((botId) => setComputerShell(botId, enabled))
+  const onWorkflowStartRecording = (title: string, intent: string) =>
+    panelAction((botId) => startWorkflowRecording(botId, title, intent))
+  const onWorkflowStopRecording = () => panelAction(async (botId) => { await stopWorkflowRecording(botId) })
+  const onWorkflowCancelRecording = () => panelAction((botId) => cancelWorkflowRecording(botId))
+  const onWorkflowUpdateDraft = (draftId: string, trace: WorkflowTrace) =>
+    panelAction((botId) => updateWorkflowDraft(botId, draftId, trace))
+  const onWorkflowSaveDraft = (draftId: string, trace: WorkflowTrace) =>
+    panelAction(async (botId) => { await saveWorkflowDraft(botId, draftId, trace) })
+  const onWorkflowDiscardDraft = (draftId: string) =>
+    panelAction((botId) => discardWorkflowDraft(botId, draftId))
+  const onWorkflowDelete = (workflowId: string) =>
+    panelAction((botId) => deleteWorkflow(botId, workflowId))
+  const onWorkflowRun = (workflowId: string, bindings: Record<string, string>) =>
+    panelAction(async (botId) => { await runWorkflow(botId, workflowId, bindings) })
+  const onWorkflowStopRun = (runId: string) =>
+    panelAction((botId) => stopWorkflowRun(botId, runId))
+
   const onToggleConnector = (connectorId: string, granted: boolean) => panelAction(async (botId) => {
     const current = panel?.botId === botId && panel.info?.connectors
       ? panel.info.connectors.filter((c) => c.granted).map((c) => c.id)
@@ -1322,6 +1339,15 @@ function Workspace({
           onForgetRule={onForgetRule}
           onWindowDone={onWindowDone}
           onShell={onShell}
+          onWorkflowStartRecording={onWorkflowStartRecording}
+          onWorkflowStopRecording={onWorkflowStopRecording}
+          onWorkflowCancelRecording={onWorkflowCancelRecording}
+          onWorkflowUpdateDraft={onWorkflowUpdateDraft}
+          onWorkflowSaveDraft={onWorkflowSaveDraft}
+          onWorkflowDiscardDraft={onWorkflowDiscardDraft}
+          onWorkflowDelete={onWorkflowDelete}
+          onWorkflowRun={onWorkflowRun}
+          onWorkflowStopRun={onWorkflowStopRun}
           onToggleConnector={onToggleConnector}
           onToggleMcpServer={onToggleMcpServer}
           onToggleVaultItem={onToggleVaultItem}

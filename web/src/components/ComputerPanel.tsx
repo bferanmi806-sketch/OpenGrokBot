@@ -2,11 +2,12 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useT, type MessageKey, type T } from '../i18n'
 import { blockReasonText, describeSchedule, errorText, sandboxMissingText } from '../i18n/describe'
 import { ApiError } from '../api'
-import type { ActionEntry, BackgroundTaskView, ComputerInfo, ComputerRoutine, RoutineAction, SpaceRole } from '../types'
+import type { ActionEntry, BackgroundTaskView, ComputerInfo, ComputerRoutine, RoutineAction, SpaceRole, WorkflowDraft, WorkflowTrace } from '../types'
 import { untilLabel } from './ApprovalChip'
 import { BG_STATUS_KEY, MAX_BG_STEER_CHARS, formatBgTaskError, normalizeSteerNote } from './BackgroundTaskChip'
 import { CdpScreen } from './CdpScreen'
 import { PauseIcon, PlayIcon, RotateCwIcon, XIcon } from './Icons'
+import { WorkflowSection } from './WorkflowSection'
 
 const formatCount = (n: number, t: T) => n.toLocaleString(t.locale ?? 'en-US')
 
@@ -38,6 +39,15 @@ type PanelActions = {
   onWindowDone?: () => void | Promise<void>
   /** 本机模式：开关命令行（开之前网关要实测沙箱，得几秒）。失败就 reject */
   onShell?: (enabled: boolean) => void | Promise<void>
+  onWorkflowStartRecording?: (title: string, intent: string) => void | Promise<void>
+  onWorkflowStopRecording?: () => void | Promise<void>
+  onWorkflowCancelRecording?: () => void | Promise<void>
+  onWorkflowUpdateDraft?: (draftId: string, trace: WorkflowTrace) => void | WorkflowDraft | Promise<void | WorkflowDraft>
+  onWorkflowSaveDraft?: (draftId: string, trace: WorkflowTrace) => void | Promise<void>
+  onWorkflowDiscardDraft?: (draftId: string) => void | Promise<void>
+  onWorkflowDelete?: (workflowId: string) => void | Promise<void>
+  onWorkflowRun?: (workflowId: string, bindings: Record<string, string>) => void | Promise<void>
+  onWorkflowStopRun?: (runId: string) => void | Promise<void>
   /** 开关某个已连接外部账号对这位同事的访问授权 */
   onToggleConnector?: (connectorId: string, granted: boolean) => void | Promise<void>
   /** 开关某个已配置 MCP 服务对这位同事的访问授权 */
@@ -346,7 +356,7 @@ export function ComputerPanel({ info, botName, onClose, ...actions }: {
   )
 }
 
-function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWindowDone, onShell, onToggleConnector, onToggleMcpServer, onToggleVaultItem, onSetSpaceRole, onSteerBackgroundTask, onCancelBackgroundTask }: {
+function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWindowDone, onShell, onWorkflowStartRecording, onWorkflowStopRecording, onWorkflowCancelRecording, onWorkflowUpdateDraft, onWorkflowSaveDraft, onWorkflowDiscardDraft, onWorkflowDelete, onWorkflowRun, onWorkflowStopRun, onToggleConnector, onToggleMcpServer, onToggleVaultItem, onSetSpaceRole, onSteerBackgroundTask, onCancelBackgroundTask }: {
   info: ComputerInfo
   botName: string
 } & PanelActions) {
@@ -388,8 +398,8 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
       )}
       {info.window ? (
         <div className="panel-window" role="status">
-          <span>{t('panel.window')}</span>
-          {onWindowDone ? (
+          <span>{t(info.workflowRecording ? 'panel.windowWorkflow' : 'panel.window')}</span>
+          {onWindowDone && !info.workflowRecording ? (
             <button className="panel-copy" disabled={busy !== null} onClick={() => void act('window', onWindowDone)}>
               {busy === 'window' ? t('panel.windowClosing') : t('panel.windowDone')}
             </button>
@@ -422,6 +432,19 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
           </label>
         </div>
       ) : null}
+      <WorkflowSection
+        key={info.botId}
+        info={info}
+        onStartRecording={onWorkflowStartRecording}
+        onStopRecording={onWorkflowStopRecording}
+        onCancelRecording={onWorkflowCancelRecording}
+        onUpdateDraft={onWorkflowUpdateDraft}
+        onSaveDraft={onWorkflowSaveDraft}
+        onDiscardDraft={onWorkflowDiscardDraft}
+        onDeleteWorkflow={onWorkflowDelete}
+        onRun={onWorkflowRun}
+        onStopRun={onWorkflowStopRun}
+      />
       {problem ? <div className="panel-problem" role="alert">{problem}</div> : null}
 
       {info.backgroundTasks !== undefined ? (

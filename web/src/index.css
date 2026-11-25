@@ -1138,6 +1138,37 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .panel-copy:disabled { opacity: 0.5; cursor: default; }
 .panel-copy-row { display: flex; gap: 6px; flex-wrap: wrap; }
 
+.panel-workflow-card { display: grid; gap: 8px; margin-top: 8px; min-width: 0; }
+.panel-workflow-status {
+  display: grid; gap: 6px; margin-top: 8px; padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--blue) 30%, var(--border)); border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--blue) 6%, var(--bg-card)); color: var(--text-dim); font-size: 12px;
+}
+.panel-workflow-field { display: grid; gap: 4px; min-width: 0; color: var(--text-dim); font-size: 11px; }
+.panel-workflow-field input, .panel-workflow-field select {
+  width: 100%; min-width: 0; height: 30px; padding: 4px 8px;
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--bg-card); color: var(--text);
+  font: inherit; font-size: 12px;
+}
+.panel-workflow-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.panel-workflow-steps {
+  display: grid; gap: 6px; max-height: 340px; overflow: auto; padding: 2px 2px 2px 0;
+  overscroll-behavior: contain;
+}
+.panel-workflow-step {
+  display: grid; gap: 7px; min-width: 0; padding: 8px;
+  border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg-card);
+}
+.panel-workflow-step-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 6px; }
+.panel-workflow-step-head strong { color: var(--text); font-size: 11px; }
+.panel-workflow-step-type { min-width: 0; overflow: hidden; color: var(--text-faint); font-family: var(--mono); font-size: 10px; text-overflow: ellipsis; }
+.panel-workflow-step-description { min-width: 0; overflow-wrap: anywhere; color: var(--text-dim); font-size: 11px; line-height: 1.4; }
+.panel-workflow-editor, .panel-workflow-approval { display: grid; gap: 7px; min-width: 0; }
+.panel-workflow-approval { padding-top: 7px; border-top: 1px solid var(--border); }
+.panel-workflow-check { display: flex; align-items: flex-start; gap: 6px; color: var(--text-dim); font-size: 11px; line-height: 1.4; }
+.panel-workflow-check input { margin: 1px 0 0; accent-color: var(--blue); }
+.panel-workflow-muted { color: var(--text-faint); font-size: 11px; line-height: 1.4; }
+
 .panel-rule {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 8px 0; border-bottom: 1px solid var(--border);
