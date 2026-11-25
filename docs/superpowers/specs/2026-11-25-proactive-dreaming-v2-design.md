@@ -1,7 +1,7 @@
 # Phase 10 设计规格：对话反馈受控学习（`Clue → RuleProposal`）与主动提醒节奏控制
 
 **日期：** 2026-11-25  
-**状态：** 草稿（待审阅确认）  
+**状态：** 已批准  
 **分支：** `feat/proactive-dreaming-v2`（基于 `feat/wiki-autosync`）  
 **范围：** 升级主动协作模块（`gateway/src/proactive/`），包含两部分核心能力：（1）两级对话反馈受控学习（SQLite `v27` 新增 `proactive_clues` 与 `proactive_dream_state`，将重复出现的隐式抱怨或显式偏好晋升为需操作者拍板的 `RuleProposalChip`，`source: 'dreaming'`）；（2）三维主动投递节奏控制（60 秒多事件 Webhook 合并、基于持久化 `proactive_deferred` 的 3 分钟活跃聊天防打断延后，以及单同事每日 5 条非紧急提醒上限——超额自动分流至 `Today Feed` / `quiet_digest_items`）。
 
