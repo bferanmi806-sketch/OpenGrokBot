@@ -7,6 +7,11 @@ names.
 
 ## [Unreleased]
 
+### Changed
+
+- Refined the Today workspace, conversations, and computer panel with lighter borders, clearer typography, and more
+  distinct primary and secondary actions in both themes. Subscription cards now fit narrow screens.
+
 ## [0.8.1] - 2026-11-21
 
 Unified **Today** workspace (continuous custom Web Feed, auto-distilled Ideas, To-dos & Goals, and Declarative Live
