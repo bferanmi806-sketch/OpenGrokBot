@@ -1290,7 +1290,7 @@ export type QuietDigestFlushResponse = {
   threads: string[]
 }
 
-export type RuleProposalSource = 'agent' | 'discard_pattern'
+export type RuleProposalSource = 'agent' | 'discard_pattern' | 'dreaming'
 export type RuleProposalStatus = 'pending' | 'accepted' | 'dismissed'
 
 export type RuleProposalPayload = {

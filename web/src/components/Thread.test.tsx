@@ -439,8 +439,8 @@ describe('Thread', () => {
         payload: {
           proposalId: 7,
           rule: 'Never send Slack blasts on weekends',
-          reason: 'Suggested by teammate',
-          source: 'agent',
+          reason: 'You mentioned twice not to message on weekends.',
+          source: 'dreaming',
           sourceTainted: true,
           status: 'pending',
         },
@@ -482,6 +482,7 @@ describe('Thread', () => {
       />,
     )
     expect(screen.getByText('Rule proposal')).toBeInTheDocument()
+    expect(screen.getByText('Suggested from your feedback')).toBeInTheDocument()
     expect(screen.getByText('External source — review carefully')).toBeInTheDocument()
     expect(screen.getByText('Morning digest · 1 update')).toBeInTheDocument()
     expect(screen.getByText('Prepared Q3 brief.')).toBeInTheDocument()

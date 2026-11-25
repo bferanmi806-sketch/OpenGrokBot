@@ -169,6 +169,15 @@ export type AgentDeps = {
   /** Quiet Hours 静音缓冲模式：抑制 activity 卡片，非紧急 report / 最终正文存入晨报队列 */
   quietBuffer?: boolean
   onQuietBuffer?: (item: { kind: 'report' | 'text'; summary: string; payload: unknown }) => Promise<void> | void
+  /** 主动提醒节奏控制钩子：非紧急定时产出按活跃对话暂缓或按单日上限分流至晨报/Feed */
+  interceptProactiveOutput?: (item: {
+    kind: 'report' | 'text'
+    summary: string
+    payload: unknown
+    tainted: boolean
+  }) =>
+    | Promise<{ intercepted: boolean; reason?: 'deferred' | 'daily_cap' }>
+    | { intercepted: boolean; reason?: 'deferred' | 'daily_cap' }
   /** 提议一条待操作者确认的常驻规矩（不会直接写入 MEMORY.md） */
   onProposeMemoryRule?: (input: {
     rule: string
@@ -318,6 +327,8 @@ type TurnContext = AgentDeps & {
   activeMcpReadToolNames: Set<string>
   /** 本回合已按需加载的 MCP 暴露工具名 */
   loadedDeferredMcp: Set<string>
+  markBotOutput?: () => void
+  markBypassedPacing?: () => void
 }
 
 function effectiveRoutineMode(deps: Pick<AgentDeps, 'routineMode' | 'watch'>): RoutineMode {
@@ -378,14 +389,30 @@ export async function runTurn(
   const persistUserMessage = opts.persistUserMessage !== false && !alreadyStored
   const now = (deps.now ?? (() => new Date()))()
   let botPostedVisible = false
+  let turnBypassedPacing = false
   const turnEvents: AgentEvents = {
     onMessage(m) {
       if (m.sender === bot.id && m.kind !== 'activity') botPostedVisible = true
+      if (
+        m.sender === bot.id &&
+        (m.kind === 'approval_request' || m.kind === 'question' || m.kind === 'login_request')
+      ) {
+        turnBypassedPacing = true
+      }
       events.onMessage(m)
     },
     onStatus: events.onStatus,
   }
-  const say = (content: string) => turnEvents.onMessage(insertMessage(db, { threadId, sender: bot.id, kind: 'text', content }))
+  const say = (content: string) =>
+    turnEvents.onMessage(
+      insertMessage(db, {
+        threadId,
+        sender: bot.id,
+        kind: 'text',
+        content,
+        createdAt: (deps.now ?? (() => new Date()))().getTime(),
+      }),
+    )
   /** 网关替同事说的固定话：content 是英文（模型和老界面看这个），payload 让界面换成操作者的语言 */
   const notify = (n: Notice) => turnEvents.onMessage(insertMessage(db, { threadId, sender: bot.id, kind: 'text', content: noticeText(n), payload: n }))
   if (persistUserMessage) {
@@ -574,6 +601,12 @@ export async function runTurn(
       activeTools,
       activeMcpReadToolNames,
       loadedDeferredMcp,
+      markBotOutput: () => {
+        botPostedVisible = true
+      },
+      markBypassedPacing: () => {
+        turnBypassedPacing = true
+      },
     }
     let taintNotified = false
     const notifyTainted = () => {
@@ -729,8 +762,18 @@ export async function runTurn(
         (effectiveMode === 'prepare' && Boolean(text && PREPARE_QUIET.test(text)))
       if (text && !silent) {
         deps.onFinalText?.(text)
-        if (deps.quietBuffer && deps.onQuietBuffer) {
+        if (deps.quietBuffer && deps.onQuietBuffer && !turnBypassedPacing) {
           await deps.onQuietBuffer({ kind: 'text', summary: text, payload: { text } })
+        } else if (deps.interceptProactiveOutput && !turnBypassedPacing) {
+          const res = await deps.interceptProactiveOutput({
+            kind: 'text',
+            summary: text,
+            payload: { text },
+            tainted: Boolean(ctx.turnTainted),
+          })
+          if (!res.intercepted) {
+            say(text)
+          }
         } else {
           say(text)
         }
@@ -1563,14 +1606,43 @@ async function execMessageUser(
   if (args.kind !== 'report') return { ok: false, text: 'Unsupported kind; only "report" exists today.' }
   const payload = validateReportPayload(args.payload)
   if (!payload) return { ok: false, text: 'Invalid report payload: need lines[] of {system, result, count?} plus optional closing.' }
+  if (args.urgent === true) {
+    deps.markBypassedPacing?.()
+  }
   if (deps.quietBuffer && deps.onQuietBuffer && args.urgent !== true) {
+    deps.markBotOutput?.()
     await deps.onQuietBuffer({ kind: 'report', summary: reportSummary(payload), payload })
     return {
       ok: true,
-      text: 'Report buffered for the morning digest (Quiet Hours are active). If this is time-critical and cannot wait, call message_user again with urgent: true.',
+      text: 'Report buffered for the morning digest (Quiet Hours are active). Do not repeat this report in plain text; if this is time-critical and cannot wait, call message_user again with urgent: true.',
     }
   }
-  const message = insertMessage(deps.db, { threadId: deps.threadId, sender: deps.bot.id, kind: 'report', payload })
+  if (deps.interceptProactiveOutput && args.urgent !== true) {
+    const intercepted = await deps.interceptProactiveOutput({
+      kind: 'report',
+      summary: reportSummary(payload),
+      payload,
+      tainted: Boolean(deps.turnTainted),
+    })
+    if (intercepted.intercepted) {
+      deps.markBotOutput?.()
+      deps.onReportFiled?.(reportSummary(payload))
+      return {
+        ok: true,
+        text:
+          intercepted.reason === 'daily_cap'
+            ? 'Report filed to Today Feed and the digest queue (daily non-urgent chat notification cap reached). Do not repeat this report in plain text; only call message_user again with urgent: true if genuinely time-critical.'
+            : 'Report queued for delivery once the active conversation is quiet. Do not repeat this report in plain text.',
+      }
+    }
+  }
+  const message = insertMessage(deps.db, {
+    threadId: deps.threadId,
+    sender: deps.bot.id,
+    kind: 'report',
+    payload,
+    createdAt: (deps.now ?? (() => new Date()))().getTime(),
+  })
   events.onMessage(message)
   deps.onReportDelivered?.({ message, payload, ruleBlock: deps.ruleBlock })
   deps.onReportFiled?.(reportSummary(payload))

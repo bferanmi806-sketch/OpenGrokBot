@@ -428,6 +428,7 @@ describe('the Chinese dictionary', () => {
       'ruleProposal.title',
       'ruleProposal.sourceDiscard',
       'ruleProposal.sourceAgent',
+      'ruleProposal.sourceDreaming',
       'ruleProposal.taintedBadge',
       'ruleProposal.ruleLabel',
       'ruleProposal.rulePlaceholder',
@@ -484,6 +485,8 @@ describe('the Chinese dictionary', () => {
     expect(zhCN['settings.quietHours.hint']).toContain('值守（watch）')
     expect(en['settings.quietHours.deliveredOne']).toBe('Delivered 1 buffered update.')
     expect(zhCN['settings.quietHours.deliveredOne']).toBe('已投递 1 条暂存更新。')
+    expect(en['ruleProposal.sourceDreaming']).toBe('Suggested from your feedback')
+    expect(zhCN['ruleProposal.sourceDreaming']).toBe('根据你的对话反馈提议')
     expect(en['ruleProposal.taintedBadge']).toBe('External source — review carefully')
     expect(zhCN['ruleProposal.taintedBadge']).toBe('来自外部内容，请仔细核对')
     expect(translate('en', 'ruleProposal.tooLongError', { max: 300 })).toBe('Rule must be 300 characters or fewer.')
@@ -1242,7 +1245,7 @@ describe('Proactive Quiet Digest & Rule Proposals API client', () => {
       proposalId: 7,
       rule: sampleProposal.rule,
       reason: sampleProposal.reason,
-      source: 'agent',
+      source: 'dreaming',
       sourceTainted: true,
       status: 'pending',
     }

@@ -125,6 +125,77 @@ describe('RuleProposalChip', () => {
     expect(screen.getByText('根据多次驳回自动提议')).toBeInTheDocument()
   })
 
+  it('renders dreaming source label and tainted badge in EN and zh-CN across pending and resolved states', () => {
+    const { rerender } = render(
+      <RuleProposalChip
+        payload={pending({
+          source: 'dreaming',
+          sourceTainted: false,
+          reason: 'You asked twice not to push package delivery updates.',
+        })}
+        onResolve={() => {}}
+      />,
+    )
+    expect(screen.getByText('Suggested from your feedback')).toBeInTheDocument()
+    expect(screen.queryByRole('note')).toBeNull()
+
+    rerender(
+      <RuleProposalChip
+        payload={pending({
+          source: 'dreaming',
+          sourceTainted: true,
+        })}
+        onResolve={() => {}}
+      />,
+    )
+    expect(screen.getByText('Suggested from your feedback')).toBeInTheDocument()
+    expect(screen.getByRole('note')).toHaveTextContent('External source — review carefully')
+
+    rerender(
+      <RuleProposalChip
+        payload={pending({
+          source: 'dreaming',
+          sourceTainted: true,
+          status: 'accepted',
+          edited: false,
+        })}
+      />,
+    )
+    expect(screen.getByText('Saved to MEMORY.md')).toBeInTheDocument()
+    expect(screen.getByText('Suggested from your feedback')).toBeInTheDocument()
+    expect(screen.getByText('External source — review carefully')).toBeInTheDocument()
+
+    rerender(
+      <I18nProvider lang="zh-CN">
+        <RuleProposalChip
+          payload={pending({
+            source: 'dreaming',
+            sourceTainted: true,
+            status: 'pending',
+          })}
+          onResolve={() => {}}
+        />
+      </I18nProvider>,
+    )
+    expect(screen.getByText('根据你的对话反馈提议')).toBeInTheDocument()
+    expect(screen.getByRole('note')).toHaveTextContent('来自外部内容，请仔细核对')
+
+    rerender(
+      <I18nProvider lang="zh-CN">
+        <RuleProposalChip
+          payload={pending({
+            source: 'dreaming',
+            sourceTainted: true,
+            status: 'dismissed',
+          })}
+        />
+      </I18nProvider>,
+    )
+    expect(screen.getByText('已忽略此规矩提议')).toBeInTheDocument()
+    expect(screen.getByText('根据你的对话反馈提议')).toBeInTheDocument()
+    expect(screen.getByText('来自外部内容，请仔细核对')).toBeInTheDocument()
+  })
+
   it('resets draft when proposalId changes', () => {
     const { rerender } = render(<RuleProposalChip payload={pending({ proposalId: 1, rule: 'First rule' })} onResolve={() => {}} />)
     const textarea = screen.getByLabelText('Standing rule (editable)') as HTMLTextAreaElement

@@ -764,6 +764,66 @@ const MIGRATIONS: Migration[] = [
       );
     `)
   },
+  // v27：主动消息对话反馈受控学习线索池（proactive_clues）、复盘游标（proactive_dream_state）、独立线程污染水位（proactive_thread_taint）与活跃对话暂缓投递表（proactive_deferred）
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS proactive_clues (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT NOT NULL,
+        area_key TEXT NOT NULL,
+        area_label TEXT NOT NULL,
+        time_window TEXT NOT NULL DEFAULT '',
+        leaning TEXT NOT NULL,
+        evidence TEXT NOT NULL DEFAULT '',
+        seen_count INTEGER NOT NULL DEFAULT 1,
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        last_proactive_message_id INTEGER NOT NULL DEFAULT 0,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        UNIQUE(bot_id, area_key, time_window, leaning)
+      );
+      CREATE INDEX IF NOT EXISTS idx_proactive_clues_bot
+        ON proactive_clues(bot_id, last_seen_at DESC);
+
+      CREATE TABLE IF NOT EXISTS proactive_dream_state (
+        proactive_message_id INTEGER PRIMARY KEY,
+        bot_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        evaluated_through_id INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_proactive_dream_bot
+        ON proactive_dream_state(bot_id, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS proactive_deferred (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        routine_id INTEGER,
+        routine_name TEXT NOT NULL DEFAULT '',
+        routine_mode TEXT NOT NULL DEFAULT 'watch',
+        kind TEXT NOT NULL DEFAULT 'text',
+        summary TEXT NOT NULL DEFAULT '',
+        payload_json TEXT,
+        source_tainted INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        deliver_after INTEGER NOT NULL,
+        delivered_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_proactive_deferred_pending
+        ON proactive_deferred(delivered_at, deliver_after, id);
+      CREATE INDEX IF NOT EXISTS idx_proactive_deferred_bot_delivered
+        ON proactive_deferred(bot_id, delivered_at DESC);
+
+      CREATE TABLE IF NOT EXISTS proactive_thread_taint (
+        thread_id TEXT PRIMARY KEY,
+        last_tainted_message_id INTEGER NOT NULL DEFAULT 0,
+        last_tainted_at INTEGER NOT NULL DEFAULT 0,
+        pending_taint INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
+    `)
+  },
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

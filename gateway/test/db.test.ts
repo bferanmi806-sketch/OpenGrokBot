@@ -228,6 +228,89 @@ describe('schema migrations', () => {
     })
     upgraded.close()
   })
+
+  it('migrates v26 databases to v27 with proactive_clues, proactive_dream_state, and proactive_deferred tables and indexes', () => {
+    expect(SCHEMA_VERSION).toBe(27)
+    const path = tempDb()
+    const initial = openDb(path)
+    initial.exec(`
+      DROP INDEX IF EXISTS idx_proactive_clues_bot;
+      DROP TABLE IF EXISTS proactive_clues;
+      DROP INDEX IF EXISTS idx_proactive_dream_bot;
+      DROP TABLE IF EXISTS proactive_dream_state;
+      DROP INDEX IF EXISTS idx_proactive_deferred_pending;
+      DROP TABLE IF EXISTS proactive_deferred;
+    `)
+    initial.pragma('user_version = 26')
+    initial.close()
+
+    const migrated: [number, number][] = []
+    const upgraded = openDb(path, { onMigrate: (from, to) => migrated.push([from, to]) })
+    expect(migrated).toEqual([[26, 27]])
+    expect(schemaVersion(upgraded)).toBe(27)
+
+    const tables = (
+      upgraded.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]
+    ).map((r) => r.name)
+    expect(tables).toEqual(expect.arrayContaining([
+      'proactive_clues',
+      'proactive_dream_state',
+      'proactive_deferred',
+      'proactive_thread_taint',
+    ]))
+
+    const indexes = (
+      upgraded.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]
+    ).map((r) => r.name)
+    expect(indexes).toEqual(expect.arrayContaining([
+      'idx_proactive_clues_bot',
+      'idx_proactive_dream_bot',
+      'idx_proactive_deferred_pending',
+      'idx_proactive_deferred_bot_delivered',
+    ]))
+
+    const clueCols = (
+      upgraded.prepare('PRAGMA table_info(proactive_clues)').all() as { name: string }[]
+    ).map((c) => c.name)
+    expect(clueCols).toContain('last_proactive_message_id')
+
+    upgraded
+      .prepare(
+        `INSERT INTO proactive_clues
+           (bot_id, area_key, area_label, time_window, leaning, evidence, seen_count, source_tainted, first_seen_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('researcher', 'package-deliveries', 'Package deliveries', '', 'stay_silent', 'No need to ping', 1, 0, 1000, 1000)
+    expect(() =>
+      upgraded
+        .prepare(
+          `INSERT INTO proactive_clues
+             (bot_id, area_key, area_label, time_window, leaning, first_seen_at, last_seen_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run('researcher', 'package-deliveries', 'Package deliveries', '', 'stay_silent', 2000, 2000),
+    ).toThrow()
+
+    upgraded
+      .prepare(
+        `INSERT INTO proactive_dream_state (proactive_message_id, bot_id, thread_id, evaluated_through_id, updated_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(10, 'researcher', 'dm:researcher', 12, 2000)
+
+    upgraded
+      .prepare(
+        `INSERT INTO proactive_deferred
+           (bot_id, thread_id, routine_id, routine_name, routine_mode, kind, summary, payload_json, source_tainted, created_at, deliver_after, delivered_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      )
+      .run('researcher', 'dm:researcher', 1, 'Watch', 'watch', 'text', 'Summary', '{"text":"Summary"}', 1, 3000, 4000)
+
+    expect(upgraded.prepare('SELECT COUNT(*) AS n FROM proactive_clues').get()).toEqual({ n: 1 })
+    expect(upgraded.prepare('SELECT COUNT(*) AS n FROM proactive_dream_state').get()).toEqual({ n: 1 })
+    expect(upgraded.prepare('SELECT COUNT(*) AS n FROM proactive_deferred').get()).toEqual({ n: 1 })
+    upgraded.close()
+  })
 })
 
 describe('the per-teammate shell switch (schema v4)', () => {

@@ -74,6 +74,21 @@ import {
   resolveRuleProposal,
   type RuleProposalStatus,
 } from './proactive/rule-proposals.js'
+import {
+  markDreamThreadTainted,
+  runProactiveDreaming as runDreamingEngine,
+  settleDreamThreadTaint,
+  type ProactiveDreamResult,
+} from './proactive/dreaming.js'
+import {
+  createWebhookCoalescer,
+  enqueueDeferredProactive,
+  flushDeferredProactive,
+  interceptRoutineProactiveOutput,
+  normalizeProactivePacing,
+  writeOverflowToFeedAndDigest,
+  type ProactivePacingOptions,
+} from './proactive/pacing.js'
 import { screenPagePath, screencastPath } from './screen.js'
 import { saveScreenshot, screenshotFilePath } from './screenshots.js'
 import { listSkills, readSkill, skillsDir } from './skills.js'
@@ -233,6 +248,8 @@ export type AppDeps = {
   webResearch?: WebResearchDeps
   /** 操作者对话结束后在后台自动提炼灵感、待办与目标（main.ts 默认开启） */
   autoDistill?: boolean
+  /** 三维主动投递节奏控制（60s Webhook 合并、3m 活跃对话延后、单日 5 条非紧急上限；main.ts 默认开启） */
+  proactivePacing?: boolean | ProactivePacingOptions
   env?: Record<string, string | undefined>
 }
 
@@ -247,6 +264,10 @@ export type GatewayApp = {
   isBusy(botId: string): boolean
   /** Quiet Hours 结束后投递积压的晨报；仍在静音时段内时返回 flushed: 0 */
   flushQuietDigestsIfDue(): QuietDigestFlushResult
+  /** 检查并投递已满静默期的暂缓主动提醒 */
+  flushDeferredProactiveIfDue(nowMs?: number): Promise<number>
+  /** 从主动通知后的操作者回复中受控学习常驻偏好（Clue -> RuleProposalChip） */
+  runProactiveDreaming(opts?: { force?: boolean }): Promise<ProactiveDreamResult>
   /** 从闲置（或手动强制）对话增量同步实体事实到团队 Wiki */
   syncWikiFromChats(opts?: { force?: boolean }): Promise<WikiSyncResult>
   /** 收拾上传目录：没挂到消息上的过期上传、对不上账的文件。启动时和之后每小时跑一次 */
@@ -355,6 +376,8 @@ type TurnOpts = {
   routineMode?: RoutineMode
   /** Quiet Hours 静音缓冲模式：非紧急报告与正文入晨报队列 */
   quietBuffer?: boolean
+  /** 非手动主动巡检回合：启用活跃对话暂缓与单日非紧急提醒上限 */
+  proactivePaced?: boolean
   routineId?: number
   routineName?: string
   /** 唤醒文本里已经带了外部服务返回内容时，起点即算 outside-data */
@@ -465,6 +488,27 @@ export function createApp(deps: AppDeps): GatewayApp {
   let gatewayStopping = false
   const wikiSyncAbort = new AbortController()
   let activeWikiSync: Promise<void> = Promise.resolve()
+  const dreamingAbort = new AbortController()
+  let activeDreaming: Promise<void> = Promise.resolve()
+  const pacingCfg = normalizeProactivePacing(deps.proactivePacing)
+  const markThreadTainted = (tid: string, at = now().getTime()) => {
+    markWikiSyncThreadTainted(db, tid, at)
+    markDreamThreadTainted(db, tid, at)
+  }
+  const settleThreadTainted = (tid: string, at = now().getTime()) => {
+    markWikiSyncThreadTainted(db, tid, at)
+    settleDreamThreadTaint(db, tid, at)
+  }
+  const webhookCoalescer = createWebhookCoalescer({
+    coalesceMs: pacingCfg.webhookCoalesceMs,
+    isRoutineRunning: (routineId) => routinesInFlight.has(routineId),
+    onFlush: (routineId, combinedPayload) => {
+      if (gatewayStopping || !db.open) return 'gone'
+      const current = getRoutine(db, routineId)
+      if (!current) return 'gone'
+      return runRoutine(current, { payload: combinedPayload })
+    },
+  })
 
   async function sweepAmbientFeedTopics(): Promise<void> {
     const at = now().getTime()
@@ -874,7 +918,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       const ids = waiting.get(threadId) ?? new Set<number>()
       for (const row of stored) ids.add(row.id)
       waiting.set(threadId, ids)
-      if (item.tainted) markWikiSyncThreadTainted(db, threadId, now().getTime())
+      if (item.tainted) markThreadTainted(threadId)
       void startTurn(bot, threadId, text, {
         origin: 'operator',
         alreadyStored: true,
@@ -885,7 +929,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     },
     startIncubation: (bot, idea) => {
       const threadId = ensureDmThread(db, bot.id)
-      if (idea.tainted) markWikiSyncThreadTainted(db, threadId, now().getTime())
+      if (idea.tainted) markThreadTainted(threadId)
       const prompt = [
         `Read-only idea incubation for: "${idea.title}"`,
         idea.notes ? `Context: ${idea.notes}` : '',
@@ -930,7 +974,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       const ids = waiting.get(threadId) ?? new Set<number>()
       for (const row of stored) ids.add(row.id)
       waiting.set(threadId, ids)
-      if (idea.tainted) markWikiSyncThreadTainted(db, threadId, now().getTime())
+      if (idea.tainted) markThreadTainted(threadId)
       void startTurn(bot, threadId, text, {
         origin: 'operator',
         alreadyStored: true,
@@ -1007,7 +1051,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       const ids = waiting.get(threadId) ?? new Set<number>()
       for (const row of stored) ids.add(row.id)
       waiting.set(threadId, ids)
-      if (hasTaintedItems) markWikiSyncThreadTainted(db, threadId, now().getTime())
+      if (hasTaintedItems) markThreadTainted(threadId)
       void startTurn(bot, threadId, text, {
         origin: 'operator',
         alreadyStored: true,
@@ -1062,6 +1106,50 @@ export function createApp(deps: AppDeps): GatewayApp {
       opts,
     )
     activeWikiSync = runPromise.then(
+      () => {},
+      () => {},
+    )
+    return runPromise
+  }
+
+  function isInteractiveBusyDuringRoutine(threadId: string): boolean {
+    if (waiting.has(threadId) || rounds.isThreadBusy(threadId)) return true
+    for (const active of workflowRuns.values()) {
+      if (active.threadId === threadId && active.phase.kind === 'running') return true
+    }
+    return false
+  }
+
+  async function flushDeferredProactiveIfDue(overrideNowMs?: number): Promise<number> {
+    if (gatewayStopping || !db.open) return 0
+    return flushDeferredProactive(db, {
+      pacing: pacingCfg,
+      hub,
+      timeZone: deps.timeZone,
+      nowMs: overrideNowMs ?? now().getTime(),
+      isThreadBusy: isThreadBusyForWikiSync,
+      isQuietHoursActive: (ms) => isInQuietHours(new Date(ms), quietSettings(), deps.timeZone),
+      feedSurfaceForRoutine: (rId, mode) =>
+        (rId !== null ? getRoutine(db, rId)?.surface : undefined) ?? (mode === 'watch' ? 'both' : 'thread'),
+    })
+  }
+
+  function runProactiveDreaming(opts?: { force?: boolean }): Promise<ProactiveDreamResult> {
+    const runPromise = runDreamingEngine(
+      {
+        db,
+        dataDir,
+        hub,
+        llm,
+        llmForBot: (botId) => deps.llmFor?.(botId).llm ?? llm,
+        isThreadBusy: isThreadBusyForWikiSync,
+        isStopping: () => gatewayStopping,
+        signal: dreamingAbort.signal,
+        now: () => now().getTime(),
+      },
+      opts,
+    )
+    activeDreaming = runPromise.then(
       () => {},
       () => {},
     )
@@ -1198,6 +1286,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     tainted?: boolean
     onTainted?: () => void
     quietBuffer?: boolean
+    proactivePaced?: boolean
     routineId?: number
     routineName?: string
     feedSurface?: RoutineSurface
@@ -1297,6 +1386,8 @@ export function createApp(deps: AppDeps): GatewayApp {
     // 这位同事此刻用的模型：回合开始时定下，回合中途改了设置从下一回合起生效
     const own = deps.llmFor?.(bot.id)
     const vision = own ? own.vision : (typeof deps.vision === 'function' ? deps.vision() : deps.vision) === true
+    let feedWrittenInTurn = false
+    let turnPacingDecision: { kind: 'delivered' | 'deferred' | 'daily_cap'; deliverAfter?: number } | null = null
     return {
       db,
       llm: own?.llm ?? llm,
@@ -1328,7 +1419,10 @@ export function createApp(deps: AppDeps): GatewayApp {
           topicId: params.feedTopicId ?? null,
           now: now().getTime(),
         })
-        if (res.ok) params.onFeedCardPublished?.()
+        if (res.ok) {
+          feedWrittenInTurn = true
+          params.onFeedCardPublished?.()
+        }
         return res
       },
       onWebSearch: (args) => runWebSearch(args, deps.webResearch),
@@ -1388,6 +1482,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       onReportDelivered: ({ message, payload, ruleBlock }) => {
         const shouldProject = Boolean(isWatch || params.feedSurface === 'feed' || params.feedSurface === 'both')
         if (shouldProject) {
+          feedWrittenInTurn = true
           projectReportToFeed({
             db,
             hub,
@@ -1561,6 +1656,81 @@ export function createApp(deps: AppDeps): GatewayApp {
           })
         },
       } : {}),
+      ...(params.proactivePaced && pacingCfg.enabled ? {
+        interceptProactiveOutput: (item: {
+          kind: 'report' | 'text'
+          summary: string
+          payload: unknown
+          tainted: boolean
+        }) => {
+          const atMs = now().getTime()
+          // Keep trailing text in the same routine turn consistent with an earlier report without burning a 2nd daily slot (I1.2)
+          if (turnPacingDecision !== null) {
+            if (turnPacingDecision.kind === 'delivered') {
+              return { intercepted: false }
+            }
+            if (turnPacingDecision.kind === 'deferred') {
+              enqueueDeferredProactive(db, {
+                botId: bot.id,
+                threadId,
+                routineId: params.routineId ?? null,
+                routineName: params.routineName ?? '',
+                routineMode: effectiveMode,
+                kind: item.kind,
+                summary: item.summary,
+                payload: item.payload,
+                alreadyInFeed: true,
+                sourceTainted: item.tainted,
+                createdAt: atMs,
+                deliverAfter: turnPacingDecision.deliverAfter ?? atMs + pacingCfg.quietChatMs,
+              })
+              return { intercepted: true, reason: 'deferred' }
+            }
+            writeOverflowToFeedAndDigest(db, {
+              botId: bot.id,
+              threadId,
+              routineId: params.routineId ?? null,
+              routineName: params.routineName ?? '',
+              routineMode: effectiveMode,
+              kind: item.kind,
+              summary: item.summary,
+              payload: item.payload,
+              alreadyInFeed: true,
+              nowMs: atMs,
+              hub,
+            })
+            return { intercepted: true, reason: 'daily_cap' }
+          }
+
+          const outcome = interceptRoutineProactiveOutput(db, {
+            pacing: pacingCfg,
+            botId: bot.id,
+            threadId,
+            routineId: params.routineId ?? null,
+            routineName: params.routineName ?? '',
+            routineMode: effectiveMode,
+            kind: item.kind,
+            summary: item.summary,
+            payload: item.payload,
+            tainted: item.tainted,
+            alreadyInFeed: feedWrittenInTurn,
+            isInteractiveBusy: isInteractiveBusyDuringRoutine,
+            timeZone: deps.timeZone,
+            nowMs: atMs,
+            hub,
+          })
+          if (outcome.intercepted) {
+            const reason = outcome.reason ?? 'deferred'
+            turnPacingDecision = { kind: reason, deliverAfter: outcome.deliverAfter }
+            if (reason === 'daily_cap') {
+              feedWrittenInTurn = true
+            }
+          } else {
+            turnPacingDecision = { kind: 'delivered' }
+          }
+          return outcome
+        },
+      } : {}),
       ...(skills.length ? { skills, onReadSkill: (name: string) => readSkill(skillsDir(dataDir), name) } : {}),
       checkBudget: () => budgetNote(bot),
       language: uiLanguage(),
@@ -1626,6 +1796,7 @@ export function createApp(deps: AppDeps): GatewayApp {
         if (!routine || routine.bot_id !== bot.id) return { ok: false, reason: `You have no routine #${id}.` }
         setRoutineEnabled(db, id, false)
         scheduler?.remove(id)
+        webhookCoalescer.cancel(id)
         return { ok: true, name: routine.name }
       },
     }
@@ -1643,7 +1814,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     }
     let bgTainted = Boolean(ctx.task.sourceTainted)
     if (bgTainted) {
-      markWikiSyncThreadTainted(db, ctx.task.threadId, now().getTime())
+      markThreadTainted(ctx.task.threadId)
     }
     let finalText = ''
     let reportSummary = ''
@@ -1660,8 +1831,9 @@ export function createApp(deps: AppDeps): GatewayApp {
         ...(ctx.task.sourceTainted ? { tainted: true } : {}),
         onTainted: () => {
           bgTainted = true
+          ctx.markTainted?.()
           try {
-            markWikiSyncThreadTainted(db, ctx.task.threadId, now().getTime())
+            markThreadTainted(ctx.task.threadId)
           } catch {
             // Ignore closed DB during shutdown
           }
@@ -1695,22 +1867,22 @@ export function createApp(deps: AppDeps): GatewayApp {
         hiddenIds,
       })
       if (outcome === 'stopped' || ctx.signal.aborted) {
-        return { status: 'cancelled' }
+        return { status: 'cancelled', tainted: bgTainted }
       }
       if (outcome === 'error') {
-        return { status: 'failed', error: 'Background task encountered an error.' }
+        return { status: 'failed', error: 'Background task encountered an error.', tainted: bgTainted }
       }
       if (outcome === 'budget') {
-        return { status: 'failed', error: 'Daily token budget reached.' }
+        return { status: 'failed', error: 'Daily token budget reached.', tainted: bgTainted }
       }
       if (outcome === 'limit') {
-        return { status: 'failed', error: 'Turn step or time limit reached.' }
+        return { status: 'failed', error: 'Turn step or time limit reached.', tainted: bgTainted }
       }
-      return { status: 'completed', summary: finalText || reportSummary || 'Completed.' }
+      return { status: 'completed', summary: finalText || reportSummary || 'Completed.', tainted: bgTainted }
     } finally {
       if (bgTainted) {
         try {
-          markWikiSyncThreadTainted(db, ctx.task.threadId, now().getTime())
+          settleThreadTainted(ctx.task.threadId)
         } catch {
           // Ignore closed DB during shutdown
         }
@@ -1906,7 +2078,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       const waitCapture = captureTurnWaits(ctx.plan.threadId)
       let stepTainted = ctx.initialTainted
       if (stepTainted) {
-        markWikiSyncThreadTainted(db, ctx.plan.threadId, now().getTime())
+        markThreadTainted(ctx.plan.threadId)
       }
       let finalText = ''
       let reportSummary = ''
@@ -1939,7 +2111,7 @@ Complete your step and post a concise summary of your findings or output in this
           onTainted: () => {
             stepTainted = true
             try {
-              markWikiSyncThreadTainted(db, ctx.plan.threadId, now().getTime())
+              markThreadTainted(ctx.plan.threadId)
             } catch {
               // Ignore closed DB during shutdown
             }
@@ -2019,7 +2191,7 @@ Complete your step and post a concise summary of your findings or output in this
       } finally {
         if (stepTainted) {
           try {
-            markWikiSyncThreadTainted(db, ctx.plan.threadId, now().getTime())
+            settleThreadTainted(ctx.plan.threadId)
           } catch {
             // Ignore closed DB during shutdown
           }
@@ -2045,7 +2217,7 @@ Complete your step and post a concise summary of your findings or output in this
 
   function startTurn(bot: BotRow, threadId: string, text: string, opts: TurnOpts): Promise<void> {
     if (opts.tainted === true || opts.origin === 'webhook') {
-      markWikiSyncThreadTainted(db, threadId, now().getTime())
+      markThreadTainted(threadId)
     }
     let notifiedFinished = false
     const done = turns.run(bot.id, threadId, async (signal) => {
@@ -2071,7 +2243,7 @@ Complete your step and post a concise summary of your findings or output in this
       const waitCapture = opts.onTurnFinished ? captureTurnWaits(threadId) : null
       let turnTainted = opts.tainted === true || opts.origin === 'webhook'
       if (turnTainted) {
-        markWikiSyncThreadTainted(db, threadId, now().getTime())
+        markThreadTainted(threadId)
       }
       let finalText = ''
       let reportSummary = ''
@@ -2093,13 +2265,14 @@ Complete your step and post a concise summary of your findings or output in this
           onTainted: () => {
             turnTainted = true
             try {
-              markWikiSyncThreadTainted(db, threadId, now().getTime())
+              markThreadTainted(threadId)
             } catch {
               // Ignore closed DB during shutdown
             }
             opts.onTainted?.()
           },
           ...(opts.quietBuffer ? { quietBuffer: true } : {}),
+          ...(opts.proactivePaced ? { proactivePaced: true } : {}),
           ...(opts.routineId !== undefined ? { routineId: opts.routineId } : {}),
           ...(opts.routineName !== undefined ? { routineName: opts.routineName } : {}),
           ...(opts.feedSurface ? { feedSurface: opts.feedSurface } : {}),
@@ -2139,7 +2312,7 @@ Complete your step and post a concise summary of your findings or output in this
       } finally {
         if (turnTainted) {
           try {
-            markWikiSyncThreadTainted(db, threadId, now().getTime())
+            settleThreadTainted(threadId)
           } catch {
             // Ignore closed DB during shutdown
           }
@@ -2199,7 +2372,7 @@ Complete your step and post a concise summary of your findings or output in this
 
     const targetThread = ensureDmThread(db, target.id)
     if (tainted) {
-      markWikiSyncThreadTainted(db, targetThread, now().getTime())
+      markThreadTainted(targetThread)
     }
     const chip = insertMessage(db, {
       threadId: targetThread, sender: from.id, kind: 'bot_ref',
@@ -3204,6 +3377,7 @@ Complete your step and post a concise summary of your findings or output in this
             routineMode: fresh.mode,
             feedSurface,
             ...(quietBuffer ? { quietBuffer: true } : {}),
+            ...(!opts.force && pacingCfg.enabled ? { proactivePaced: true } : {}),
             routineId: fresh.id,
             routineName: fresh.name,
             ...goalOpt,
@@ -3215,6 +3389,7 @@ Complete your step and post a concise summary of your findings or output in this
       const postPayload = () => {
         const chip = insertMessage(db, {
           threadId, sender: 'webhook', kind: 'webhook', payload: { routineId: fresh.id, name: fresh.name, body: payload },
+          createdAt: now().getTime(),
         })
         hub.broadcast({ type: 'message', threadId, message: chip })
       }
@@ -3235,6 +3410,7 @@ Complete your step and post a concise summary of your findings or output in this
           watch,
           routineMode: fresh.mode,
           feedSurface,
+          ...(!opts.force && pacingCfg.enabled ? { proactivePaced: true } : {}),
           routineId: fresh.id,
           routineName: fresh.name,
           ...goalOpt,
@@ -3246,6 +3422,7 @@ Complete your step and post a concise summary of your findings or output in this
       const remaining = (routineBotsInFlight.get(bot.id) ?? 1) - 1
       if (remaining === 0) routineBotsInFlight.delete(bot.id)
       else routineBotsInFlight.set(bot.id, remaining)
+      webhookCoalescer.notifyRoutineIdle(fresh.id)
     }
   }
 
@@ -3976,16 +4153,35 @@ Complete your step and post a concise summary of your findings or output in this
     const seenBefore = deliveries.get(routine.id) ?? []
     if (marks.some((m) => seenBefore.includes(m))) return c.json({ ok: true, duplicate: true })
     if (!routine.enabled) return c.json({ error: 'this routine is paused' }, 409)
-    if (routinesInFlight.has(routine.id)) return c.json({ error: 'still running the last call; try again later' }, 409)
+    if (pacingCfg.webhookCoalesceMs <= 0 && routinesInFlight.has(routine.id)) {
+      return c.json({ error: 'still running the last call; try again later' }, 409)
+    }
+    const raw = bytes.toString('utf8')
+    const formattedPayload = describeWebhookBody(raw, c.req.header('content-type'))
+    if (pacingCfg.webhookCoalesceMs > 0) {
+      const enqueued = webhookCoalescer.enqueue(routine.id, formattedPayload)
+      if (!enqueued.ok) {
+        return c.json(
+          { error: 'Too many queued webhook events for this routine', code: 'webhook_queue_full' },
+          429,
+        )
+      }
+      for (const mark of marks) rememberDelivery(routine.id, mark)
+      recordAction(db, {
+        botId: routine.bot_id, threadId: `dm:${routine.bot_id}`, trigger: 'webhook', tool: 'webhook', at: now().getTime(),
+        summary: `routine #${routine.id} "${routine.name}" called${signature ? ` by GitHub${event ? ` (${event})` : ''}` : ''} `
+          + `(${raw.length.toLocaleString('en-US')} characters)`,
+      })
+      return c.json({ ok: true, coalesced: true }, 202)
+    }
     // 只记真正接下来的投递：被 409 挡回去的那次，GitHub 之后重投时还得算数
     for (const mark of marks) rememberDelivery(routine.id, mark)
-    const raw = bytes.toString('utf8')
     recordAction(db, {
       botId: routine.bot_id, threadId: `dm:${routine.bot_id}`, trigger: 'webhook', tool: 'webhook', at: now().getTime(),
       summary: `routine #${routine.id} "${routine.name}" called${signature ? ` by GitHub${event ? ` (${event})` : ''}` : ''} `
         + `(${raw.length.toLocaleString('en-US')} characters)`,
     })
-    void runRoutine(routine, { payload: describeWebhookBody(raw, c.req.header('content-type')) })
+    void runRoutine(routine, { payload: formattedPayload })
     return c.json({ ok: true }, 202)
   })
 
@@ -4033,7 +4229,10 @@ Complete your step and post a concise summary of your findings or output in this
     if (hasEnabled) {
       updated = setRoutineEnabled(db, id, body.enabled as boolean)!
       if (body.enabled) scheduler?.add(updated)
-      else scheduler?.remove(id)
+      else {
+        scheduler?.remove(id)
+        webhookCoalescer.cancel(id)
+      }
     }
     if (nextGoalId !== undefined) {
       updated = setRoutineGoal(db, id, nextGoalId)!
@@ -4049,6 +4248,7 @@ Complete your step and post a concise summary of your findings or output in this
     const existing = getRoutine(db, id)
     if (!existing || !deleteRoutine(db, id)) return c.json({ error: 'unknown routine' }, 404)
     scheduler?.remove(id)
+    webhookCoalescer.cancel(id)
     deliveries.delete(id)
     if (existing.goal_id) hub.broadcast({ type: 'goals_changed' })
     return c.json({ ok: true })
@@ -4126,6 +4326,26 @@ Complete your step and post a concise summary of your findings or output in this
     }
     const { flushed, threads } = flushQuietDigestsNow({ ...(botId ? { botId } : {}), manual: true })
     return c.json({ flushed, threads })
+  })
+
+  app.post('/api/proactive/dream', async (c) => {
+    try {
+      const result = await runProactiveDreaming({ force: true })
+      return c.json(result)
+    } catch (err) {
+      return c.json(
+        {
+          error: err instanceof Error ? err.message : String(err),
+          code: 'dream_failed',
+        },
+        502,
+      )
+    }
+  })
+
+  app.post('/api/proactive/flush-deferred', async (c) => {
+    const flushed = await flushDeferredProactiveIfDue()
+    return c.json({ ok: true, flushed })
   })
 
   app.get('/api/rule-proposals', (c) => {
@@ -4287,11 +4507,15 @@ Complete your step and post a concise summary of your findings or output in this
       || backgroundTasks.hasActive(botId)
       || dispatchPlans.hasActive(botId),
     flushQuietDigestsIfDue,
+    flushDeferredProactiveIfDue,
+    runProactiveDreaming,
     syncWikiFromChats,
     sweepUploads: async () => (uploads ? uploads.sweep(markUploadRemoved) : { orphans: 0, strays: 0, missing: 0 }),
     stopAll: () => {
       gatewayStopping = true
       wikiSyncAbort.abort()
+      dreamingAbort.abort()
+      webhookCoalescer.stopAll()
       if (feedPollTimer) { clearInterval(feedPollTimer); feedPollTimer = null }
       if (feedStartupTimer) { clearTimeout(feedStartupTimer); feedStartupTimer = null }
       rounds.stopAll()
@@ -4303,7 +4527,7 @@ Complete your step and post a concise summary of your findings or output in this
       const bgStop = backgroundTasks.stopAll()
       mcpApi.stop()
       const mcpClose = mcpManager.closeAll().catch(() => {})
-      return Promise.all([bgStop, dpStop, mcpClose, activeWikiSync, ...workflowRecordingStops]).then(() => {})
+      return Promise.all([bgStop, dpStop, mcpClose, activeWikiSync, activeDreaming, ...workflowRecordingStops]).then(() => {})
     },
   }
 }

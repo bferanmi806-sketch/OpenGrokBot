@@ -5,6 +5,7 @@ import Docker from 'dockerode'
 import { WebSocketServer } from 'ws'
 import { parseA2AAllow } from './a2a.js'
 import { pruneActions } from './actions.js'
+import { pruneDeferredProactive } from './proactive/pacing.js'
 import { loadOrCreateToken, trustedOrigins } from './auth.js'
 import { createBrowserProvisioner } from './browsers.js'
 import { chooseBackend, createDockerBackend, createLocalBackend, dockerReachable } from './backend.js'
@@ -138,6 +139,7 @@ const gateway = createApp({
   settings: { env: process.env, startedWith: config },
   setup: { browser, dockerReachable: () => dockerReachable(docker, 1_500), dockerImageReady: () => botImageReady(docker) },
   autoDistill: true,
+  proactivePacing: true,
 })
 const { app, hub } = gateway
 
@@ -174,12 +176,26 @@ const wikiSyncTimer = setInterval(() => {
 }, 5 * 60_000)
 wikiSyncTimer.unref()
 
+// 活跃对话静默满 3 分钟后补发暂缓的主动提醒：启动时检查一次，之后每 30 秒检查一次
+void gateway.flushDeferredProactiveIfDue().catch(() => {})
+const deferredFlushTimer = setInterval(() => {
+  void gateway.flushDeferredProactiveIfDue().catch(() => {})
+}, 30_000)
+deferredFlushTimer.unref()
+
+// 每 10 分钟以最低优先级（P3 low）复盘主动消息后的操作者反馈，将重复线索晋升为待拍板规矩提议
+const dreamingTimer = setInterval(() => {
+  void gateway.runProactiveDreaming({ force: false }).catch(() => {})
+}, 10 * 60_000)
+dreamingTimer.unref()
+
 // 动作日志和截图证据留 90 天：启动时清一次，之后每天清一次
 const ACTION_LOG_DAYS = 90
 const pruneOldActions = () => {
   const cutoff = Date.now() - ACTION_LOG_DAYS * 24 * 60 * 60_000
   const removed = pruneActions(db, cutoff)
   if (removed) console.log(`[gateway] dropped ${removed} action-log entries older than ${ACTION_LOG_DAYS} days`)
+  pruneDeferredProactive(db, cutoff)
   void pruneScreenshots(config.dataDir, cutoff).then((shots) => {
     if (shots) console.log(`[gateway] dropped ${shots} screenshots older than ${ACTION_LOG_DAYS} days`)
   }).catch(() => {})
@@ -281,6 +297,8 @@ if (config.idleStopMinutes > 0) {
 // bot 的 Docker 电脑该长期在线：只断 CDP 连接，容器留着（也保住浏览器登录态）
 onShutdown(runtime, async () => {
   clearInterval(wikiSyncTimer)
+  clearInterval(deferredFlushTimer)
+  clearInterval(dreamingTimer)
   schedulerProxy.stopAll()
   const stoppingGateway = gateway.stopAll()
   killActiveSandboxes()

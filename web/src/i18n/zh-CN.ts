@@ -190,6 +190,7 @@ export const zhCN: Record<MessageKey, string> = {
   'ruleProposal.title': '规矩提议',
   'ruleProposal.sourceDiscard': '根据多次驳回自动提议',
   'ruleProposal.sourceAgent': '同事主动提议',
+  'ruleProposal.sourceDreaming': '根据你的对话反馈提议',
   'ruleProposal.taintedBadge': '来自外部内容，请仔细核对',
   'ruleProposal.ruleLabel': '常驻规矩（可编辑）',
   'ruleProposal.rulePlaceholder': '写一句明确的常驻规矩…',

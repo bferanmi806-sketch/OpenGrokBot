@@ -40,6 +40,7 @@ import {
   MAX_REASON_CHARS,
   MAX_RULE_CHARS,
   maybeProposeRuleFromDiscard,
+  normalizeRuleProposalSource,
   resolveRuleProposal,
   sanitizeReason,
   sanitizeRuleLine,
@@ -1204,6 +1205,56 @@ describe('rule proposals engine', () => {
     if (longProposal && longProposal.created) {
       expect(longProposal.proposal.rule.length).toBeLessThanOrEqual(MAX_RULE_CHARS)
     }
+
+    db.close()
+  })
+
+  it('preserves RuleProposalSource = "dreaming" across create, read, list, and resolve (including legacy payload fallback)', async () => {
+    expect(normalizeRuleProposalSource('dreaming')).toBe('dreaming')
+    expect(normalizeRuleProposalSource('discard_pattern')).toBe('discard_pattern')
+    expect(normalizeRuleProposalSource('agent')).toBe('agent')
+    expect(normalizeRuleProposalSource('unknown')).toBe('agent')
+
+    const db = openDb(':memory:')
+    const dataDir = makeTempDir('osb-dream-source-')
+    const threadId = seedBot(db, 'scout')
+
+    const created = await createRuleProposal(db, {
+      botId: 'scout',
+      threadId,
+      rule: 'Defer non-urgent package updates after 21:00 to the morning digest',
+      reason: 'Suggested from repeated evening feedback',
+      source: 'dreaming',
+      dedupeKey: 'dream:package-deliveries:after 21:00:follow_up_later',
+      sourceTainted: true,
+      dataDir,
+      now: 5000,
+    })
+    expect(created.created).toBe(true)
+    if (!created.created) return
+
+    expect(created.proposal.source).toBe('dreaming')
+    expect((created.message.payload as RuleProposalPayload).source).toBe('dreaming')
+    expect(getRuleProposal(db, created.proposal.id)?.source).toBe('dreaming')
+    expect(listRuleProposals(db, { botId: 'scout' })[0]?.source).toBe('dreaming')
+
+    // Simulate missing prev.source in message payload to ensure patchProposalMessage falls back via normalizeRuleProposalSource
+    db.prepare('UPDATE messages SET payload = ? WHERE id = ?').run(
+      JSON.stringify({ proposalId: created.proposal.id, rule: created.proposal.rule, reason: created.proposal.reason, status: 'pending' }),
+      created.message.id,
+    )
+
+    const resolved = await resolveRuleProposal(db, {
+      id: created.proposal.id,
+      decision: 'accept',
+      dataDir,
+      now: 6000,
+    })
+    expect(resolved.ok).toBe(true)
+    if (resolved.ok) {
+      expect(resolved.proposal.source).toBe('dreaming')
+    }
+    expect((getMessage(db, created.message.id)!.payload as RuleProposalPayload).source).toBe('dreaming')
 
     db.close()
   })

@@ -9,8 +9,13 @@ export const MAX_REASON_CHARS = 300
 export const DISCARD_LOOKBACK_MS = 14 * 24 * 60 * 60_000
 export const DISCARD_THRESHOLD = 2
 
-export type RuleProposalSource = 'agent' | 'discard_pattern'
+export type RuleProposalSource = 'agent' | 'discard_pattern' | 'dreaming'
 export type RuleProposalStatus = 'pending' | 'accepted' | 'dismissed'
+
+export function normalizeRuleProposalSource(raw: unknown): RuleProposalSource {
+  if (raw === 'discard_pattern' || raw === 'dreaming') return raw
+  return 'agent'
+}
 
 export type RuleProposalRow = {
   id: number
@@ -124,7 +129,7 @@ export function formatProposalView(row: RuleProposalRow): RuleProposalView {
     threadId: row.thread_id,
     rule: row.rule,
     reason: row.reason,
-    source: row.source === 'discard_pattern' ? 'discard_pattern' : 'agent',
+    source: normalizeRuleProposalSource(row.source),
     sourceTainted: row.source_tainted === 1,
     status: row.status === 'accepted' || row.status === 'dismissed' ? row.status : 'pending',
     messageId: row.message_id ?? null,
@@ -219,6 +224,7 @@ export async function createRuleProposal(
     }
     if (matchedDismissed) return { created: false, reason: 'previously_dismissed' }
 
+    const source = normalizeRuleProposalSource(input.source)
     const info = db.prepare(
       `INSERT INTO rule_proposals
          (bot_id, thread_id, rule, reason, source, dedupe_key, source_tainted, status, message_id, created_at, resolved_at)
@@ -228,7 +234,7 @@ export async function createRuleProposal(
       input.threadId,
       cleanRule,
       cleanReason,
-      input.source,
+      source,
       dedupeKey,
       sourceTainted ? 1 : 0,
       at,
@@ -238,7 +244,7 @@ export async function createRuleProposal(
       proposalId,
       rule: cleanRule,
       reason: cleanReason,
-      source: input.source,
+      source,
       sourceTainted,
       status: 'pending',
     }
@@ -369,7 +375,7 @@ function patchProposalMessage(
     proposalId: existing.id,
     rule: patch.rule ?? prev.rule ?? existing.rule,
     reason: prev.reason ?? existing.reason,
-    source: prev.source ?? (existing.source === 'discard_pattern' ? 'discard_pattern' : 'agent'),
+    source: normalizeRuleProposalSource(prev.source ?? existing.source),
     sourceTainted: prev.sourceTainted ?? (existing.source_tainted === 1),
     status: patch.status,
     ...(patch.edited !== undefined ? { edited: patch.edited } : {}),

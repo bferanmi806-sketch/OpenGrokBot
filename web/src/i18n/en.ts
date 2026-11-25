@@ -193,6 +193,7 @@ export const en = {
   'ruleProposal.title': 'Rule proposal',
   'ruleProposal.sourceDiscard': 'Suggested from repeated discards',
   'ruleProposal.sourceAgent': 'Suggested by teammate',
+  'ruleProposal.sourceDreaming': 'Suggested from your feedback',
   'ruleProposal.taintedBadge': 'External source — review carefully',
   'ruleProposal.ruleLabel': 'Standing rule (editable)',
   'ruleProposal.rulePlaceholder': 'Write one clear standing rule…',

@@ -55,7 +55,9 @@ export function RuleProposalChip({
   const sourceLabel = t(
     payload.source === 'discard_pattern'
       ? 'ruleProposal.sourceDiscard'
-      : 'ruleProposal.sourceAgent',
+      : payload.source === 'dreaming'
+        ? 'ruleProposal.sourceDreaming'
+        : 'ruleProposal.sourceAgent',
   )
 
   if (payload.status !== 'pending') {

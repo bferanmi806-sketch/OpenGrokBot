@@ -109,12 +109,14 @@ export type BackgroundTaskRunContext = {
   drainSteeringNotes: () => BackgroundSteeringNote[]
   recordStep: (step: { tool: string; summary: string; ok?: boolean; ms?: number }) => void
   markUsesBrowser: () => void
+  markTainted?: () => void
 }
 
 export type BackgroundTaskRunnerResult = {
   status?: 'completed' | 'failed' | 'cancelled'
   summary?: string
   error?: string
+  tainted?: boolean
 }
 
 export type BackgroundTaskManagerOptions = {
@@ -522,14 +524,26 @@ export function createBackgroundTaskManager(opts: BackgroundTaskManagerOptions):
             broadcastUpdate(hub, browserOutcome.view, browserOutcome.patchedMessage)
           }
         },
+        markTainted: () => {
+          if (entry.cancelled || entry.settled) return
+          try {
+            db.prepare('UPDATE background_tasks SET source_tainted = 1 WHERE id = ? AND source_tainted = 0').run(
+              entry.id,
+            )
+          } catch {
+            // Ignore closed DB during shutdown
+          }
+        },
       }
 
       let finalStatus: 'completed' | 'failed' | 'cancelled' = 'completed'
       let finalSummary = ''
       let finalError = ''
+      let finalTainted = false
 
       try {
         const result = await runTask(ctx)
+        if (result?.tainted === true) finalTainted = true
         if (entry.cancelled || entry.controller.signal.aborted || result?.status === 'cancelled') {
           finalStatus = 'cancelled'
           finalSummary = clampText(result?.summary, MAX_BG_SUMMARY_CHARS)
@@ -565,9 +579,13 @@ export function createBackgroundTaskManager(opts: BackgroundTaskManagerOptions):
             }
             const res = db.prepare(
               `UPDATE background_tasks
-               SET status = ?, summary = ?, error = ?, finished_at = ?
+               SET status = ?,
+                   summary = ?,
+                   error = ?,
+                   source_tainted = CASE WHEN source_tainted = 1 OR ? = 1 THEN 1 ELSE 0 END,
+                   finished_at = ?
                WHERE id = ? AND status IN ('queued', 'running')`,
-            ).run(finalStatus, finalSummary, finalError, finishedAt, entry.id)
+            ).run(finalStatus, finalSummary, finalError, finalTainted ? 1 : 0, finishedAt, entry.id)
             if (res.changes === 0) return null
 
             const updated = rowToView(getTaskRow(db, entry.id)!)

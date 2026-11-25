@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS proactive_clues (
   evidence TEXT NOT NULL DEFAULT '',
   seen_count INTEGER NOT NULL DEFAULT 1,
   source_tainted INTEGER NOT NULL DEFAULT 0,
+  last_proactive_message_id INTEGER NOT NULL DEFAULT 0,
   first_seen_at INTEGER NOT NULL,
   last_seen_at INTEGER NOT NULL,
   UNIQUE(bot_id, area_key, time_window, leaning)
@@ -77,6 +78,16 @@ CREATE TABLE IF NOT EXISTS proactive_deferred (
 );
 CREATE INDEX IF NOT EXISTS idx_proactive_deferred_pending
   ON proactive_deferred(delivered_at, deliver_after, id);
+CREATE INDEX IF NOT EXISTS idx_proactive_deferred_bot_delivered
+  ON proactive_deferred(bot_id, delivered_at DESC);
+
+CREATE TABLE IF NOT EXISTS proactive_thread_taint (
+  thread_id TEXT PRIMARY KEY,
+  last_tainted_message_id INTEGER NOT NULL DEFAULT 0,
+  last_tainted_at INTEGER NOT NULL DEFAULT 0,
+  pending_taint INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
 ```
 
 ---
