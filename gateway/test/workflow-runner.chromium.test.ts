@@ -105,7 +105,7 @@ describe('workflow runner in Chromium', () => {
         response.end(`<!doctype html><html><body>
           <button id="late-popup" type="button">Open later</button>
           <script>document.querySelector('#late-popup').addEventListener('click', () => {
-            setTimeout(() => window.open('/popup-target', '_blank'), 100)
+            setTimeout(() => window.open('/popup-target', '_blank'), 15)
           })</script>
         </body></html>`)
       } else {

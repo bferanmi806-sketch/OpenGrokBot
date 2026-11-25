@@ -11,7 +11,7 @@ const ACTION_TIMEOUT_MS = 10_000
 // Keep this aligned with workflow-recorder's navigation expectation window.
 const EXPECTED_URL_TIMEOUT_MS = 5_000
 const URL_POLL_INTERVAL_MS = 25
-const POPUP_SETTLE_WINDOW_MS = 250
+const POPUP_SETTLE_WINDOW_MS = 350
 
 export type WorkflowBindings = ReadonlyMap<string, string>
 
