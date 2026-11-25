@@ -1,7 +1,7 @@
 # Phase 9 Design: Wiki Auto-Sync, Validated Section Patch & Dual-List Search
 
 **Date:** 2026-11-25  
-**Status:** Draft (Pending Spec Review)  
+**Status:** Approved  
 **Branch:** `feat/wiki-autosync`  
 **Scope:** Upgrade the zero-vector-DB Team Wiki (`gateway/src/wiki/`) with (1) hybrid structured Markdown section patching (`wiki_patch` + deterministic code-written `## Change Log` + citation/entry retention checks), (2) dual-list RRF retrieval in `wiki_search` returning both curated `pages` and bot-isolated `originals` (`messages_fts`), and (3) idle `P3 low`-priority incremental chat-to-Wiki auto-sync (`wiki_sync_state` in SQLite `v26`) plus a manual **Sync from chats** button in `WikiDialog`.
 
