@@ -1,7 +1,7 @@
 # Phase 11 设计规格：「突然想起（Flashback）」联想式历史召回
 
 **日期：** 2026-11-25  
-**状态：** 待审阅  
+**状态：** 已批准  
 **分支：** `feat/flashback`（基于 `feat/proactive-dreaming-v2`）  
 **范围：** 新增零额外 LLM 调用的回合前联想式历史召回模块（`gateway/src/flashback.ts`），在交互式对话开始前围绕操作者消息中的高区分度实体/主题，检索**未受外部污染**的团队 Wiki 页面与当前上下文窗口之外的可访问历史消息，在满足双层防唠叨冷却（SQLite `v28` `flashback_state`）时以尾部临时只读围栏 `<historical_context_${nonce} source="flashback">` 注入，做到**零首字延迟损耗、零 KV 缓存前缀破坏、零无感污染降级**。
 
