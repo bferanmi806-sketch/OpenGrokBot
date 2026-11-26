@@ -345,9 +345,16 @@ function stubText(content: string): AssistantTurn {
   return { content, toolCalls: [], raw: { role: 'assistant', content } }
 }
 
-/** 网关会在最后一条 user 消息后面贴当前时间；stub 按用户原话匹配，先把它剥掉。 */
+const isEphemeralGatewayCue = (c: string) =>
+  /^<historical_context_[0-9a-f]+\b/i.test(c) || /^\[(?:operator steering note|gateway)\b/i.test(c)
+
+/** 网关会在最后一条 user 消息后面贴当前时间或临时联想/引导块；stub 按用户原话匹配，先跳过临时块并剥掉时间。 */
 function lastUserText(messages: ChatMsg[]): string {
-  const text = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
+  const text =
+    [...messages]
+      .reverse()
+      .find((m) => m.role === 'user' && !isEphemeralGatewayCue((m.content ?? '').trimStart()))
+      ?.content ?? ''
   return text.replace(/\n\n\(Current time: [^)]*\)\s*$/, '')
 }
 
@@ -412,7 +419,7 @@ function findUrl(messages: ChatMsg[]): string | null {
  * 按用户说的话挑一条链路走：网址 → 开网页并截图；「每天」→ 建 routine；
  * 「以后/from now on」→ 存规矩；「send/reply」→ 扣住等审批；其余发标准汇报 chip。
  */
-function createStubLLM(): LLM {
+export function createStubLLM(): LLM {
   return {
     isStub: true,
     async chat(messages) {

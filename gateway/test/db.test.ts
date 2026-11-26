@@ -230,7 +230,7 @@ describe('schema migrations', () => {
   })
 
   it('migrates v26 databases to v27 with proactive_clues, proactive_dream_state, and proactive_deferred tables and indexes', () => {
-    expect(SCHEMA_VERSION).toBe(27)
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(27)
     const path = tempDb()
     const initial = openDb(path)
     initial.exec(`
@@ -239,15 +239,17 @@ describe('schema migrations', () => {
       DROP INDEX IF EXISTS idx_proactive_dream_bot;
       DROP TABLE IF EXISTS proactive_dream_state;
       DROP INDEX IF EXISTS idx_proactive_deferred_pending;
+      DROP INDEX IF EXISTS idx_proactive_deferred_bot_delivered;
       DROP TABLE IF EXISTS proactive_deferred;
+      DROP TABLE IF EXISTS proactive_thread_taint;
     `)
     initial.pragma('user_version = 26')
     initial.close()
 
     const migrated: [number, number][] = []
     const upgraded = openDb(path, { onMigrate: (from, to) => migrated.push([from, to]) })
-    expect(migrated).toEqual([[26, 27]])
-    expect(schemaVersion(upgraded)).toBe(27)
+    expect(migrated).toEqual([[26, SCHEMA_VERSION]])
+    expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION)
 
     const tables = (
       upgraded.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]
@@ -309,6 +311,50 @@ describe('schema migrations', () => {
     expect(upgraded.prepare('SELECT COUNT(*) AS n FROM proactive_clues').get()).toEqual({ n: 1 })
     expect(upgraded.prepare('SELECT COUNT(*) AS n FROM proactive_dream_state').get()).toEqual({ n: 1 })
     expect(upgraded.prepare('SELECT COUNT(*) AS n FROM proactive_deferred').get()).toEqual({ n: 1 })
+    upgraded.close()
+  })
+
+  it('migrates v27 databases to v28 with flashback_state table', () => {
+    expect(SCHEMA_VERSION).toBe(28)
+    const path = tempDb()
+    const initial = openDb(path)
+    initial.exec('DROP TABLE IF EXISTS flashback_state;')
+    initial.pragma('user_version = 27')
+    initial.close()
+
+    const migrated: [number, number][] = []
+    const upgraded = openDb(path, { onMigrate: (from, to) => migrated.push([from, to]) })
+    expect(migrated).toEqual([[27, 28]])
+    expect(schemaVersion(upgraded)).toBe(28)
+
+    upgraded
+      .prepare(
+        `INSERT INTO flashback_state
+           (thread_id, bot_id, last_recalled_at, last_user_message_id, recalled_items_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run('dm:researcher', 'researcher', 1764000000000, 18, '{"wiki:project/aurora":1764000000000}', 1764000000000)
+
+    expect(
+      upgraded
+        .prepare('SELECT * FROM flashback_state WHERE thread_id = ? AND bot_id = ?')
+        .get('dm:researcher', 'researcher'),
+    ).toEqual({
+      thread_id: 'dm:researcher',
+      bot_id: 'researcher',
+      last_recalled_at: 1764000000000,
+      last_user_message_id: 18,
+      recalled_items_json: '{"wiki:project/aurora":1764000000000}',
+      updated_at: 1764000000000,
+    })
+
+    // Primary key (thread_id, bot_id) enforces uniqueness
+    expect(() =>
+      upgraded
+        .prepare('INSERT INTO flashback_state (thread_id, bot_id, updated_at) VALUES (?, ?, ?)')
+        .run('dm:researcher', 'researcher', 1764000001000),
+    ).toThrow()
+
     upgraded.close()
   })
 })

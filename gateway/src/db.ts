@@ -824,6 +824,20 @@ const MIGRATIONS: Migration[] = [
       );
     `)
   },
+  // v28：回合前「突然想起（Flashback）」联想式历史召回双层防唠叨冷却状态表（按线程与同事隔离）
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS flashback_state (
+        thread_id TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        last_recalled_at INTEGER NOT NULL DEFAULT 0,
+        last_user_message_id INTEGER NOT NULL DEFAULT 0,
+        recalled_items_json TEXT NOT NULL DEFAULT '{}',
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (thread_id, bot_id)
+      );
+    `)
+  },
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

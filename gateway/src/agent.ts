@@ -59,6 +59,7 @@ import {
   type TimedMessage,
 } from './prompts.js'
 import { createRepeatGuard } from './loop-guard.js'
+import { recallFlashbackContext } from './flashback.js'
 import { formatHistorySearchResult, searchBotHistory } from './history-search.js'
 import type { CreateRuleProposalResult } from './proactive/rule-proposals.js'
 import {
@@ -294,6 +295,8 @@ export type AgentDeps = {
   contextWindow?: number
   /** false = 关闭跨回合自动压缩（测试或特定场景用） */
   compact?: boolean
+  /** false = 关闭回合前联想式历史召回 Flashback（测试或特定场景用） */
+  flashback?: boolean
 }
 
 /**
@@ -624,6 +627,38 @@ export async function runTurn(
     const maxSteps = deps.maxSteps && deps.maxSteps > 0 ? Math.floor(deps.maxSteps) : DEFAULT_MAX_STEPS
     const turnMs = deps.turnTimeoutMs ?? DEFAULT_TURN_MS
     const priority = deps.priority ?? defaultPriority(deps.origin)
+    let flashbackInjected = false
+    const FLASHBACK_TOKEN_HEADROOM = 600
+    const allowFlashback =
+      deps.flashback !== false
+      && deps.origin === 'operator'
+      && effectiveMode === 'act'
+      && !isBackgroundTask
+      && !isPipelineStep
+      && !llm.isStub
+      && !signal?.aborted
+      && !deps.checkBudget?.()
+    if (allowFlashback) {
+      const preFlashbackTokens = estimateMessagesTokens(messages) + estimateToolsTokens(activeTools)
+      if (preFlashbackTokens + FLASHBACK_TOKEN_HEADROOM < pressureTokens) {
+        const excludeMessageIds = new Set<number>([
+          ...rows.map((m) => m.id),
+          ...(opts.pendingIds ?? []),
+          ...(opts.hiddenIds ?? []),
+        ])
+        const recalled = recallFlashbackContext(db, {
+          botId: bot.id,
+          threadId,
+          userText,
+          excludeMessageIds,
+          now: now.getTime(),
+        })
+        if (recalled) {
+          messages.push({ role: 'user', content: recalled.block })
+          flashbackInjected = true
+        }
+      }
+    }
     const startedAt = Date.now()
     for (let step = 0; ; step++) {
       if (signal?.aborted) return stopped(notify, silentStop)
@@ -659,13 +694,21 @@ export async function runTurn(
       try {
         turn = await llm.chat(messages, activeTools, { signal, priority, ...(prefixModified ? { prefixModified: true } : {}) })
       } catch (err) {
-        // 规范上下文溢出：原位激进剪枝旧工具结果后重试一次
+        // 规范上下文溢出：原位激进剪枝旧工具结果后重试一次；若为 step-0 且挂载了临时 Flashback 块则剥离后重试
         if (!signal?.aborted && isContextOverflowError(err)) {
           const pruned = pruneOldToolResults(messages, {
             keepRecentToolSteps: 1, thresholdChars: 1_200, headChars: 500, tailChars: 300,
           })
           if (pruned.prunedCount > 0) {
             messages = pruned.messages
+            prefixModified = true
+            meter.resetAnchor()
+            turn = await llm.chat(messages, activeTools, { signal, priority, prefixModified: true })
+          } else if (flashbackInjected) {
+            messages = messages.filter(
+              (m) => !(m.role === 'user' && /^<historical_context_[0-9a-f]+\b/i.test(String(m.content ?? ''))),
+            )
+            flashbackInjected = false
             prefixModified = true
             meter.resetAnchor()
             turn = await llm.chat(messages, activeTools, { signal, priority, prefixModified: true })

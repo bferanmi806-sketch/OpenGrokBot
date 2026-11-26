@@ -995,6 +995,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       const threadId = ensureDmThread(db, bot.id)
       const openMilestones = goal.milestones.filter((m) => m.status === 'open')
       const recentNotes = goal.recentUpdates.filter((u) => u.kind === 'note').slice(0, 3)
+      const hasTaintedNotes = recentNotes.some((u) => u.tainted)
       const memberList = goal.memberBotIds.map((id) => `@${id}`).join(', ')
       const lines = [
         `Goal check-in: "${goal.title}" (${goal.id})`,
@@ -1020,11 +1021,13 @@ export function createApp(deps: AppDeps): GatewayApp {
       const ids = waiting.get(threadId) ?? new Set<number>()
       for (const row of stored) ids.add(row.id)
       waiting.set(threadId, ids)
+      if (hasTaintedNotes) markThreadTainted(threadId)
       void startTurn(bot, threadId, text, {
         origin: 'operator',
         alreadyStored: true,
         prewarm: true,
         goalId: goal.id,
+        ...(hasTaintedNotes ? { tainted: true } : {}),
       })
       return { threadId }
     },
