@@ -560,19 +560,37 @@ body:has(.modal-scrim, .lightbox-scrim) .activity-pulse {
 .bubble.markdown .md-image { color: var(--text-faint); font-family: var(--mono); font-size: 12px; }
 
 /* ── Chip 通用卡片 ─────────────────────── */
-.report-chip, .shot-chip, .approval-chip, .memory-chip, .routine-chip, .botref-chip, .login-chip, .webhook-chip {
+.shot-chip, .approval-chip, .memory-chip, .routine-chip, .botref-chip, .login-chip, .webhook-chip {
   width: 100%;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
 }
-.report-chip, .approval-chip, .memory-chip, .routine-chip, .botref-chip, .login-chip, .webhook-chip { padding: 14px 16px; }
+.memory-chip, .routine-chip, .botref-chip, .login-chip, .webhook-chip { padding: 14px 16px; }
 
-.report-label, .approval-label, .memory-label, .routine-label, .botref-label, .login-label, .webhook-label {
+.approval-label, .memory-label, .routine-label, .botref-label, .login-label, .webhook-label {
   font-size: 11.5px; font-weight: 600; color: var(--text-faint);
 }
 
 /* ── 汇报 ─────────────────────────────── */
+.report-chip { width: 100%; padding: 3px 0 6px; }
+.report-lines { list-style: none; }
+.report-chip .report-line {
+  display: grid; grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: start; gap: 10px; padding: 9px 0;
+}
+.report-chip .report-line + .report-line { border-top: 1px solid var(--border); }
+.report-chip .report-check {
+  display: grid; width: 28px; height: 28px; place-items: center;
+  border-radius: 8px; background: color-mix(in srgb, var(--green) 13%, transparent);
+}
+.report-line-text { display: grid; gap: 2px; line-height: 1.45; overflow-wrap: anywhere; }
+.report-chip .report-system { font-size: 13.5px; font-weight: 650; }
+.report-chip .report-result { color: var(--text-dim); }
+.report-chip .report-count {
+  max-width: 14ch; padding: 3px 7px; border-radius: 5px; background: var(--bg-hover);
+  font-family: inherit; font-size: 11px; text-align: center; overflow-wrap: anywhere;
+}
 .report-line {
   display: flex; gap: 7px; align-items: baseline; padding: 2.5px 0;
   font-variant-numeric: tabular-nums;
@@ -581,7 +599,8 @@ body:has(.modal-scrim, .lightbox-scrim) .activity-pulse {
 .report-system { font-weight: 600; }
 .report-arrow { color: var(--text-faint); }
 .report-count { color: var(--text-dim); font-family: var(--mono); font-size: 12px; }
-.report-closing { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--border); color: var(--text); }
+.report-closing { margin-top: 4px; padding: 8px 0 0; color: var(--text); line-height: 1.6; overflow-wrap: anywhere; }
+.report-lines + .report-closing { border-top: 1px solid var(--border); }
 
 /* ── 截图 ─────────────────────────────── */
 .shot-chip { margin: 0; padding: 6px; overflow: hidden; }
@@ -597,21 +616,44 @@ body:has(.modal-scrim, .lightbox-scrim) .activity-pulse {
 .shot-caption { padding: 8px 8px 4px; color: var(--text-dim); font-size: 12px; }
 
 /* ── 审批 ─────────────────────────────── */
-.approval-chip:not(.resolved):not(.by-rule) {
-  border-color: color-mix(in srgb, var(--amber) 23%, var(--border));
-  background: color-mix(in srgb, var(--amber) 4%, var(--bg-card));
+.approval-chip {
+  --approval-emphasis: #f4bf73;
+  --approval-on-emphasis: #231708;
+  padding: 14px 18px;
 }
-.approval-chip .approval-label { color: var(--amber); }
+html[data-theme='light'] .approval-chip {
+  --approval-emphasis: #8d4b11;
+  --approval-on-emphasis: #fffaf3;
+}
+.approval-chip:not(.resolved) {
+  border-color: color-mix(in srgb, var(--approval-emphasis) 25%, var(--border));
+  border-radius: var(--r-xl);
+}
+.approval-chip:not(.resolved) .approval-label {
+  display: flex; align-items: center; gap: 8px;
+  margin: -14px -18px 13px; padding: 9px 18px;
+  border-bottom: 1px solid color-mix(in srgb, var(--approval-emphasis) 20%, var(--border));
+  border-radius: calc(var(--r-xl) - 1px) calc(var(--r-xl) - 1px) 0 0;
+  background: color-mix(in srgb, var(--approval-emphasis) 14%, var(--bg-card));
+  color: var(--approval-emphasis); font-size: 12px; font-weight: 650;
+}
+.approval-label svg { flex-shrink: 0; }
 .approval-chip.resolved .approval-label { color: var(--text-faint); }
-.approval-action { margin-top: 5px; font-size: 14px; font-weight: 650; }
-.approval-detail { margin-top: 3px; color: var(--text-dim); }
+.approval-action { margin-top: 5px; font-size: 14px; font-weight: 650; line-height: 1.4; overflow-wrap: anywhere; }
+.approval-chip:not(.resolved) .approval-action { margin-top: 0; font-size: 16px; }
+.approval-detail { margin-top: 5px; color: var(--text-dim); line-height: 1.6; overflow-wrap: anywhere; }
 .approval-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; align-items: center; }
+.approval-chip > .approval-buttons { padding-top: 11px; border-top: 1px solid var(--border); }
 .approval-buttons button {
-  padding: 6px 12px; border-radius: var(--r-sm); font-size: 12.5px; font-weight: 550; cursor: pointer;
+  padding: 7px 13px; border-radius: var(--r-sm); font-size: 12.5px; font-weight: 550; cursor: pointer;
   transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast), opacity var(--t-fast);
 }
-.approval-buttons .approve { background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent); }
-.approval-buttons .approve:hover:not(:disabled) { background: var(--accent-hover); }
+.approval-buttons .approve, .approval-buttons .remember {
+  background: var(--approval-emphasis); color: var(--approval-on-emphasis); border: 1px solid transparent; font-weight: 650;
+}
+.approval-buttons .approve:hover:not(:disabled), .approval-buttons .remember:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--approval-emphasis) 88%, var(--text));
+}
 .approval-buttons .edit,
 .approval-buttons .reset {
   background: transparent; color: var(--text); border: 1px solid var(--border);
@@ -726,8 +768,6 @@ body:has(.modal-scrim, .lightbox-scrim) .activity-pulse {
 .approval-remember { margin-top: 11px; }
 .approval-remember-why { color: var(--text-dim); font-size: 12px; }
 .approval-remember .approval-buttons { margin-top: 7px; flex-wrap: wrap; }
-.approval-buttons .remember { background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent); }
-.approval-buttons .remember:hover:not(:disabled) { background: var(--accent-hover); }
 .approval-items { margin-top: 9px; }
 .approval-items ul { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
 .approval-items li { padding: 3px 0; font-size: 13px; }
@@ -750,28 +790,32 @@ body:has(.modal-scrim, .lightbox-scrim) .activity-pulse {
 
 /* ── 问题卡片 ──────────────────────────── */
 .question-chip {
-  width: 100%; padding: 14px 16px;
-  background: color-mix(in srgb, var(--amber) 4%, var(--bg-card));
-  border: 1px solid color-mix(in srgb, var(--amber) 23%, var(--border));
-  border-radius: var(--r-md);
+  width: 100%; padding: 15px 17px;
+  background: var(--bg-card);
+  border: 1px solid color-mix(in srgb, var(--blue) 23%, var(--border));
+  border-radius: var(--r-lg);
 }
 .question-chip.resolved {
   background: var(--bg-card);
   border-color: var(--border);
 }
 .question-label {
-  font-size: 11.5px; font-weight: 600; color: var(--amber);
+  display: inline-flex; padding: 3px 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--blue) 9%, transparent); color: var(--text);
+  font-size: 11.5px; font-weight: 650;
 }
-.question-chip.resolved .question-label { color: var(--text-faint); }
-.question-text { margin-top: 5px; font-weight: 600; }
-.question-options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.question-chip.resolved .question-label { color: var(--text-faint); background: var(--bg-subtle); }
+.question-text { margin-top: 9px; font-size: 15px; font-weight: 650; line-height: 1.45; overflow-wrap: anywhere; }
+.question-options { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 11px; }
 .question-option {
-  padding: 6px 12px; border: 1px solid var(--border-strong); border-radius: var(--r-sm);
-  background: var(--bg-subtle); color: var(--text); cursor: pointer;
+  max-width: 100%; padding: 7px 12px; border: 1px solid var(--border-strong); border-radius: var(--r-sm);
+  background: var(--bg-subtle); color: var(--text); cursor: pointer; overflow-wrap: anywhere;
   transition: background var(--t-fast), border-color var(--t-fast);
 }
-button.question-option:hover { background: var(--bg-hover); border-color: var(--border-focus); }
-.question-option.chosen { border-color: var(--accent); background: var(--bg-active); }
+button.question-option:hover, .question-option.chosen {
+  border-color: color-mix(in srgb, var(--blue) 60%, var(--border));
+  background: color-mix(in srgb, var(--blue) 12%, var(--bg-card));
+}
 .question-chip.resolved .question-option { cursor: default; color: var(--text-faint); }
 .question-chip.resolved .question-option.chosen { color: var(--text); }
 .question-submit {
@@ -3191,12 +3235,9 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 /* ── 规矩提议卡片（Controlled Dreaming） ──── */
 .rule-proposal-chip {
   width: 100%;
-  padding: 14px 16px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
+  padding: 13px 0 14px;
+  border-block: 1px solid var(--border);
 }
-.rule-proposal-chip.tainted:not(.resolved) { border-color: color-mix(in srgb, var(--amber) 23%, var(--border)); }
 
 .rule-proposal-head {
   display: flex;
@@ -3205,10 +3246,14 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   gap: 6px 10px;
 }
 .rule-proposal-label {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--blue);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
 }
+.rule-proposal-label svg { color: var(--blue); flex-shrink: 0; }
 .rule-proposal-chip.tainted .rule-proposal-label { color: var(--amber); }
 .rule-proposal-chip.resolved.accepted .rule-proposal-label { color: var(--green); }
 .rule-proposal-chip.resolved.dismissed .rule-proposal-label { color: var(--text-faint); }
@@ -3274,8 +3319,12 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .rule-proposal-field {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 7px;
   margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-raised);
 }
 .rule-proposal-field-head {
   display: flex;
@@ -3301,13 +3350,13 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .rule-proposal-input {
   width: 100%;
   min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border-strong);
+  padding: 7px 8px;
+  border: 1px solid transparent;
   border-radius: var(--r-sm);
-  background: var(--bg-input);
+  background: transparent;
   color: var(--text);
   font-size: 13px;
-  line-height: 1.45;
+  line-height: 1.55;
   resize: vertical;
   outline: none;
   transition: border-color var(--t-fast), box-shadow var(--t-fast);
@@ -3315,6 +3364,7 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .rule-proposal-input::placeholder { color: var(--text-faint); }
 .rule-proposal-input:focus {
   border-color: var(--border-focus);
+  background: var(--bg-input);
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
 .rule-proposal-input:disabled { opacity: 0.6; }
@@ -3346,11 +3396,11 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast), opacity var(--t-fast);
 }
 .rule-proposal-accept {
-  background: var(--accent);
-  color: var(--accent-fg);
-  border: 1px solid var(--accent);
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
 }
-.rule-proposal-accept:hover:not(:disabled) { background: var(--accent-hover); }
+.rule-proposal-accept:hover:not(:disabled) { background: var(--bg-hover); }
 .rule-proposal-dismiss {
   background: transparent;
   color: var(--text-dim);
@@ -3661,19 +3711,27 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   padding: 14px 16px;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: var(--r-md);
+  border-radius: var(--r-xl);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .bg-task-chip.status-running {
-  border-color: color-mix(in srgb, var(--blue) 20%, var(--border));
-  background: color-mix(in srgb, var(--blue) 3%, var(--bg-card));
+  border-color: color-mix(in srgb, var(--blue) 26%, var(--border));
 }
 .bg-task-chip.status-failed {
   border-color: color-mix(in srgb, var(--red) 23%, var(--border));
 }
 
+.bg-task-header {
+  display: grid; gap: 5px;
+  margin: -14px -16px 0; padding: 11px 16px 13px;
+  border-bottom: 1px solid var(--border);
+  border-radius: calc(var(--r-xl) - 1px) calc(var(--r-xl) - 1px) 0 0;
+  background: var(--bg-subtle);
+}
+.bg-task-chip.status-running .bg-task-header { background: color-mix(in srgb, var(--blue) 14%, var(--bg-card)); }
+.bg-task-chip.status-failed .bg-task-header { background: color-mix(in srgb, var(--red) 9%, var(--bg-card)); }
 .bg-task-head {
   display: flex;
   align-items: center;
@@ -3681,10 +3739,14 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   gap: 7px;
 }
 .bg-task-label {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--text-faint);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-dim);
 }
+.bg-task-chip.status-running .bg-task-label svg { color: var(--blue); }
 
 .bg-task-status {
   display: inline-flex;
@@ -3739,8 +3801,8 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 }
 
 .bg-task-title {
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 650;
   color: var(--text);
   line-height: 1.4;
   word-break: break-word;
@@ -3770,9 +3832,11 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
 .bg-task-steps-wrap {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
 }
 .bg-task-steps-toggle {
   align-self: flex-start;
@@ -3806,9 +3870,10 @@ button.question-option:hover { background: var(--bg-hover); border-color: var(--
   align-items: baseline;
   gap: 7px;
   min-width: 0;
-  padding: 3px 6px;
+  padding: 4px 5px;
   border-radius: var(--r-sm);
 }
+.bg-task-steps li:nth-child(even):not(.steer) { background: var(--bg-subtle); }
 .bg-task-steps li.steer {
   background: color-mix(in srgb, var(--amber) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--amber) 28%, transparent);

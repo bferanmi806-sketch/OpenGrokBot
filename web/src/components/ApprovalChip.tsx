@@ -10,6 +10,7 @@ import type {
   EditableMcp,
   RuleDuration,
 } from '../types'
+import { ClockIcon } from './Icons'
 
 const OUTCOME: Record<string, MessageKey> = { approved: 'approval.approved', discarded: 'approval.discarded' }
 
@@ -1286,7 +1287,10 @@ export function ApprovalChip({ payload, onDecide }: {
 
   return (
     <div className={`approval-chip${outcome ? ' resolved' : ''}`}>
-      <div className="approval-label">{items.length ? t('approval.needsYouItems', { count: items.length }) : t('approval.needsYou')}</div>
+      <div className="approval-label">
+        {!outcome ? <ClockIcon size={15} /> : null}
+        {items.length ? t('approval.needsYouItems', { count: items.length }) : t('approval.needsYou')}
+      </div>
       <div className="approval-action">{payload.action}</div>
       {!isEditing && payload.detail ? <div className="approval-detail">{payload.detail}</div> : null}
       {scope ? <div className="approval-scope">{scope}</div> : null}

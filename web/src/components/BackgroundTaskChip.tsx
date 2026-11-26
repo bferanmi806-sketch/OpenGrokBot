@@ -3,6 +3,7 @@ import { ApiError } from '../api'
 import { useT, type MessageKey, type T } from '../i18n'
 import { errorText } from '../i18n/describe'
 import type { BackgroundTaskPayload, BackgroundTaskStatus, BackgroundTaskStep } from '../types'
+import { CpuSparkleIcon } from './Icons'
 import { Markdown } from './Markdown'
 
 export const MAX_BG_STEER_CHARS = 1000
@@ -151,18 +152,19 @@ export function BackgroundTaskChip({
 
   return (
     <div className={`bg-task-chip status-${payload.status}`}>
-      <div className="bg-task-head">
-        <span className="bg-task-label">{t('bgTask.label')}</span>
-        <span className={`bg-task-status ${payload.status}`}>
-          {payload.status === 'running' ? <span className="bg-task-dot" aria-hidden="true" /> : null}
-          {t(statusKey)}
-        </span>
-        {payload.usesBrowser && active ? (
-          <span className="bg-task-browser-tag">{t('bgTask.usingBrowser')}</span>
-        ) : null}
+      <div className="bg-task-header">
+        <div className="bg-task-head">
+          <span className="bg-task-label"><CpuSparkleIcon size={15} />{t('bgTask.label')}</span>
+          <span className={`bg-task-status ${payload.status}`}>
+            {payload.status === 'running' ? <span className="bg-task-dot" aria-hidden="true" /> : null}
+            {t(statusKey)}
+          </span>
+          {payload.usesBrowser && active ? (
+            <span className="bg-task-browser-tag">{t('bgTask.usingBrowser')}</span>
+          ) : null}
+        </div>
+        <div className="bg-task-title">{payload.title}</div>
       </div>
-
-      <div className="bg-task-title">{payload.title}</div>
 
       {stepCount > 0 || (steps.length === 0 && payload.lastStep) ? (
         <div className="bg-task-meta">

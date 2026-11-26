@@ -11,6 +11,8 @@ names.
 
 - Refined the Today workspace, conversations, and computer panel with lighter borders, clearer typography, and more
   distinct primary and secondary actions in both themes. Subscription cards now fit narrow screens.
+- Redesigned conversation cards in both themes with scannable report lists, amber approval headers, clearer question
+  choices, editable rule notes, and a separate log area for background tasks.
 
 ## [0.8.1] - 2026-11-21
 

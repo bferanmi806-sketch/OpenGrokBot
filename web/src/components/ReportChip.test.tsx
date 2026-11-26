@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { ReportChip } from './ReportChip'
 
 describe('ReportChip', () => {
-  it('renders ✓ system → result · count lines and closing', () => {
+  it('renders the systems and results as a list with optional counts and closing', () => {
     render(
       <ReportChip payload={{
         lines: [
@@ -13,10 +13,11 @@ describe('ReportChip', () => {
         closing: 'two things need you today',
       }} />,
     )
-    expect(screen.getAllByText('✓')).toHaveLength(2)
+    expect(screen.getByRole('list')).toBeInTheDocument()
+    expect(screen.getAllByRole('listitem')).toHaveLength(2)
     expect(screen.getByText('Salesforce')).toBeInTheDocument()
     expect(screen.getByText(/list pulled/)).toBeInTheDocument()
-    expect(screen.getByText(/· 52 accounts/)).toBeInTheDocument()
+    expect(screen.getByText('52 accounts')).toBeInTheDocument()
     expect(screen.getByText('two things need you today')).toBeInTheDocument()
   })
 

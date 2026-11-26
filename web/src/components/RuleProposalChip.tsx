@@ -3,6 +3,7 @@ import { ApiError } from '../api'
 import { useT } from '../i18n'
 import { errorText } from '../i18n/describe'
 import type { RuleProposalPayload } from '../types'
+import { LightbulbIcon } from './Icons'
 
 export const MAX_RULE_CHARS = 300
 
@@ -145,7 +146,7 @@ export function RuleProposalChip({
   return (
     <div className={`rule-proposal-chip${payload.sourceTainted ? ' tainted' : ''}`}>
       <div className="rule-proposal-head">
-        <div className="rule-proposal-label">{t('ruleProposal.title')}</div>
+        <div className="rule-proposal-label"><LightbulbIcon size={15} />{t('ruleProposal.title')}</div>
         <span className="rule-proposal-source">{sourceLabel}</span>
       </div>
 
