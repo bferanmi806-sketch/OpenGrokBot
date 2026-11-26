@@ -1088,6 +1088,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     db,
     hub,
     chiefId,
+    ...(dataDir ? { dataDir } : {}),
     now: () => now().getTime(),
     startSpaceAction: (bot, space, action) => {
       const threadId = ensureDmThread(db, bot.id)
@@ -1228,11 +1229,16 @@ export function createApp(deps: AppDeps): GatewayApp {
   const skillLocations = {
     ...(dataDir ? { userDir: skillsDir(dataDir) } : {}),
     ...(resolvedBuiltinSkillsDir ? { builtinDir: resolvedBuiltinSkillsDir } : {}),
+    includeEmbeddedBuiltins: deps.builtinSkills !== false,
   }
   const loadSkills = () =>
-    skillLocations.userDir || skillLocations.builtinDir ? listMergedSkills(skillLocations) : Promise.resolve([])
+    skillLocations.userDir || skillLocations.builtinDir || skillLocations.includeEmbeddedBuiltins
+      ? listMergedSkills(skillLocations)
+      : Promise.resolve([])
   const loadSkillBody = (name: string) =>
-    skillLocations.userDir || skillLocations.builtinDir ? readMergedSkill(skillLocations, name) : Promise.resolve(null)
+    skillLocations.userDir || skillLocations.builtinDir || skillLocations.includeEmbeddedBuiltins
+      ? readMergedSkill(skillLocations, name)
+      : Promise.resolve(null)
   const computerKind: ComputerKind = deps.computers?.kind ?? 'docker'
   /** 容器电脑永远有 shell；本机电脑看操作者开没开 */
   const shellEnabledFor = (bot: BotRow) => computerKind !== 'local' || bot.shell_enabled === 1

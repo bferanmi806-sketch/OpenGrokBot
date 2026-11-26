@@ -680,6 +680,20 @@ export async function triggerSpaceAction(
   return res.json() as Promise<{ botId: string; threadId: string }>
 }
 
+export async function uploadSpaceAsset(
+  spaceId: string,
+  file: File,
+): Promise<{ url: string; name: string; mime: string; size: number }> {
+  const data = await fileToBase64(file)
+  const res = await send(
+    'POST',
+    `/api/spaces/${encodeURIComponent(spaceId)}/assets`,
+    { name: file.name, data },
+    { strict: true },
+  )
+  return res.json() as Promise<{ url: string; name: string; mime: string; size: number }>
+}
+
 /** 团队知识库：按关键词 / 分类检索与列出、读详情与历史、创建、保存、回滚、删除 */
 export function fetchWiki(opts?: { q?: string; kind?: WikiKind; limit?: number }): Promise<WikiListResponse> {
   const params = new URLSearchParams()

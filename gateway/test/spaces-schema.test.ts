@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   isSafeHttpUrl,
+  isSafeImageUrl,
   MAX_BLOCKS_PER_SPACE,
   parseSpaceSchema,
   sanitizeItemData,
@@ -10,7 +11,7 @@ import { buildTemplateSchema } from '../src/spaces/templates.js'
 import { SPACE_TEMPLATE_IDS, type TableBlock } from '../src/spaces/types.js'
 
 describe('spaces declarative schema validation', () => {
-  it('validates all 4 built-in templates and all 8 declarative block types', () => {
+  it('validates the built-in templates and the original block types', () => {
     for (const id of SPACE_TEMPLATE_IDS) {
       const schema = parseSpaceSchema(buildTemplateSchema(id, 'chief'))
       expect(schema.blocks.length).toBeGreaterThan(0)
@@ -75,5 +76,96 @@ describe('spaces declarative schema validation', () => {
     expect(() => sanitizeItemData({ nested: { bad: true } }, tableBlock)).toThrow(/string, number, boolean, or null/)
     const pollutedItem = JSON.parse('{"constructor":"bad"}')
     expect(() => sanitizeItemData(pollutedItem, tableBlock)).toThrow(/Forbidden key/)
+  })
+
+  it('validates visual design primitives (theme, Bento spans, tones, kanban colors, donut/area charts, callout markdown)', () => {
+    const designed = parseSpaceSchema({
+      theme: { accent: 'emerald', style: 'editorial' },
+      blocks: [
+        {
+          id: 'kpi',
+          type: 'metrics',
+          title: 'Pulse',
+          subtitle: 'Live weekly numbers',
+          span: 'full',
+          cards: [{ label: 'Revenue', value: '80', unit: 'k', tone: 'positive', target: 100 }],
+        },
+        { id: 'trend', type: 'chart', title: 'Trend', span: 'wide', mode: 'area', labelField: 'title', valueField: 'v' },
+        { id: 'share', type: 'chart', title: 'Mix', span: 'narrow', mode: 'donut', labelField: 'title', valueField: 'v' },
+        { id: 'kb', type: 'kanban', title: 'Flow', span: 'full', columns: [{ key: 'todo', label: 'Todo', color: 'indigo' }] },
+        { id: 'note', type: 'markdown', title: 'Takeaway', span: 'half', variant: 'callout', content: 'Key insight.' },
+      ],
+    })
+    expect(designed.theme).toEqual({ accent: 'emerald', style: 'editorial' })
+    expect(designed.blocks[0]!.span).toBe('full')
+    expect(designed.blocks[1]!.span).toBe('wide')
+    expect(designed.blocks[2]!.span).toBe('narrow')
+
+    expect(() => parseSpaceSchema({ theme: { accent: 'neon-pink' }, blocks: [] })).toThrow(SpaceSchemaError)
+    expect(() => parseSpaceSchema({ blocks: [{ id: 'a', type: 'checklist', title: 'X', span: 'giant' }] })).toThrow(SpaceSchemaError)
+    expect(() => parseSpaceSchema({ blocks: [{ id: 'a', type: 'chart', title: 'C', mode: '3d-pie', valueField: 'v' }] })).toThrow(SpaceSchemaError)
+    expect(() => parseSpaceSchema({
+      blocks: [{ id: 'a', type: 'metrics', title: 'M', cards: [{ label: 'Bad', target: -5 }] }],
+    })).toThrow(SpaceSchemaError)
+  })
+
+  it('validates cards blocks, full html blocks, and safe image URLs', () => {
+    const rich = parseSpaceSchema({
+      theme: { accent: 'rose', style: 'editorial' },
+      blocks: [
+        { id: 'gallery', type: 'cards', title: 'Showcase', columns: 3, aspect: 'wide', span: 'full' },
+        { id: 'canvas', type: 'html', title: 'Custom HTML', frameless: true, height: 520, html: '<section class="hero"><h1>Hello</h1></section>' },
+        { id: 'tbl', type: 'table', title: 'With Thumbs', columns: [{ key: 'logo', label: 'Logo', kind: 'image' }] },
+      ],
+    })
+    expect(rich.blocks).toHaveLength(3)
+    expect(rich.blocks[0]!.type).toBe('cards')
+    expect(rich.blocks[1]!.type).toBe('html')
+
+    expect(isSafeImageUrl('https://cdn.example.com/pic.png')).toBe(true)
+    expect(isSafeImageUrl('/api/uploads/abc123.png')).toBe(true)
+    expect(isSafeImageUrl('/api/screenshots/scout/12.png')).toBe(true)
+    expect(isSafeImageUrl('/api/spaces/space-11111111/assets/0123456789abcdef.png')).toBe(true)
+    expect(isSafeImageUrl('data:image/png;base64,iVBORw0KGgo=')).toBe(true)
+    expect(isSafeImageUrl('javascript:alert(1)')).toBe(false)
+    expect(isSafeImageUrl('data:text/html;base64,PHNjcmlwdD4=')).toBe(false)
+    expect(isSafeImageUrl('/api/uploads/../auth-token')).toBe(false)
+
+    const cardsBlock = rich.blocks[0]!
+    expect(sanitizeItemData({ image: '/api/spaces/space-11111111/assets/0123456789abcdef.png', url: 'https://acme.test', metric: '$29' }, cardsBlock)).toEqual({
+      image: '/api/spaces/space-11111111/assets/0123456789abcdef.png',
+      url: 'https://acme.test',
+      metric: '$29',
+    })
+    expect(() => sanitizeItemData({ image: 'javascript:alert(1)' }, cardsBlock)).toThrow(SpaceSchemaError)
+    expect(() => sanitizeItemData({ url: 'javascript:alert(1)' }, cardsBlock)).toThrow(SpaceSchemaError)
+
+    expect(() => parseSpaceSchema({ blocks: [{ id: 'bad', type: 'cards', title: 'Bad', columns: 5 }] })).toThrow(SpaceSchemaError)
+    expect(() => parseSpaceSchema({ blocks: [{ id: 'bad', type: 'html', title: 'Bad' }] })).toThrow(SpaceSchemaError)
+    expect(() => parseSpaceSchema({ blocks: [{ id: 'bad', type: 'html', title: 'Bad', html: '<p>x</p>', height: 50 }] })).toThrow(SpaceSchemaError)
+  })
+
+  it('pairs full HTML views with native radar and scoreboard blocks, and validates both team logo fields', () => {
+    const radar = parseSpaceSchema(buildTemplateSchema('radar', 'chief'))
+    expect(radar.blocks).toContainEqual(expect.objectContaining({ id: 'competitors', type: 'cards', variant: 'competitor' }))
+    expect(radar.blocks).toContainEqual(expect.objectContaining({
+      type: 'html', viewOf: ['competitors'], html: expect.stringMatching(/^<!doctype html>/i),
+    }))
+    const scoreboard = parseSpaceSchema(buildTemplateSchema('scoreboard', 'chief'))
+    expect(scoreboard.blocks).toContainEqual(expect.objectContaining({ type: 'html', viewOf: ['games', 'standings'] }))
+    const games = scoreboard.blocks.find((block) => block.id === 'games')!
+    expect(sanitizeItemData({
+      awayLogo: 'https://league.example/away.svg',
+      homeLogo: '/api/spaces/space-11111111/assets/0123456789abcdef.png',
+      awayScore: 0,
+    }, games)).toEqual({
+      awayLogo: 'https://league.example/away.svg',
+      homeLogo: '/api/spaces/space-11111111/assets/0123456789abcdef.png',
+      awayScore: 0,
+    })
+    expect(() => sanitizeItemData({ homeLogo: '/api/uploads/../auth-token' }, games)).toThrow(SpaceSchemaError)
+    expect(() => parseSpaceSchema({
+      blocks: [{ id: 'canvas', type: 'html', title: 'Canvas', html: '<main></main>', viewOf: ['missing'] }],
+    })).toThrow(/refer to native blocks/)
   })
 })

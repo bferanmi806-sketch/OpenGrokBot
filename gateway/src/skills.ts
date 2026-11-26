@@ -2,10 +2,12 @@ import { constants } from 'node:fs'
 import { lstat, open, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { BUILTIN_SKILLS } from './builtin-skills.js'
 
 /**
- * 共享技能：操作者写在 <数据目录>/skills/*.md 里的做事手册，加上随网关发布的只读预置手册（gateway/skills/*.md），
+ * 共享技能：操作者写在 <数据目录>/skills/*.md 里的做事手册，加上随网关发布的只读预置手册（builtin-skills.ts 与 gateway/skills/*.md），
  * 所有同事都能读，谁也不能改；用户同名技能自动覆盖内置版本。
+ * 能力（技能、工具）全员共享，上下文（记忆、routine）各归各——和 Grok Bot 划的界一样。
  * 系统提示词里只列名字和一句话，正文用 read_skill 按需取，省得每个回合都背着全部手册。
  */
 export type Skill = { name: string; description: string; builtin?: boolean }
@@ -16,6 +18,12 @@ const MAX_DESCRIPTION = 160
 const MAX_SKILL_FILE_BYTES = 256 * 1024
 
 type LoadedSkill = { name: string; description: string; body: string; builtin?: boolean }
+
+export type MergedSkillsOptions = {
+  userDir?: string
+  builtinDir?: string
+  includeEmbeddedBuiltins?: boolean
+}
 
 export function skillsDir(dataDir: string): string {
   return join(dataDir, 'skills')
@@ -109,39 +117,76 @@ export async function readSkill(dir: string, name: string): Promise<string | nul
 }
 
 /**
- * 统一解析双层技能目录（供 listMergedSkills 与 readMergedSkill 共用，确保列举与读取 100% 一致）：
+ * 统一解析双层技能目录（供 listMergedSkills / listAllSkills 与 readMergedSkill / readAnySkill 共用，确保列举与读取 100% 一致）：
  * 1. 扫描全部合法可读的用户技能（记录全量名字集合，即便第 51+ 个用户文件同名覆盖内置技能也不会回退泄漏内置版）；
  * 2. 优先保留最多 MAX_SKILLS（50）条用户自定义技能（不带 builtin 字段）；
  * 3. 剩余槽位按字典序补入未被用户覆盖的预置技能（标记 builtin: true），合并后按技能名字典序排列。
  */
-async function resolveMergedCatalog(opts: { userDir?: string; builtinDir?: string }): Promise<LoadedSkill[]> {
+async function resolveMergedCatalog(opts: MergedSkillsOptions): Promise<LoadedSkill[]> {
   const allUser = opts.userDir ? await scanValidSkills(opts.userDir) : []
   const userNames = new Set(allUser.map((s) => s.name))
   const userKept = allUser.slice(0, MAX_SKILLS)
   const remaining = Math.max(0, MAX_SKILLS - userKept.length)
   const builtinKept: LoadedSkill[] = []
-  if (opts.builtinDir && remaining > 0) {
-    const allBuiltin = await scanValidSkills(opts.builtinDir)
-    for (const s of allBuiltin) {
+  if (remaining > 0 && (opts.builtinDir || opts.includeEmbeddedBuiltins)) {
+    const byName = new Map<string, LoadedSkill>()
+    if (opts.includeEmbeddedBuiltins) {
+      for (const b of BUILTIN_SKILLS) {
+        if (!NAME.test(b.name)) continue
+        byName.set(b.name, {
+          name: b.name,
+          description: b.description.length > MAX_DESCRIPTION ? `${b.description.slice(0, MAX_DESCRIPTION - 1)}…` : b.description,
+          body: b.body.trim(),
+          builtin: true,
+        })
+      }
+    }
+    if (opts.builtinDir) {
+      const diskBuiltins = await scanValidSkills(opts.builtinDir)
+      for (const s of diskBuiltins) {
+        byName.set(s.name, { ...s, builtin: true })
+      }
+    }
+    const sortedBuiltins = [...byName.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    for (const s of sortedBuiltins) {
       if (userNames.has(s.name)) continue
-      builtinKept.push({ ...s, builtin: true })
+      builtinKept.push(s)
       if (builtinKept.length >= remaining) break
     }
   }
   return [...userKept, ...builtinKept].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 }
 
-export async function listMergedSkills(opts: { userDir?: string; builtinDir?: string }): Promise<Skill[]> {
+export async function listMergedSkills(opts: MergedSkillsOptions): Promise<Skill[]> {
   const catalog = await resolveMergedCatalog(opts)
   return catalog.map((s) =>
     s.builtin ? { name: s.name, description: s.description, builtin: true } : { name: s.name, description: s.description },
   )
 }
 
-export async function readMergedSkill(opts: { userDir?: string; builtinDir?: string }, name: string): Promise<string | null> {
+export async function readMergedSkill(opts: MergedSkillsOptions, name: string): Promise<string | null> {
   const wanted = name.trim().toLowerCase().replace(/\.md$/, '')
   if (!NAME.test(wanted)) return null
   const catalog = await resolveMergedCatalog(opts)
   const hit = catalog.find((s) => s.name === wanted)
   return hit ? hit.body : null
+}
+
+/** 合并用户自定义技能与内置技能（如 space-design）；同名时以操作者在 <dataDir>/skills/ 中写入的版本为准 */
+export async function listAllSkills(dir?: string): Promise<Skill[]> {
+  return listMergedSkills({
+    ...(dir ? { userDir: dir } : {}),
+    includeEmbeddedBuiltins: true,
+  })
+}
+
+/** 按需读取技能正文：优先读操作者目录里的自定义版本，找不到再回落到内置技能 */
+export async function readAnySkill(dir: string | undefined, name: string): Promise<string | null> {
+  return readMergedSkill(
+    {
+      ...(dir ? { userDir: dir } : {}),
+      includeEmbeddedBuiltins: true,
+    },
+    name,
+  )
 }

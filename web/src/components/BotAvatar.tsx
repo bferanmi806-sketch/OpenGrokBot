@@ -109,7 +109,7 @@ type Props = {
   title?: string
 }
 
-const INK = '#141821'
+const INK = '#0c0f19'
 
 export function BotAvatar({ seed, emoji, size = 'md', state, title }: Props) {
   const look = avatarLook(seed, emoji)

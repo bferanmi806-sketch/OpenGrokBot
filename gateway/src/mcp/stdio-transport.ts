@@ -4,7 +4,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { McpCallError, type McpCallResult, type McpDiscoveredTool } from './types.js'
 
 export const MCP_PROTOCOL_VERSION = '2025-03-26'
-export const MCP_CLIENT_INFO = { name: 'OpenSuperBot', version: '0.8.1' } as const
+export const MCP_CLIENT_INFO = { name: 'OpenSuperBot', version: '0.8.2' } as const
 
 export const DEFAULT_HANDSHAKE_TIMEOUT_MS = 20_000
 export const DEFAULT_CALL_TIMEOUT_MS = 30_000

@@ -307,7 +307,7 @@ Build 驱动你本机的 `grok` 命令行——会话按项目分组，Markdown�
 - [x] **统一「今日」工作台、凭证库、原生 Polery 文档与长会话上下文护栏**——持续自定义网络 **Feed**、对话自动整理的**灵感 / 待办 / 目标**、零 JS 声明式**实时空间（Live Spaces）**、本机 `0600` **凭证保险箱（Vault）**（TOTP + HTTPS 域名白名单 + `${vault:...}` 引用）、原生 OAuth 2.1 **Polery 文档**、深浅主题切换，以及自动上下文窗口压缩、大结果落盘、循环保护与 FTS5 历史检索（v0.8.1）
 - [ ] **macOS 26 上的 Apple container 后端**（免 Docker 的轻量虚拟机隔离）与 Windows 桌面安装包。计划见
       [docs/local-computers.md](docs/local-computers.md)
-- [ ] Telegram 作为离开电脑时的通知 / 审批补位渠道
+- [ ] **本机即时通讯渠道（iMessage、WhatsApp 与 Telegram）**——无需公网 IP 或云服务器的本地接入：macOS iMessage（只读 `chat.db` + `osascript`）、WhatsApp Linked Device（扫码配对）及 Telegram 长轮询；内置联系人/同事双层白名单、验证码与敏感链接脱敏、冻结发信审批，以及离开电脑时的远程指令与 `#ID` 审批闭环（[设计](docs/superpowers/specs/2026-11-26-imessage-whatsapp-channels-design.md) · [计划](docs/superpowers/plans/2026-11-26-imessage-whatsapp-channels.md)）
 - [ ] 一条命令起 VPS 镜像（cloud-init）
 
 ## 常见问题

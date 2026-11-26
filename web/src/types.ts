@@ -1122,35 +1122,59 @@ export type UpdateGoalPatch = {
 }
 
 export type SpaceRole = 'viewer' | 'editor'
-export type SpaceTemplateId = 'tracker' | 'kanban' | 'dashboard' | 'blank'
+export type SpaceTemplateId = 'radar' | 'scoreboard' | 'tracker' | 'kanban' | 'dashboard' | 'cards' | 'html' | 'blank'
+export type SpaceAccent = 'slate' | 'blue' | 'indigo' | 'emerald' | 'amber' | 'rose'
+export type SpaceHeaderStyle = 'editorial' | 'minimal'
+export type SpaceBlockSpan = 'full' | 'wide' | 'half' | 'narrow'
+export type MetricTone = 'neutral' | 'accent' | 'positive' | 'warning' | 'danger'
+export type ChartMode = 'bar' | 'horizontal' | 'donut' | 'area'
+export type MarkdownVariant = 'default' | 'callout'
+export type CardsAspect = 'wide' | 'square' | 'compact'
+export type CardVariant = 'competitor' | 'matchup'
+
+export type SpaceTheme = {
+  accent: SpaceAccent
+  style?: SpaceHeaderStyle
+}
 
 export type MetricCardDef = {
   label: string
   value?: string
   unit?: string
   trend?: string
+  tone?: MetricTone
+  target?: number
   blockId?: string
   agg?: 'count' | 'sum' | 'avg'
   itemField?: string
   filterStatus?: string
 }
 
-export type TableColumnKind = 'text' | 'number' | 'badge' | 'url' | 'date'
+export type TableColumnKind = 'text' | 'number' | 'badge' | 'url' | 'date' | 'image'
 export type TableColumnDef = { key: string; label: string; kind: TableColumnKind }
-export type KanbanColumnDef = { key: string; label: string }
+export type KanbanColumnDef = { key: string; label: string; color?: SpaceAccent }
 export type SpaceActionDef = { id: string; label: string; botId: string; prompt: string; confirm?: boolean }
 
-export type SpaceBlock =
-  | { id: string; type: 'metrics'; title: string; cards: MetricCardDef[] }
-  | { id: string; type: 'table'; title: string; columns: TableColumnDef[] }
-  | { id: string; type: 'kanban'; title: string; columns: KanbanColumnDef[] }
-  | { id: string; type: 'checklist'; title: string }
-  | { id: string; type: 'timeline'; title: string }
-  | { id: string; type: 'chart'; title: string; mode: 'bar' | 'horizontal'; labelField: string; valueField: string; unit?: string; sourceBlockId?: string }
-  | { id: string; type: 'markdown'; title: string; content: string }
-  | { id: string; type: 'action_bar'; title: string; actions: SpaceActionDef[] }
+type SpaceBlockMeta = {
+  id: string
+  title: string
+  subtitle?: string
+  span?: SpaceBlockSpan
+}
 
-export type SpaceSchema = { blocks: SpaceBlock[] }
+export type SpaceBlock =
+  | (SpaceBlockMeta & { type: 'metrics'; cards: MetricCardDef[] })
+  | (SpaceBlockMeta & { type: 'table'; columns: TableColumnDef[] })
+  | (SpaceBlockMeta & { type: 'kanban'; columns: KanbanColumnDef[] })
+  | (SpaceBlockMeta & { type: 'checklist' })
+  | (SpaceBlockMeta & { type: 'timeline' })
+  | (SpaceBlockMeta & { type: 'chart'; mode: ChartMode; labelField: string; valueField: string; unit?: string; sourceBlockId?: string })
+  | (SpaceBlockMeta & { type: 'markdown'; content: string; variant?: MarkdownVariant })
+  | (SpaceBlockMeta & { type: 'action_bar'; actions: SpaceActionDef[] })
+  | (SpaceBlockMeta & { type: 'cards'; columns?: 2 | 3; aspect?: CardsAspect; variant?: CardVariant })
+  | (SpaceBlockMeta & { type: 'html'; html: string; height?: number; frameless?: boolean; viewOf?: string[] })
+
+export type SpaceSchema = { theme?: SpaceTheme; blocks: SpaceBlock[] }
 export type SpaceItemPrimitive = string | number | boolean | null
 export type SpaceItemData = Record<string, SpaceItemPrimitive>
 
@@ -1204,6 +1228,7 @@ export type CreateSpaceInput = {
   description?: string
   icon?: string
   template?: SpaceTemplateId
+  theme?: SpaceTheme
   goalId?: string | null
   schema?: SpaceSchema
   grants?: SpaceGrant[]

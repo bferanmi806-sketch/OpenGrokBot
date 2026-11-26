@@ -324,8 +324,9 @@ describe('createApp with builtinSkills: true', () => {
     const panelRes = await app.request('/api/bots/researcher/computer')
     expect(panelRes.status).toBe(200)
     const panel = (await panelRes.json()) as { skills: Array<{ name: string; description: string; builtin?: boolean }> }
-    expect(panel.skills).toHaveLength(6)
+    expect(panel.skills).toHaveLength(7)
     expect(panel.skills.every((s) => s.builtin === true)).toBe(true)
+    expect(panel.skills.some((s) => s.name === 'space-design')).toBe(true)
 
     // Turn prep injects all 6 skills into system prompt, provides read_skill, and keeps turn untainted (rule auto-approves!)
     await app.request(`/api/threads/${DM}/messages`, {
@@ -364,7 +365,7 @@ describe('createApp with builtinSkills: true', () => {
     const panel = (await (await app.request('/api/bots/researcher/computer')).json()) as {
       skills: Array<{ name: string; builtin?: boolean }>
     }
-    expect(panel.skills).toHaveLength(6)
+    expect(panel.skills).toHaveLength(7)
     expect(panel.skills.every((s) => s.builtin === true)).toBe(true)
   })
 })

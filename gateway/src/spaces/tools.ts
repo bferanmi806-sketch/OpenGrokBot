@@ -3,18 +3,19 @@ import type { BotRow, Db } from '../db.js'
 import { getGoal, isGoalId } from '../goals/store.js'
 import type { Hub } from '../hub.js'
 import type { ToolDef } from '../llm.js'
-import { parseSpaceSchema, SpaceSchemaError } from './schema.js'
+import { parseSpaceSchema, parseSpaceTheme, sanitizeItemData, SpaceSchemaError } from './schema.js'
 import {
   createSpace,
   deleteSpaceItem,
   getBotSpaceRole,
+  getSpaceItem,
   listSpaceItems,
   resolveSpace,
   updateSpace,
   upsertSpaceItem,
 } from './store.js'
 import { buildTemplateSchema, defaultIconForTemplate } from './templates.js'
-import { SPACE_TEMPLATE_IDS, type SpaceTemplateId, type SpaceUpdatedPayload } from './types.js'
+import { SPACE_ACCENTS, SPACE_TEMPLATE_IDS, type SpaceTemplateId, type SpaceTheme, type SpaceUpdatedPayload } from './types.js'
 
 export const MANAGE_SPACE_TOOL_NAME = 'manage_space'
 export const SPACE_READ_TOOL_NAME = 'space_read'
@@ -27,7 +28,7 @@ export const MANAGE_SPACE_TOOL: ToolDef = {
   function: {
     name: MANAGE_SPACE_TOOL_NAME,
     description:
-      'Create or update a declarative Space (live board/tracker) or its block schema when your operator asks. Only available in turns started by your operator; zero arbitrary JS/HTML.',
+      'Create or update a Space (live dashboard, rich card gallery, or full sandboxed HTML/CSS/SVG/JS canvas) when your operator asks. Call read_skill("space-design") first to craft strong visual hierarchy, themes, Bento layouts, rich image cards, or bespoke HTML designs. Only available in operator-started turns.',
     parameters: {
       type: 'object',
       properties: {
@@ -47,11 +48,20 @@ export const MANAGE_SPACE_TOOL: ToolDef = {
         template: {
           type: 'string',
           enum: [...SPACE_TEMPLATE_IDS],
-          description: 'Optional built-in declarative template for action="create" (tracker, kanban, dashboard, blank).',
+          description: 'Optional built-in template for action="create". Use radar for competitor monitoring and scoreboard for game schedules, team logos, scores, and standings.',
+        },
+        theme: {
+          type: 'object',
+          description: `Optional visual theme: { accent: ${SPACE_ACCENTS.join('|')}, style?: "editorial"|"minimal" }.`,
+          properties: {
+            accent: { type: 'string', enum: [...SPACE_ACCENTS] },
+            style: { type: 'string', enum: ['editorial', 'minimal'] },
+          },
         },
         blocks: {
           type: 'array',
-          description: 'Declarative blocks array (metrics, table, kanban, checklist, timeline, chart, markdown, action_bar).',
+          description:
+            'Blocks array: metrics, table (columns: text|number|badge|url|date|image), kanban, checklist, timeline, chart (bar|horizontal|donut|area), markdown (default|callout), action_bar, cards (columns: 2|3, aspect: wide|square|compact, optional variant: competitor|matchup), and html ({ html, height?, frameless?, viewOf? } — full sandboxed HTML/CSS/SVG/JS canvas; viewOf lists native block IDs for a switchable view of the same records). Each block supports optional span ("full"|"wide"|"half"|"narrow") and subtitle.',
           items: { type: 'object' },
         },
       },
@@ -96,6 +106,7 @@ export const SPACE_UPSERT_ITEM_TOOL: ToolDef = {
           type: 'object',
           description: 'Flat JSON key-value fields (strings, numbers, booleans, or null; URL columns require http(s)).',
         },
+        merge_data: { type: 'boolean', description: 'Update only supplied fields on an existing record. Defaults to true for competitor and matchup cards, false for other blocks. Set a field to null to clear it.' },
       },
       required: ['space_id', 'block_id', 'title'],
     },
@@ -165,11 +176,17 @@ export function runManageSpaceCall(input: {
     const template: SpaceTemplateId = (SPACE_TEMPLATE_IDS as readonly string[]).includes(templateRaw)
       ? (templateRaw as SpaceTemplateId)
       : 'blank'
+    let themeOverride: SpaceTheme | undefined
+    try {
+      themeOverride = parseSpaceTheme(args.theme)
+    } catch (err) {
+      return { ok: false, text: err instanceof SpaceSchemaError ? err.message : 'Invalid space theme.' }
+    }
     let schema
     try {
       schema = Array.isArray(args.blocks)
-        ? parseSpaceSchema({ blocks: args.blocks })
-        : parseSpaceSchema(buildTemplateSchema(template, botId))
+        ? parseSpaceSchema({ ...(themeOverride ? { theme: themeOverride } : {}), blocks: args.blocks })
+        : parseSpaceSchema(buildTemplateSchema(template, botId, themeOverride))
     } catch (err) {
       return { ok: false, text: err instanceof SpaceSchemaError ? err.message : 'Invalid space schema.' }
     }
@@ -273,7 +290,8 @@ export function runManageSpaceCall(input: {
     if (!Array.isArray(args.blocks)) return { ok: false, text: 'set_schema needs a "blocks" array.' }
     let nextSchema
     try {
-      nextSchema = parseSpaceSchema({ blocks: args.blocks })
+      const nextTheme = args.theme !== undefined ? parseSpaceTheme(args.theme) : existing.schema.theme
+      nextSchema = parseSpaceSchema({ ...(nextTheme ? { theme: nextTheme } : {}), blocks: args.blocks })
     } catch (err) {
       return { ok: false, text: err instanceof SpaceSchemaError ? err.message : 'Invalid blocks schema.' }
     }
@@ -323,6 +341,7 @@ export function runSpaceReadCall(input: {
     slug: space.slug,
     title: space.title,
     role,
+    ...(space.schema.theme ? { theme: space.schema.theme } : {}),
     blocks: space.schema.blocks,
     items: items.map((i) => ({
       id: i.id,
@@ -335,7 +354,7 @@ export function runSpaceReadCall(input: {
     })),
   }
   const serialized = JSON.stringify(payload, null, 2)
-  const text = serialized.length > 10_000 ? `${serialized.slice(0, 10_000)}\n…(truncated)` : serialized
+  const text = serialized.length > 24_000 ? `${serialized.slice(0, 24_000)}\n…(truncated)` : serialized
   return { ok: true, text, spaceId: space.id, goalId: space.goalId, tainted: hasTaintedItems }
 }
 
@@ -359,17 +378,22 @@ export function runSpaceUpsertItemCall(input: {
   const blockId = typeof args.block_id === 'string' ? args.block_id.trim() : ''
   const title = typeof args.title === 'string' ? args.title.trim() : ''
   const itemId = typeof args.item_id === 'string' && args.item_id.trim() ? args.item_id.trim() : undefined
-  const status = typeof args.status === 'string' ? args.status.trim() : ''
   const tainted = ruleBlock !== null
 
   try {
+    const block = space.schema.blocks.find((entry) => entry.id === blockId)
+    const existing = itemId ? getSpaceItem(db, itemId) : null
+    const merge = (args.merge_data === true || (args.merge_data !== false && block?.type === 'cards' && block.variant))
+      && existing?.spaceId === space.id && existing.blockId === blockId
+    const data = merge ? { ...existing.data, ...sanitizeItemData(args.data, block) } : args.data
+    const status = typeof args.status === 'string' ? args.status.trim() : merge ? existing.status : ''
     const { item, created } = upsertSpaceItem(db, {
       spaceId: space.id,
       ...(itemId ? { itemId } : {}),
       blockId,
       title,
       status,
-      data: args.data,
+      data,
       tainted,
       updatedBy: botId,
       now: at,

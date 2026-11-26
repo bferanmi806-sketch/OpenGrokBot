@@ -377,7 +377,12 @@ official xAI product. [Download the latest release](https://github.com/wolfqing/
       search (v0.8.1)
 - [ ] **Apple container backend** on macOS 26 for VM isolation without Docker, and a Windows desktop installer.
       Plan in [docs/local-computers.md](docs/local-computers.md)
-- [ ] Telegram as a notification / approval surface for when you are away from the desk
+- [ ] **Local messaging channels (iMessage, WhatsApp & Telegram)** — zero-public-IP local adapters for macOS
+      iMessage (`chat.db` read-only + `osascript`), WhatsApp Linked Device (`baileys` QR pairing), and Telegram
+      long-polling, with two-tier contact/teammate allowlists, OTP/security-link redaction, frozen write approvals,
+      and remote mobile operator control & `#ID` approval settlement
+      ([design](docs/superpowers/specs/2026-11-26-imessage-whatsapp-channels-design.md) ·
+      [plan](docs/superpowers/plans/2026-11-26-imessage-whatsapp-channels.md))
 - [ ] One-command VPS image (cloud-init)
 
 ## FAQ

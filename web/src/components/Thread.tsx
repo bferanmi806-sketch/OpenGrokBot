@@ -7,6 +7,7 @@ import { ApiError } from '../api'
 import { ACCEPT, isImageType } from '../attachments'
 import { useT, type T } from '../i18n'
 import { errorText, isNotice, noticeText } from '../i18n/describe'
+import { conversationStarters } from '../starters'
 import { ActivityChip } from './ActivityChip'
 import { ApprovalChip } from './ApprovalChip'
 import { AttachmentChip } from './AttachmentChip'
@@ -540,9 +541,7 @@ export function Thread({
       : undefined
 
   const now = new Date()
-  const starters = conversation.kind === 'group'
-    ? [t('thread.starter.group1'), t('thread.starter.group2')]
-    : [t('thread.starter.dm1'), t('thread.starter.dm2')]
+  const starters = conversationStarters(conversation, t)
 
   const sendStarter = (prompt: string) => {
     const sentConvId = conversation.id

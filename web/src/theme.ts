@@ -44,4 +44,6 @@ export function resolveTheme(setting: ThemeSetting, sys: ResolvedTheme = systemT
 export function applyTheme(resolved: ResolvedTheme): void {
   if (typeof document === 'undefined') return
   document.documentElement.dataset.theme = resolved
+  const meta = document.querySelector('meta[name="theme-color"]')
+  if (meta) meta.setAttribute('content', resolved === 'light' ? '#f6f7f9' : '#0c0f19')
 }
