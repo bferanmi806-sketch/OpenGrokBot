@@ -7,6 +7,16 @@ names.
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-26
+
+Midnight Indigo dark mode palette refresh, refined workspace UI polish, recorded browser workflow management in the
+computer panel, and routine dependency updates.
+
+### Added
+
+- **Recorded browser workflow management in the computer panel.** Start/stop browser workflow recordings and inspect or
+  manage saved workflows directly from each teammate's computer panel (#36).
+
 ### Changed
 
 - **Midnight Indigo dark mode palette.** Refined the dark theme across the web workspace (`Today`, conversations,
@@ -18,6 +28,7 @@ names.
   distinct primary and secondary actions in both themes. Subscription cards now fit narrow screens.
 - Redesigned conversation cards in both themes with scannable report lists, amber approval headers, clearer question
   choices, editable rule notes, and a separate log area for background tasks.
+- Routine minor/patch dependency updates including `@testing-library/jest-dom` 8.0.0 (#38, #39).
 
 ## [0.8.1] - 2026-11-21
 
