@@ -657,6 +657,19 @@ describe('the Chinese dictionary', () => {
     expect(translate('en', 'sidebar.preview.dispatchPlan', { title: 'Q3 rollout' })).toBe('Pipeline: Q3 rollout')
     expect(translate('zh-CN', 'sidebar.preview.dispatchPlan', { title: 'Q3 发布' })).toBe('流水线：Q3 发布')
   })
+
+  it('includes Phase 13 built-in and custom skill badge keys in both languages', () => {
+    const requiredSkillKeys: MessageKey[] = ['panel.skills', 'panel.skillBuiltin', 'panel.skillCustom']
+    for (const key of requiredSkillKeys) {
+      expect(en[key]).toBeTruthy()
+      expect(zhCN[key]).toBeTruthy()
+      expect({ key, names: placeholders(zhCN[key]) }).toEqual({ key, names: placeholders(en[key]) })
+    }
+    expect(en['panel.skillBuiltin']).toBe('Built-in')
+    expect(zhCN['panel.skillBuiltin']).toBe('内置')
+    expect(en['panel.skillCustom']).toBe('Custom')
+    expect(zhCN['panel.skillCustom']).toBe('自定义')
+  })
 })
 
 describe('translate', () => {

@@ -311,7 +311,7 @@ export type ComputerRoutine = {
   mode?: RoutineMode
 }
 
-export type Skill = { name: string; description: string }
+export type Skill = { name: string; description: string; builtin?: boolean }
 
 /** 动作日志里的一笔：哪个工具、对什么、成没成、谁叫它开始的 */
 export type ActionEntry = {

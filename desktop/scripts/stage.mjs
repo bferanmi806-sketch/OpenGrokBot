@@ -64,6 +64,8 @@ for (const f of readdirSync(join(sqlite, 'prebuilds'))) if (f.startsWith('linuxm
 // 网关运行时要找的几样：缺一样就别往下打包了
 for (const need of [
   'gateway/dist/main.js', 'gateway/package.json',
+  'gateway/skills/careful-browsing.md', 'gateway/skills/doc-drafting.md', 'gateway/skills/meeting-minutes.md',
+  'gateway/skills/research-brief.md', 'gateway/skills/slide-outline.md', 'gateway/skills/spreadsheet-analysis.md',
   'gateway/node_modules/better-sqlite3/lib/index.js', 'gateway/node_modules/playwright-core/cli.js',
   'gateway/node_modules/unpdf/package.json', 'gateway/node_modules/@novnc/novnc/package.json', 'gateway/node_modules/hono/package.json',
   'web/dist/index.html', 'teammates/chief',

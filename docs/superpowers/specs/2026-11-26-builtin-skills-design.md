@@ -28,7 +28,7 @@
 
 | 技能标识（文件名） | 一句话 `description`（`<= 160` 字符） | 核心结构与要点 |
 | :--- | :--- | :--- |
-| `meeting-minutes.md` | `Turn raw meeting notes or transcripts into structured decisions, open questions, and owned action items.` | 结论先行摘要、已拍板决议（含背景依据）、带负责人与截止期的行动项清单、待确认问题，以及同步更新团队 Wiki `session` 页面与目标跟进的规范。 |
+| `meeting-minutes.md` | `Turn raw meeting notes or transcripts into structured decisions, open questions, and owned action items.` | 结论先行摘要、已拍板决议（含背景依据）、带负责人与截止期的行动项清单、待确认问题，以及同步更新团队 Wiki `project` / `topic`（会议专题）页面与目标跟进的规范。 |
 | `research-brief.md` | `Synthesize multi-source web or internal findings into a cited, decision-ready brief separating facts from inference.` | 核心结论、一手与二手信源交叉核验、事实与推断显式区分、方案对比矩阵、未解盲区与下一步行动建议。 |
 | `spreadsheet-analysis.md` | `Inspect CSV, TSV, or spreadsheet files deterministically with scripts before summarizing metrics, anomalies, and trends.` | 先探查表头/行数/空值/单位与重复键、强制用 Python/Node 脚本计算聚合指标（严禁心算编造数字）、口径说明、异常值标注与关键洞察。 |
 | `doc-drafting.md` | `Draft clear, audience-tailored memos, specs, proposals, and emails with conclusions up front and explicit assumptions.` | 受众与目的界定、金字塔结论先行、关键假设与风险单列、精炼段落防空话套话、对外发送前停在草稿或审批门禁。 |
@@ -59,8 +59,8 @@
 ### 3.3 电脑面板来源徽章与打包配置（`web` & `desktop`）
 - `web/src/types.ts`：`Skill` 增加可选 `builtin?: boolean`。
 - `web/src/i18n/en.ts` 与 `web/src/i18n/zh-CN.ts`：新增 `'panel.skillBuiltin'`（`'Built-in'` / `'内置'`）与 `'panel.skillCustom'`（`'Custom'` / `'自定义'`）。
-- `web/src/components/ComputerPanel.tsx`：在每项共享技能标题旁复用现有 `.panel-mode-badge` 样式渲染来源标签（不改动 `web/src/index.css`）。
-- `gateway/package.json`：`"files": ["dist", "skills"]`，使 `pnpm deploy` 自动将 `gateway/skills` 带入桌面发布包；`desktop/scripts/stage.mjs` 在 `need` 校验清单中加入 `'gateway/skills/meeting-minutes.md'` 防止漏包。
+- `web/src/components/ComputerPanel.tsx`：在每项共享技能标题旁复用现有 `.panel-routine-tag`（及 `.panel-routine-tag.prepare`）样式渲染来源标签（不改动 `web/src/index.css`）。
+- `gateway/package.json`：`"files": ["dist", "skills"]`，使 `pnpm deploy` 自动将 `gateway/skills` 带入桌面发布包；`desktop/scripts/stage.mjs` 在 `need` 校验清单中逐一核验全部 6 份 `gateway/skills/*.md` 防止漏包。
 
 ---
 

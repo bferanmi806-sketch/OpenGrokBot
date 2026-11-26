@@ -699,7 +699,12 @@ function PanelBody({ info, botName, onRoutine, onRevokeRule, onForgetRule, onWin
           {skills.map((s) => (
             <div className="panel-rule" key={s.name}>
               <div className="panel-routine-text">
-                <span className="panel-rule-scope">{s.name}</span>
+                <span>
+                  <span className="panel-rule-scope">{s.name}</span>
+                  <span className={s.builtin ? 'panel-routine-tag' : 'panel-routine-tag prepare'}>
+                    {t(s.builtin ? 'panel.skillBuiltin' : 'panel.skillCustom')}
+                  </span>
+                </span>
                 {s.description ? <span className="panel-skill-why">{s.description}</span> : null}
               </div>
             </div>

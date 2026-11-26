@@ -15,7 +15,8 @@
     "node": ">=22"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills"
   ],
   "scripts": {
     "dev": "tsx watch scripts/dev.ts",

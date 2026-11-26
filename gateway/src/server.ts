@@ -96,7 +96,7 @@ import {
 } from './proactive/pacing.js'
 import { screenPagePath, screencastPath } from './screen.js'
 import { saveScreenshot, screenshotFilePath } from './screenshots.js'
-import { listSkills, readSkill, skillsDir } from './skills.js'
+import { defaultBuiltinSkillsDir, listMergedSkills, readMergedSkill, skillsDir } from './skills.js'
 import type { Scheduler } from './scheduler.js'
 import { readBodyUpTo } from './body.js'
 import { mountConnections } from './connections-api.js'
@@ -255,6 +255,8 @@ export type AppDeps = {
   autoDistill?: boolean
   /** 三维主动投递节奏控制（60s Webhook 合并、3m 活跃对话延后、单日 5 条非紧急上限；main.ts 默认开启） */
   proactivePacing?: boolean | ProactivePacingOptions
+  /** 是否挂载随包发布的只读预置共享技能（true = 默认 gateway/skills 目录，字符串 = 自定义内置目录；main.ts 默认开启） */
+  builtinSkills?: boolean | string
   env?: Record<string, string | undefined>
 }
 
@@ -1217,6 +1219,20 @@ export function createApp(deps: AppDeps): GatewayApp {
   })
 
   const botById = (id: string) => db.prepare('SELECT * FROM bots WHERE id = ?').get(id) as BotRow | undefined
+  const resolvedBuiltinSkillsDir =
+    deps.builtinSkills === true
+      ? defaultBuiltinSkillsDir()
+      : typeof deps.builtinSkills === 'string' && deps.builtinSkills.trim()
+        ? deps.builtinSkills.trim()
+        : undefined
+  const skillLocations = {
+    ...(dataDir ? { userDir: skillsDir(dataDir) } : {}),
+    ...(resolvedBuiltinSkillsDir ? { builtinDir: resolvedBuiltinSkillsDir } : {}),
+  }
+  const loadSkills = () =>
+    skillLocations.userDir || skillLocations.builtinDir ? listMergedSkills(skillLocations) : Promise.resolve([])
+  const loadSkillBody = (name: string) =>
+    skillLocations.userDir || skillLocations.builtinDir ? readMergedSkill(skillLocations, name) : Promise.resolve(null)
   const computerKind: ComputerKind = deps.computers?.kind ?? 'docker'
   /** 容器电脑永远有 shell；本机电脑看操作者开没开 */
   const shellEnabledFor = (bot: BotRow) => computerKind !== 'local' || bot.shell_enabled === 1
@@ -1434,7 +1450,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       fields: v.fields.map((f) => f.key),
       approvalMode: v.approvalMode,
     }))
-    const skills = dataDir ? await listSkills(skillsDir(dataDir)) : []
+    const skills = await loadSkills()
     // 这位同事此刻用的模型：回合开始时定下，回合中途改了设置从下一回合起生效
     const own = deps.llmFor?.(bot.id)
     const vision = own ? own.vision : (typeof deps.vision === 'function' ? deps.vision() : deps.vision) === true
@@ -1783,7 +1799,7 @@ export function createApp(deps: AppDeps): GatewayApp {
           return outcome
         },
       } : {}),
-      ...(skills.length ? { skills, onReadSkill: (name: string) => readSkill(skillsDir(dataDir), name) } : {}),
+      ...(skills.length ? { skills, onReadSkill: loadSkillBody } : {}),
       checkBudget: () => budgetNote(bot),
       language: uiLanguage(),
       onMessageBot: ({ to, content, tainted }) => relay(bot, to, content, params.hop ?? 0, tainted),
@@ -3909,7 +3925,7 @@ Complete your step and post a concise summary of your findings or output in this
     const usage = { today: usageSince(db, botId, startOfLocalDay(now(), deps.timeZone)), budget: deps.dailyTokens ?? 0 }
     const rules = listActiveRules(db, botId, now().getTime()).map(ruleView)
     const memory = dataDir ? await listMemoryRules(dataDir, botId) : []
-    const skills = dataDir ? await listSkills(skillsDir(dataDir)) : []
+    const skills = await loadSkills()
     const actions = listActions(db, botId, 30)
     const botGrantSet = new Set(listBotConnectorIds(db, botId))
     const connectors = listConnectorAccounts(db).map((a) => ({

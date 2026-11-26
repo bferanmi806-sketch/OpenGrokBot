@@ -73,23 +73,27 @@ Every line below is implemented and covered by tests — nothing here is a roadm
   amber badge counts the approvals and questions waiting on you, and the tab title carries the total.
 - **One report grammar.** Work comes back as `✓ system → result · count` lines with a single closing sentence
   that surfaces only what needs you. Same shape from every teammate.
-- **Draft-and-hold approvals — editable inline.** Anything leaving the workspace stops at the door: the chip shows
-  exactly what would go out and where, with **Edit** (reword an email, Slack post, Notion page, calendar event, MCP
-  arguments, or prompt hold right inside the card before approving), Approve, and Discard. A bare 👍 in the thread
-  releases the newest one. Decisions are idempotent — a second click gets a 409, not a second send. When the same
-  action goes to many people, the chip lists every one with a checkbox: untick any, and the teammate does exactly the
-  rest.
+- **Draft-and-hold approvals — editable inline (plus deterministic computer guardrails).** Anything leaving the workspace
+  or carrying irreversible local risk stops at the door: alongside frozen connector writes, MCP write tools, and Vault
+  autofill, a deterministic safety guardrail intercepts high-risk `shell` commands (destructive deletes, credential-path
+  reads, outbound uploads/pipes, force-pushes, privilege/system mutations) and irreversible browser submits (checkout/pay,
+  permanent delete, outbound send/publish, bound to `expectedOrigin` against cross-site drift). The chip shows what would
+  run, with **Edit** (adjust draft fields or command arguments inline before one-shot execution), Approve, and Discard.
+  A bare 👍 in the thread releases the newest one. Decisions are idempotent — a second click gets a 409, not a second
+  send. When the same action goes to many people, the chip lists every one with a checkbox: untick any, and the teammate
+  does exactly the rest.
 - **Standing approvals, on your terms.** For an email, message or post to one destination, *Always allow…*
   approves it and lets that teammate repeat it without asking — for an hour, a day or until you revoke it from
-  the computer panel. Money, bookings and anything unclassified always ask.
+  the computer panel. Money, bookings, guardrail holds, and anything unclassified always ask.
 - **Questions you answer with a tap.** When the next step is one of a few clear choices, the teammate posts a
   card with buttons instead of a wall of options, and waits.
-- **Visible memory & controlled dreaming.** "From now on, quiet accounts wait for my read" writes a rule into that
+- **Visible memory & conversational dreaming.** "From now on, quiet accounts wait for my read" writes a rule into that
   bot's `MEMORY.md` and posts the diff as a chip; "forget that rule" removes it the same way, and the computer panel
   lists every rule with a remove button. The file lives outside the bot's computer, so a chip marks every change.
-  Repeated discards (≥ 2 in 14 days) or a teammate's `propose_memory_rule` call never edit `MEMORY.md` directly — they
-  post an editable **Rule proposal** card (`Save to MEMORY.md` / `Dismiss`) with an amber warning badge whenever
-  external data was in context.
+  Repeated discards (≥ 2 in 14 days), natural-language notification feedback after proactive updates (two-stage clue
+  accumulation or explicit standing preferences), or a teammate's `propose_memory_rule` call never edit `MEMORY.md`
+  directly — they post an editable **Rule proposal** card (`Save to MEMORY.md` / `Dismiss`) with monotonic amber taint
+  warnings whenever external data was in context.
 - **Unified Today workspace (`Feed`, `Ideas`, `Tracking & Goals`, `Spaces`).** A single daily overview next to your
   teammates:
   - *Continuous Custom Web Feed:* Define prompt-driven web topics that continuously scan the web in the background via
@@ -106,15 +110,18 @@ Every line below is implemented and covered by tests — nothing here is a roadm
   grants, `${vault:<slug>.<field>}` references in MCP configs, approval/taint-gated `vault_fill`, and automatic output
   redaction.
 - **Shared team entity Wiki.** A zero-vector-DB knowledge base (`contact`, `client`, `project`, `topic`) backed by
-  SQLite FTS5 with CJK/English tokenization, multi-query RRF × recency ranking (`wiki_search`, `wiki_read`,
-  `wiki_upsert`), atomic `<data>/wiki/` Markdown mirrors, revision history, an in-app **Team Wiki** browser/editor,
-  and explicit *Review & verify* taint tracking.
-- **Routines, `prepare` mode & Quiet Hours.** "Post a digest every day" registers a cron job, shows the schedule in
-  plain English, survives restarts, and never runs twice at once. "Whenever a new issue comes in" gives the routine a
-  secret webhook address instead. Choose `watch` (strictly read-only, silent unless needed) or `prepare` (read-only
-  plus `wiki_upsert` and workspace `write_file` to assemble briefs ahead of time). Turn on opt-in **Quiet Hours** in
-  Settings to hold non-urgent scheduled `watch`/`prepare` updates for a single **Morning digest** per teammate while
-  urgent alerts (`urgent: true`), approvals, questions, and manual runs always break through immediately.
+  SQLite FTS5 with CJK/English tokenization and multi-query RRF × recency ranking: dual-list `wiki_search` returns both
+  structured Wiki pages and bot-accessible original chat messages; `wiki_patch` performs validated section/bullet updates
+  preserving `[#msg:<id>]` citations with gateway-appended `## Change Log` entries; idle `P3` background auto-sync (plus
+  manual **Sync from chats**) distills discussions into `<data>/wiki/` Markdown mirrors with revision history and taint
+  verification.
+- **Routines, `prepare` mode, Quiet Hours & 3D delivery pacing.** "Post a digest every day" registers a cron job, shows
+  the schedule in plain English, survives restarts, and never runs twice at once. "Whenever a new issue comes in" gives
+  the routine a secret webhook address with 60s multi-event coalescing. Choose `watch` (strictly read-only, silent unless
+  needed) or `prepare` (read-only plus `wiki_upsert` / `wiki_patch` and workspace `write_file`). Built-in delivery pacing
+  defers non-urgent updates for 3 minutes during active chats, overflows beyond 5 non-urgent notifications/day into Today
+  Feed & digest, and holds Quiet Hours updates for a **Morning digest** while urgent alerts (`urgent: true`), approvals,
+  questions, and manual runs always break through immediately.
 - **Non-blocking background tasks (Meta / AlterEgo).** A teammate can offload long multi-step research, drafting, or
   browsing onto a secondary background lane (`delegate_background_task`) while its foreground chat stays immediately
   responsive. Watch live steps, send mid-flight steering notes, or cancel from the thread chip or computer panel; a
@@ -123,11 +130,11 @@ Every line below is implemented and covered by tests — nothing here is a roadm
   built-in priority semaphore (`P0 interactive` > `P1 background` > `P2 routines` > `P3 low`) lets interactive chats
   and approvals jump ahead between steps without cloud-API overhead (configurable in **Settings → Local model
   concurrency**).
-- **Long-session context guardrails & runtime reliability.** Automatic model context-window budgeting and in-turn
-  tool-result pruning, per-`(thread, bot)` checkpoint compaction, workspace spill for oversized tool outputs, repeat-call
-  loop guards, SQLite FTS5 `search_history` with strict per-bot isolation, bounded parallel read-tool execution,
-  optimistic `write_file` stale guards, jittered LLM retry with tool JSON validation, sleep/wake latest-only scheduler
-  catch-up, and an instant recent-thread LRU cache in the client.
+- **Long-session context guardrails, associative Flashback & redacted diagnostics.** Automatic model context-window
+  budgeting and in-turn tool-result pruning, per-`(thread, bot)` checkpoint compaction, workspace spill for oversized
+  outputs, repeat-call loop guards, isolated `search_history`, and zero-LLM **associative Flashback recall** (surfacing
+  untainted Wiki & out-of-window decisions in a trailing read-only fence with 15m/4-turn and 24h cooldowns without
+  invalidating KV-cache prefixes) — plus one-click redacted diagnostics copy/JSON export in **Settings → About**.
 - **Dark & Light themes + one-click default model.** Switch Dark, Light, or System appearance from the sidebar or
   Settings, and promote any connection in **AI models** to default in one click.
 - **Recorded workflow traces and replay.** API controls record typed browser steps on a teammate's existing page
@@ -137,8 +144,10 @@ Every line below is implemented and covered by tests — nothing here is a roadm
 - **Hand it a file.** Attach images, PDFs, text or Markdown files to a message: paperclip, paste or drag. The file
   lands in the teammate's own folder where it can open it, a model that sees images gets the picture, and a PDF
   arrives with its text extracted so it can be read. See [docs/attachments.md](docs/attachments.md).
-- **Shared skills.** Drop a Markdown playbook into `<data>/skills/` and every teammate sees it and reads it
-  before work it covers. Memory and routines stay with each teammate; skills are shared.
+- **Shared skills (built-in starter pack + your own).** Ships out of the box with 6 read-only starter playbooks
+  (`meeting-minutes`, `research-brief`, `spreadsheet-analysis`, `doc-drafting`, `slide-outline`, `careful-browsing`),
+  and any Markdown playbook you drop into `<data>/skills/` is shared across every teammate — or overrides a same-named
+  built-in cleanly across upgrades. Memory and routines stay with each teammate; skills are shared.
 - **See the work, stop the work.** Every step on its computer — the command, the page, the click — shows live
   in one card that folds away when the turn ends. A stop button ends the turn. Every action also lands in a log
   you can read from the computer panel, with what started it.

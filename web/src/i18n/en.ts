@@ -395,6 +395,8 @@ export const en = {
   'panel.forgetAria': 'Forget: {rule}',
   'panel.forgetTitle': 'Forget this rule',
   'panel.skills': 'Shared skills',
+  'panel.skillBuiltin': 'Built-in',
+  'panel.skillCustom': 'Custom',
   'panel.connectors': 'Connectors',
   'panel.connectorsHint': 'Checked accounts can be read by this teammate; outward actions still ask for your approval.',
   'panel.connectorsEmpty': 'No accounts connected yet. Open Connectors in the sidebar to add one.',

@@ -78,6 +78,7 @@ import {
   type SpaceToolResult,
 } from './spaces/tools.js'
 import { validateReportPayload, type ReportPayload } from './report.js'
+import type { Skill } from './skills.js'
 import { normalizeMode, normalizeSurface, type RoutineMode, type RoutineSurface } from './routines.js'
 import { DEFAULT_SPILL_THRESHOLD_CHARS, SHELL_SPILL_THRESHOLD_CHARS, detachSlice, spillToolOutput } from './spill.js'
 import { MAX_PARALLEL_READ_TOOLS, partitionToolBatches, runWithConcurrency } from './tool-batch.js'
@@ -203,7 +204,7 @@ export type AgentDeps = {
   /** 每调一次工具记一笔（动作日志） */
   onAction?: (action: { tool: string; summary: string; ok: boolean; ms: number; goalId?: string }) => void
   /** 共享技能的名字和一句话说明；正文经 onReadSkill 取 */
-  skills?: { name: string; description: string }[]
+  skills?: Skill[]
   onReadSkill?: (name: string) => Promise<string | null>
   /** 一个回合最多调几次模型；不传或 ≤0 用默认值 */
   maxSteps?: number
@@ -1554,7 +1555,9 @@ async function execReadSkill(deps: AgentDeps, args: Record<string, unknown>): Pr
   const names = (deps.skills ?? []).map((s) => s.name)
   if (!deps.onReadSkill || !names.length) return 'There are no shared skills on this gateway.'
   const name = String(args.name ?? '').trim()
-  const text = name ? await deps.onReadSkill(name) : null
+  const wanted = name.toLowerCase().replace(/\.md$/, '')
+  if (!wanted || !names.includes(wanted)) return `No skill called "${name}". The shared skills are: ${names.join(', ')}.`
+  const text = await deps.onReadSkill(wanted)
   if (text === null) return `No skill called "${name}". The shared skills are: ${names.join(', ')}.`
   return sliceForModel(text, args, 'read_skill', 'skill')
 }

@@ -392,6 +392,8 @@ export const zhCN: Record<MessageKey, string> = {
   'panel.forgetAria': '忘掉：{rule}',
   'panel.forgetTitle': '忘掉这条规矩',
   'panel.skills': '共享技能',
+  'panel.skillBuiltin': '内置',
+  'panel.skillCustom': '自定义',
   'panel.connectors': '连接器',
   'panel.connectorsHint': '勾上的账号允许这位同事读取；对外发出的动作照样先等你批准。',
   'panel.connectorsEmpty': '还没有连接任何账号。可在侧栏点「连接器」添加。',

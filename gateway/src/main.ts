@@ -140,6 +140,7 @@ const gateway = createApp({
   setup: { browser, dockerReachable: () => dockerReachable(docker, 1_500), dockerImageReady: () => botImageReady(docker) },
   autoDistill: true,
   proactivePacing: true,
+  builtinSkills: true,
 })
 const { app, hub } = gateway
 

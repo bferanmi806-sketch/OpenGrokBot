@@ -315,10 +315,35 @@ describe('ComputerPanel', () => {
     expect(screen.getByText('prepare')).toBeInTheDocument()
     expect(screen.getByText(/· prepare$/)).toBeInTheDocument()
     expect(screen.getByText('weekly-report')).toBeInTheDocument()
+    expect(screen.getByText('Custom')).toBeInTheDocument()
     expect(screen.getByText('How the Friday report is laid out')).toBeInTheDocument()
     expect(screen.getByText('status.example.com').closest('li')).toHaveClass('failed')
     expect(screen.getByText(/· webhook$/)).toBeInTheDocument()
     expect(screen.getByText('approved by you: send it')).toBeInTheDocument()
+  })
+
+  it('distinguishes built-in and custom shared skills in English and Simplified Chinese', () => {
+    const skills = [
+      { name: 'meeting-minutes', description: 'Turn raw meeting notes into decisions.', builtin: true },
+      { name: 'weekly-report', description: 'How the Friday report is laid out' },
+    ]
+    const { unmount } = render(<ComputerPanel info={{ ...running, skills }} botName="Scout" onClose={() => {}} />)
+    expect(screen.getByText('meeting-minutes')).toBeInTheDocument()
+    expect(screen.getByText('Built-in')).toBeInTheDocument()
+    expect(screen.getByText('weekly-report')).toBeInTheDocument()
+    expect(screen.getByText('Custom')).toBeInTheDocument()
+
+    unmount()
+    render(
+      <I18nProvider lang="zh-CN">
+        <ComputerPanel info={{ ...running, skills }} botName="Scout" onClose={() => {}} />
+      </I18nProvider>,
+    )
+    expect(screen.getByText('共享技能')).toBeInTheDocument()
+    expect(screen.getByText('meeting-minutes')).toBeInTheDocument()
+    expect(screen.getByText('内置')).toBeInTheDocument()
+    expect(screen.getByText('weekly-report')).toBeInTheDocument()
+    expect(screen.getByText('自定义')).toBeInTheDocument()
   })
 
   it('says the log is empty instead of hiding it', () => {
