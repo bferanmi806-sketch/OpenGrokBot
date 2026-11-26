@@ -919,6 +919,14 @@ export const en = {
   'settings.about.creditsTail': ' for their code, feedback, and ideas.',
   'settings.about.repo': 'GitHub',
   'settings.about.license': 'MIT License',
+  'settings.diagnostics.copy': 'Copy diagnostics',
+  'settings.diagnostics.copying': 'Copying…',
+  'settings.diagnostics.copied': 'Copied redacted diagnostics summary',
+  'settings.diagnostics.download': 'Download bundle (.json)',
+  'settings.diagnostics.downloading': 'Preparing…',
+  'settings.diagnostics.downloaded': 'Downloaded redacted diagnostics bundle',
+  'settings.diagnostics.failed': 'Could not export diagnostics',
+  'settings.diagnostics.hint': 'API keys, tokens, and your OS username are redacted automatically. Chat messages and documents are never included.',
 
   // 演示模式
   'picker.chipDemo': 'Demo mode',

@@ -10,6 +10,7 @@ import {
   deleteMcpServer,
   deleteWikiPage,
   fetchBackgroundTasks,
+  fetchDiagnostics,
   fetchDispatchPlans,
   fetchLlmQueue,
   fetchMcpServers,
@@ -42,6 +43,7 @@ import type {
   BackgroundTaskView,
   BotRefPayload,
   ComputerInfo,
+  DiagnosticsBundle,
   DispatchPlanActionResponse,
   DispatchPlanPayload,
   DispatchPlanStatus,
@@ -1634,5 +1636,60 @@ describe('Team Charter & Dispatch Plans API client', () => {
     expect(msg.kind).toBe('dispatch_plan')
     expect(ev1.type).toBe('dispatch_plan_changed')
     expect(ev2.type).toBe('team_charter_changed')
+  })
+
+  it('includes settings diagnostics keys in both languages and fetches /api/diagnostics with error and SignedOut handling', async () => {
+    const diagKeys: MessageKey[] = [
+      'settings.diagnostics.copy',
+      'settings.diagnostics.copying',
+      'settings.diagnostics.copied',
+      'settings.diagnostics.download',
+      'settings.diagnostics.downloading',
+      'settings.diagnostics.downloaded',
+      'settings.diagnostics.failed',
+      'settings.diagnostics.hint',
+    ]
+    for (const key of diagKeys) {
+      expect(en[key]).toBeTruthy()
+      expect(zhCN[key]).toBeTruthy()
+    }
+
+    const bundle: DiagnosticsBundle = {
+      generatedAt: '2026-11-26T12:00:00.000Z',
+      summaryText: 'OpenSuperBot Diagnostics',
+      app: {
+        gatewayVersion: '1.0.0',
+        schemaVersion: 28,
+        port: 4747,
+        dataDir: '~/.opensuperbot',
+        logFile: 'stdout',
+        runtime: { node: '24.14.0', platform: 'darwin', arch: 'arm64', release: '25.5.0' },
+      },
+      subsystems: {
+        computersMode: 'local',
+        browserStatus: 'found (system)',
+        localLlmQueue: { maxConcurrency: 1, active: 0, queued: 0 },
+        mcpServers: [],
+        connectors: [],
+        counts: { bots: 1, threads: 1, routines: 0, wikiPages: 0, pendingApprovals: 0, runningBackgroundTasks: 0 },
+        recentActionErrors24h: [],
+      },
+      recentLogs: { source: 'stdout', lineCount: 0, lines: [] },
+    }
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(bundle), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'diag error', code: 'internal' }), { status: 500 }))
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(await fetchDiagnostics()).toEqual(bundle)
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/diagnostics')
+
+    const err500 = await fetchDiagnostics().catch((e: unknown) => e)
+    expect(err500).toBeInstanceOf(ApiError)
+    expect(err500).toMatchObject({ status: 500, code: 'internal' })
+
+    await expect(fetchDiagnostics()).rejects.toBeInstanceOf(SignedOut)
   })
 })

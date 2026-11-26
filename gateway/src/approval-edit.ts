@@ -1,3 +1,10 @@
+import {
+  buildGuardrailEditable,
+  formatGuardrailApprovalText,
+  isGuardrailRiskCode,
+  isGuardrailToolName,
+  type FrozenComputerGuardrailExecution,
+} from './action-guardrail.js'
 import { normalizeTarget, type ApprovalRow } from './approvals.js'
 import { catalogByApp } from './connectors/catalog.js'
 import type { FrozenExecution, ResolvedDraftSnapshot } from './connectors/types.js'
@@ -1446,6 +1453,160 @@ function applyConnectorEdit(
   }
 }
 
+function applyComputerGuardrailEdit(
+  approval: ApprovalRow,
+  frozen: FrozenComputerGuardrailExecution,
+  raw: Record<string, unknown>,
+): ApplyApprovalEditResult {
+  if (raw.kind !== 'mcp') {
+    return { ok: false, error: 'Edit kind must be "mcp" for this approval.' }
+  }
+  const keyErr = assertAllowedKeys(raw, ['kind', 'args'])
+  if (keyErr) return { ok: false, error: keyErr }
+  if (!isPlainObject(raw.args)) {
+    return { ok: false, error: 'Guardrail edit "args" must be a plain JSON object.' }
+  }
+
+  let nextArgs: Record<string, unknown>
+  switch (frozen.tool) {
+    case 'shell': {
+      const argKeyErr = assertAllowedKeys(raw.args, ['cmd', 'timeoutMs'])
+      if (argKeyErr) return { ok: false, error: argKeyErr }
+      if (typeof raw.args.cmd !== 'string' || !raw.args.cmd.trim()) {
+        return { ok: false, error: 'Field "cmd" must be a non-empty string.' }
+      }
+      if (raw.args.cmd.includes('\0')) {
+        return { ok: false, error: 'Field "cmd" cannot contain null bytes.' }
+      }
+      const cmd = raw.args.cmd.trim()
+      if (cmd.length > 20_000) {
+        return { ok: false, error: 'Field "cmd" must be at most 20000 characters.' }
+      }
+      let timeoutMs: number | undefined
+      if (raw.args.timeoutMs !== undefined) {
+        if (
+          typeof raw.args.timeoutMs !== 'number' ||
+          !Number.isFinite(raw.args.timeoutMs) ||
+          !Number.isInteger(raw.args.timeoutMs) ||
+          raw.args.timeoutMs <= 0 ||
+          raw.args.timeoutMs > 600_000
+        ) {
+          return { ok: false, error: 'Field "timeoutMs" must be a positive integer up to 600000.' }
+        }
+        timeoutMs = raw.args.timeoutMs
+      }
+      nextArgs = { cmd, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }
+      break
+    }
+    case 'browser_click': {
+      const argKeyErr = assertAllowedKeys(raw.args, ['target'])
+      if (argKeyErr) return { ok: false, error: argKeyErr }
+      if (typeof raw.args.target !== 'string' || !raw.args.target.trim()) {
+        return { ok: false, error: 'Field "target" must be a non-empty string.' }
+      }
+      if (raw.args.target.includes('\0')) {
+        return { ok: false, error: 'Field "target" cannot contain null bytes.' }
+      }
+      const target = raw.args.target.trim()
+      if (target.length > 1_000) {
+        return { ok: false, error: 'Field "target" must be at most 1000 characters.' }
+      }
+      nextArgs = { target }
+      break
+    }
+    case 'browser_type': {
+      const argKeyErr = assertAllowedKeys(raw.args, ['target', 'text', 'submit'])
+      if (argKeyErr) return { ok: false, error: argKeyErr }
+      if (typeof raw.args.target !== 'string' || !raw.args.target.trim()) {
+        return { ok: false, error: 'Field "target" must be a non-empty string.' }
+      }
+      if (raw.args.target.includes('\0')) {
+        return { ok: false, error: 'Field "target" cannot contain null bytes.' }
+      }
+      const target = raw.args.target.trim()
+      if (target.length > 1_000) {
+        return { ok: false, error: 'Field "target" must be at most 1000 characters.' }
+      }
+      if (typeof raw.args.text !== 'string') {
+        return { ok: false, error: 'Field "text" must be a string.' }
+      }
+      if (raw.args.text.includes('\0')) {
+        return { ok: false, error: 'Field "text" cannot contain null bytes.' }
+      }
+      if (raw.args.text.length > 20_000) {
+        return { ok: false, error: 'Field "text" must be at most 20000 characters.' }
+      }
+      let submit: boolean | undefined
+      if (raw.args.submit !== undefined) {
+        if (typeof raw.args.submit !== 'boolean') {
+          return { ok: false, error: 'Field "submit" must be a boolean.' }
+        }
+        submit = raw.args.submit
+      }
+      nextArgs = { target, text: raw.args.text, ...(submit !== undefined ? { submit } : {}) }
+      break
+    }
+    case 'browser_press': {
+      const argKeyErr = assertAllowedKeys(raw.args, ['key'])
+      if (argKeyErr) return { ok: false, error: argKeyErr }
+      if (typeof raw.args.key !== 'string' || !raw.args.key.trim()) {
+        return { ok: false, error: 'Field "key" must be a non-empty string.' }
+      }
+      if (/[\r\n\0]/.test(raw.args.key)) {
+        return { ok: false, error: 'Field "key" must be a single-line key chord.' }
+      }
+      const key = raw.args.key.trim()
+      if (key.length > 100) {
+        return { ok: false, error: 'Field "key" must be at most 100 characters.' }
+      }
+      nextArgs = { key }
+      break
+    }
+  }
+
+  const prevArgs = isPlainObject(frozen.args) ? frozen.args : {}
+  const changed = !deepJsonEqual(prevArgs, nextArgs)
+  const nextFrozen: FrozenComputerGuardrailExecution = {
+    kind: 'computer_guardrail',
+    tool: frozen.tool,
+    args: nextArgs,
+    riskCode: frozen.riskCode,
+    ...(frozen.expectedOrigin ? { expectedOrigin: frozen.expectedOrigin } : {}),
+  }
+  const editable = buildGuardrailEditable(nextFrozen)
+  if (!changed) {
+    return {
+      ok: true,
+      applied: {
+        action: approval.action,
+        detail: approval.detail,
+        target: approval.target,
+        executionJson: approval.execution_json ?? JSON.stringify(nextFrozen),
+        editable,
+        changed: false,
+      },
+    }
+  }
+
+  const recomputed = formatGuardrailApprovalText({
+    tool: nextFrozen.tool,
+    args: nextArgs,
+    riskCode: nextFrozen.riskCode,
+    expectedOrigin: nextFrozen.expectedOrigin,
+  })
+  return {
+    ok: true,
+    applied: {
+      action: recomputed.action,
+      detail: recomputed.detail,
+      target: recomputed.target,
+      executionJson: JSON.stringify(nextFrozen),
+      editable,
+      changed: true,
+    },
+  }
+}
+
 export function applyApprovalEdit(approval: ApprovalRow, rawEdit: unknown): ApplyApprovalEditResult {
   if (!isPlainObject(rawEdit)) {
     return { ok: false, error: 'Edit payload must be a JSON object.' }
@@ -1473,6 +1634,22 @@ export function applyApprovalEdit(approval: ApprovalRow, rawEdit: unknown): Appl
 
   if (parsed.kind === 'vault_fill') {
     return { ok: false, error: 'Vault approvals cannot be edited.' }
+  }
+
+  if (parsed.kind === 'computer_guardrail') {
+    const validExpectedOrigin =
+      parsed.tool === 'shell'
+        ? parsed.expectedOrigin === undefined || typeof parsed.expectedOrigin === 'string'
+        : typeof parsed.expectedOrigin === 'string' && parsed.expectedOrigin.trim().length > 0
+    if (
+      !isGuardrailToolName(parsed.tool) ||
+      !isGuardrailRiskCode(parsed.riskCode) ||
+      !isPlainObject(parsed.args) ||
+      !validExpectedOrigin
+    ) {
+      return { ok: false, error: 'Invalid stored guardrail execution payload.' }
+    }
+    return applyComputerGuardrailEdit(approval, parsed as FrozenComputerGuardrailExecution, rawEdit)
   }
 
   if (parsed.kind === 'mcp') {

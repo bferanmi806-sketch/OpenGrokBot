@@ -916,6 +916,14 @@ export const zhCN: Record<MessageKey, string> = {
   'settings.about.creditsTail': '。',
   'settings.about.repo': 'GitHub 仓库',
   'settings.about.license': 'MIT 开源协议',
+  'settings.diagnostics.copy': '复制诊断摘要',
+  'settings.diagnostics.copying': '正在复制…',
+  'settings.diagnostics.copied': '已复制脱敏诊断摘要',
+  'settings.diagnostics.download': '下载诊断包 (.json)',
+  'settings.diagnostics.downloading': '正在生成…',
+  'settings.diagnostics.downloaded': '已下载脱敏诊断包',
+  'settings.diagnostics.failed': '导出诊断信息失败',
+  'settings.diagnostics.hint': '已自动隐去 API 密钥、令牌与系统用户名，绝不包含任何聊天或文档内容。',
 
   // 演示模式
   'picker.chipDemo': '演示模式',

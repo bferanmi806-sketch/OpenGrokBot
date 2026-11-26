@@ -3,6 +3,7 @@ import type { ComputerKind } from './computer.js'
 import type { Config } from './config.js'
 import type { Db } from './db.js'
 import { MAIN, mainConnection, resetBotModels } from './connections.js'
+import { buildDiagnosticsBundle } from './diagnostics.js'
 import { checkConnection, listModels } from './llm-check.js'
 import { PROVIDERS, providerById } from './providers.js'
 import {
@@ -17,6 +18,8 @@ export type SettingsDeps = {
   startedWith: Config
   fetchImpl?: typeof fetch
   onSettingsSaved?: (before: Settings, after: Settings) => void | Promise<void>
+  getBrowserStatus?: () => string
+  getLlmQueueSnapshot?: () => { maxConcurrency: number; active: number; queued: number } | null
 }
 
 /** 只在启动时读一次的设置，改了要重启网关（浏览器镜像下载前现读，不在其列） */
@@ -60,6 +63,14 @@ export function mountSettings(app: Hono, deps: SettingsDeps & { db: Db; /** 启�
     runtime: { node: process.versions.node, platform: process.platform, arch: process.arch },
     computers: deps.runningKind ?? null,
   }))
+  app.get('/api/diagnostics', (c) => c.json(buildDiagnosticsBundle({
+    db,
+    env,
+    startedWith,
+    ...(deps.runningKind ? { runningKind: deps.runningKind } : {}),
+    ...(deps.getBrowserStatus ? { getBrowserStatus: deps.getBrowserStatus } : {}),
+    ...(deps.getLlmQueueSnapshot ? { getLlmQueueSnapshot: deps.getLlmQueueSnapshot } : {}),
+  })))
   app.get('/api/settings/providers', (c) => c.json(PROVIDERS))
 
   app.put('/api/settings', async (c) => {

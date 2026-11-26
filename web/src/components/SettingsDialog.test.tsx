@@ -591,4 +591,175 @@ describe('SettingsDialog', () => {
     expect(await screen.findByText('本地队列：1 运行中 · 2 排队中')).toBeInTheDocument()
     expect(screen.getByLabelText('本地模型并发上限')).toBeInTheDocument()
   })
+
+  it('copies redacted diagnostics summary (with desktop version when in app) and downloads JSON bundle in English and Chinese', async () => {
+    const sampleDiagnostics = {
+      generatedAt: '2026-11-26T12:00:00.000Z',
+      summaryText: 'OpenSuperBot Diagnostics (2026-11-26T12:00:00.000Z)\nGateway: 0.9.0 · Schema v28',
+      app: {
+        gatewayVersion: '0.9.0',
+        schemaVersion: 28,
+        port: 4748,
+        dataDir: '~/.opensuperbot',
+        logFile: 'stdout',
+        runtime: { node: '24.14.0', platform: 'darwin', arch: 'arm64', release: '25.5.0' },
+      },
+      subsystems: {
+        computersMode: 'local',
+        browserStatus: 'found (system)',
+        localLlmQueue: { maxConcurrency: 1, active: 0, queued: 0 },
+        mcpServers: [{ name: 'GitHub', transport: 'http', policy: 'default-write', enabled: true }],
+        connectors: [{ provider: 'gmail', status: 'active' }],
+        counts: { bots: 2, threads: 2, routines: 1, wikiPages: 3, pendingApprovals: 0, runningBackgroundTasks: 0 },
+        recentActionErrors24h: [],
+      },
+      recentLogs: { source: 'stdout', lineCount: 0, lines: [] },
+    }
+
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+
+    const createdBlobs: Blob[] = []
+    const createObjectURL = vi.fn((blob: Blob) => {
+      createdBlobs.push(blob)
+      return 'blob:osb-diag-test'
+    })
+    const revokeObjectURL = vi.fn()
+    const origCreateObjectURL = URL.createObjectURL
+    const origRevokeObjectURL = URL.revokeObjectURL
+    URL.createObjectURL = createObjectURL
+    URL.revokeObjectURL = revokeObjectURL
+
+    const clickedDownloads: Array<{ download: string; href: string }> = []
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      clickedDownloads.push({ download: this.download, href: this.href })
+    })
+
+    try {
+      vi.stubGlobal('opensuperbot', {
+        info: vi.fn(async () => ({ version: '0.9.0', platform: 'darwin', electron: '44.9.3' })),
+        loginItem: { get: vi.fn(async () => ({ supported: true, enabled: false })), set: vi.fn() },
+      })
+      const calls = gateway(view(), {
+        'GET /api/diagnostics': () => ({ body: sampleDiagnostics }),
+      })
+
+      const user = userEvent.setup()
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText },
+        configurable: true,
+      })
+      show()
+
+      expect(await screen.findByText('API keys, tokens, and your OS username are redacted automatically. Chat messages and documents are never included.')).toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: 'Copy diagnostics' }))
+      await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+      const copied = String((writeText.mock.calls[0] as unknown as [string])[0])
+      expect(copied).toContain('Desktop: 0.9.0 (Electron 44.9.3)')
+      expect(copied).toContain('OpenSuperBot Diagnostics (2026-11-26T12:00:00.000Z)')
+      expect(await screen.findByText('Copied redacted diagnostics summary')).toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: 'Download bundle (.json)' }))
+      await waitFor(() => expect(clickedDownloads).toHaveLength(1))
+      expect(clickedDownloads[0]!.download).toMatch(/^opensuperbot-diagnostics-\d{8}-\d{6}\.json$/)
+      expect(clickedDownloads[0]!.href).toBe('blob:osb-diag-test')
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:osb-diag-test')
+      expect(await screen.findByText('Downloaded redacted diagnostics bundle')).toBeInTheDocument()
+
+      const parsedBundle = JSON.parse(await createdBlobs[0]!.text()) as Record<string, unknown>
+      expect(parsedBundle.desktop).toEqual({ version: '0.9.0', electron: '44.9.3' })
+      expect(calls.filter((c) => c.method === 'GET' && c.path === '/api/diagnostics')).toHaveLength(2)
+
+      // Verify Chinese rendering and error/SignedOut handling
+      cleanup()
+      vi.stubGlobal('opensuperbot', undefined)
+      let failStatus = 500
+      gateway(view(), {
+        'GET /api/diagnostics': () => ({ status: failStatus, body: { error: 'boom' } }),
+      })
+      const zhProps = show({ lang: 'zh-CN' })
+      expect(await screen.findByText('已自动隐去 API 密钥、令牌与系统用户名，绝不包含任何聊天或文档内容。')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '下载诊断包 (.json)' })).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: '复制诊断摘要' }))
+      expect(await screen.findByText('导出诊断信息失败')).toBeInTheDocument()
+
+      failStatus = 401
+      await user.click(screen.getByRole('button', { name: '复制诊断摘要' }))
+      await waitFor(() => expect(zhProps.onSignedOut).toHaveBeenCalledTimes(1))
+
+      // Verify unmount while fetchDiagnostics is in-flight skips clipboard and DOM download side effects
+      cleanup()
+      writeText.mockClear()
+      createObjectURL.mockClear()
+      clickedDownloads.length = 0
+      let resolvePendingDiag!: (res: Response) => void
+      gateway(view(), {
+        'GET /api/diagnostics': () => ({ body: sampleDiagnostics }),
+      })
+      const baseFetch = globalThis.fetch
+      vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
+        if (path === '/api/diagnostics') {
+          return new Promise<Response>((resolve) => { resolvePendingDiag = resolve })
+        }
+        return baseFetch(path, init)
+      }))
+
+      const unmountCopy = render(
+        <I18nProvider lang="en">
+          <SettingsDialog
+            llms={llms}
+            providers={providers}
+            browser={null}
+            language=""
+            theme="dark"
+            onLanguage={vi.fn()}
+            onTheme={vi.fn()}
+            onBrowser={vi.fn()}
+            onModels={vi.fn()}
+            onWizard={vi.fn()}
+            onSignedOut={vi.fn()}
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      )
+      await user.click(await screen.findByRole('button', { name: 'Copy diagnostics' }))
+      unmountCopy.unmount()
+      resolvePendingDiag(new Response(JSON.stringify(sampleDiagnostics), { status: 200, headers: { 'content-type': 'application/json' } }))
+      await new Promise((r) => setTimeout(r, 10))
+      expect(writeText).not.toHaveBeenCalled()
+
+      const unmountDownload = render(
+        <I18nProvider lang="en">
+          <SettingsDialog
+            llms={llms}
+            providers={providers}
+            browser={null}
+            language=""
+            theme="dark"
+            onLanguage={vi.fn()}
+            onTheme={vi.fn()}
+            onBrowser={vi.fn()}
+            onModels={vi.fn()}
+            onWizard={vi.fn()}
+            onSignedOut={vi.fn()}
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      )
+      await user.click(await screen.findByRole('button', { name: 'Download bundle (.json)' }))
+      unmountDownload.unmount()
+      resolvePendingDiag(new Response(JSON.stringify(sampleDiagnostics), { status: 200, headers: { 'content-type': 'application/json' } }))
+      await new Promise((r) => setTimeout(r, 10))
+      expect(createObjectURL).not.toHaveBeenCalled()
+      expect(clickedDownloads).toHaveLength(0)
+    } finally {
+      clickSpy.mockRestore()
+      URL.createObjectURL = origCreateObjectURL
+      URL.revokeObjectURL = origRevokeObjectURL
+    }
+  })
 })

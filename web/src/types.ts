@@ -590,6 +590,41 @@ export type AboutInfo = {
   computers: 'local' | 'docker' | null
 }
 
+export type DiagnosticsBundle = {
+  generatedAt: string
+  summaryText: string
+  app: {
+    gatewayVersion: string | null
+    schemaVersion: number
+    port: number | null
+    dataDir: string
+    logFile: string
+    runtime: { node: string; platform: string; arch: string; release: string }
+  }
+  subsystems: {
+    computersMode: string
+    browserStatus: string
+    localLlmQueue: { maxConcurrency: number; active: number; queued: number } | null
+    mcpServers: Array<{ name: string; transport: string; policy: string; enabled: boolean }>
+    connectors: Array<{ provider: string; status: string }>
+    counts: {
+      bots: number
+      threads: number
+      routines: number
+      wikiPages: number
+      pendingApprovals: number
+      runningBackgroundTasks: number
+    }
+    recentActionErrors24h: Array<{ at: string; tool: string; trigger: string; summary: string }>
+  }
+  recentLogs: {
+    source: string
+    lineCount: number
+    lines: string[]
+  }
+  desktop?: { version: string; electron: string }
+}
+
 /** 模型接口的说法：chat = OpenAI 兼容；anthropic = Claude 原生；responses = OpenAI 的 Responses */
 export type LlmApi = 'chat' | 'anthropic' | 'responses'
 

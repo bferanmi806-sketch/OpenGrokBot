@@ -1,6 +1,13 @@
 import { createHash } from 'node:crypto'
 import { MAX_HOPS } from './a2a.js'
-import { buildPromptEditable } from './approval-edit.js'
+import {
+  buildGuardrailEditable,
+  evaluateComputerGuardrail,
+  isGuardrailToolName,
+  type FrozenComputerGuardrailExecution,
+  type GuardrailHit,
+} from './action-guardrail.js'
+import { buildPromptEditable, type ApprovalEditable } from './approval-edit.js'
 import {
   MAX_BATCH_ITEMS, RULEABLE_KINDS, blockText, canRemember, destinationReason, type BlockReason, normalizeItems, normalizeKind, normalizeTarget,
   type ApprovalKind,
@@ -131,6 +138,14 @@ export type AgentDeps = {
   onApproval?: (input: {
     action: string; detail: string; kind: ApprovalKind; target: string; rulesAllowed: boolean; items?: string[]
   }) => Promise<{ approvalId: number; rule?: RuleGrant; ruleHeld?: boolean }>
+  /** 确定性高危动作护栏：拦截高危 shell / 浏览器提交并挂起为冻结审批 */
+  onGuardrailApproval?: (input: {
+    hit: GuardrailHit
+    frozen: FrozenComputerGuardrailExecution
+    editable: ApprovalEditable
+  }) => Promise<{ approvalId: number }>
+  /** false = 关闭高危动作确定性护栏（仅底层沙箱单元测试用；默认开启） */
+  actionGuardrail?: boolean
   onSaveMemory?: (rule: string) => Promise<{ rule: string; diff: string; total: number }>
   onForgetMemory?: (rule: string) => Promise<
     | { removed: string; diff: string; total: number }
@@ -330,6 +345,8 @@ type TurnContext = AgentDeps & {
   activeMcpReadToolNames: Set<string>
   /** 本回合已按需加载的 MCP 暴露工具名 */
   loadedDeferredMcp: Set<string>
+  /** 本回合最近一次已知的活动浏览器页面 URL（供确定性护栏来源绑定回退使用） */
+  lastKnownBrowserUrl?: string
   markBotOutput?: () => void
   markBypassedPacing?: () => void
 }
@@ -1402,6 +1419,98 @@ async function execToolCall(
       return { text: lease.reason }
     }
   }
+  if (deps.actionGuardrail !== false && isGuardrailToolName(call.name)) {
+    let currentUrl: string | undefined
+    if (call.name !== 'shell') {
+      try {
+        const computer = await deps.getComputer()
+        if (typeof (computer as Partial<BotComputer>).currentUrl === 'function') {
+          const liveUrl = await computer.currentUrl()
+          if (liveUrl) {
+            currentUrl = liveUrl
+            deps.lastKnownBrowserUrl = liveUrl
+          }
+        } else {
+          currentUrl = deps.lastKnownBrowserUrl
+        }
+      } catch {
+        currentUrl = undefined
+      }
+    }
+    const guardrailRes = evaluateComputerGuardrail({ tool: call.name, args, currentUrl })
+    if (guardrailRes.blocked) {
+      let expectedOrigin: string | undefined
+      if (call.name !== 'shell' && currentUrl) {
+        try {
+          const parsedUrl = new URL(currentUrl)
+          if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
+            expectedOrigin = parsedUrl.origin
+          }
+        } catch {
+          expectedOrigin = undefined
+        }
+      }
+      const step = ACTIVITY_TOOL_NAMES.has(call.name) ? activity.start(call.name, summarize(call.name, args)) : null
+      if (call.name !== 'shell' && !expectedOrigin) {
+        if (step) activity.finish(step, false, Date.now() - started)
+        log(false, 'blocked: missing page origin')
+        return {
+          text: 'Blocked by safety guardrail: could not verify an active http(s) page origin for this browser action.',
+        }
+      }
+      if (!deps.onGuardrailApproval) {
+        if (step) activity.finish(step, false, Date.now() - started)
+        log(false, 'blocked by safety guardrail')
+        return {
+          text: 'Blocked by safety guardrail: operator approval is not available in this context.',
+        }
+      }
+      const frozen: FrozenComputerGuardrailExecution = {
+        kind: 'computer_guardrail',
+        tool: call.name,
+        args: { ...args },
+        riskCode: guardrailRes.riskCode,
+        ...(expectedOrigin ? { expectedOrigin } : {}),
+      }
+      const editable = buildGuardrailEditable(frozen)
+      try {
+        const held = await deps.onGuardrailApproval({ hit: guardrailRes, frozen, editable })
+        deps.markBypassedPacing?.()
+        const reason: BlockReason = { code: 'always_asks' }
+        events.onMessage(
+          insertMessage(deps.db, {
+            threadId: deps.threadId,
+            sender: deps.bot.id,
+            kind: 'approval_request',
+            payload: {
+              approvalId: held.approvalId,
+              action: guardrailRes.action,
+              detail: guardrailRes.detail,
+              kind: guardrailRes.approvalKind,
+              target: guardrailRes.target,
+              status: 'pending',
+              canRemember: false,
+              rememberBlocked: blockText(reason),
+              rememberReason: reason,
+              editable,
+            },
+          }),
+        )
+        const heldSummary = `held for approval: ${summarize(call.name, args)}`.slice(0, 140)
+        if (step) {
+          step.summary = heldSummary
+          activity.finish(step, true, Date.now() - started)
+        }
+        log(true, heldSummary)
+        return {
+          text: "Held by safety guardrail for your operator's approval. Stop here — do not retry or work around this action until your operator decides.",
+        }
+      } catch (err) {
+        if (step) activity.finish(step, false, Date.now() - started)
+        return failed(err)
+      }
+    }
+  }
   if (BROWSER_OUTSIDE_DATA_TOOL_NAMES.has(call.name)) onOutsideDataRead?.()
   const step = ACTIVITY_TOOL_NAMES.has(call.name) ? activity.start(call.name, summarize(call.name, args)) : null
   try {
@@ -2049,6 +2158,7 @@ async function execComputerTool(
     case 'browser_goto': {
       const url = checkBrowserUrl(String(args.url ?? ''))
       const r = await computer.goto(url)
+      deps.lastKnownBrowserUrl = r.url
       return { text: `Now on "${r.title}" (${r.url})` }
     }
     case 'browser_extract': {
@@ -2060,6 +2170,7 @@ async function execComputerTool(
     }
     case 'browser_click': {
       const r = await computer.click(String(args.target ?? ''))
+      if (r.url) deps.lastKnownBrowserUrl = r.url
       return { text: `Clicked ${r.clicked}.${r.url ? ` Now on "${r.title ?? ''}" (${r.url}).` : ''}` }
     }
     case 'browser_type': {
@@ -2081,6 +2192,7 @@ async function execComputerTool(
     }
     case 'browser_back': {
       const r = await computer.back()
+      deps.lastKnownBrowserUrl = r.url
       return { text: `Back on "${r.title}" (${r.url})` }
     }
     case 'browser_screenshot': {

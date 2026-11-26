@@ -204,7 +204,11 @@ describe('runTurn parallel reads, file stale guard, and sandbox diagnosis', () =
         return { content: 'Blocked.', toolCalls: [], raw: { role: 'assistant', content: 'Blocked.' } }
       },
     }
-    await runTurn({ db, llm, bot, soul: '', threadId, getComputer: async () => comp }, 'test', events)
+    await runTurn(
+      { db, llm, bot, soul: '', threadId, getComputer: async () => comp, actionGuardrail: false },
+      'test',
+      events,
+    )
     const toolMsg = seen[1]!.find((m) => m.role === 'tool' && m.tool_call_id === 's1')!
     expect(toolMsg.content).toContain('[sandbox: blocked by workspace confinement')
   })

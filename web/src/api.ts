@@ -1,7 +1,7 @@
 import { fileToBase64 } from './attachments'
 import type {
   AboutInfo, AppKey, ApprovalEditInput, AttachmentPayload, BackgroundTaskActionResponse, BackgroundTaskView, Bot, BotLlm, BrowserStatus, CheckResult, ComputerInfo, ConnectionsState, ConnectorsSnapshot,
-  Conversation, CreateGoalInput, CreateMcpServerInput, CreateSpaceInput, CreateVaultItemInput, DispatchPlanActionResponse, DispatchPlanView, FeedItemStatus, FeedSnapshot, FeedTopic, FieldError, GatewayEvent, GoalMilestone,
+  Conversation, CreateGoalInput, CreateMcpServerInput, CreateSpaceInput, CreateVaultItemInput, DiagnosticsBundle, DispatchPlanActionResponse, DispatchPlanView, FeedItemStatus, FeedSnapshot, FeedTopic, FieldError, GatewayEvent, GoalMilestone,
   GoalsSnapshot, GoalUpdateItem, GoalView, IdeaItem, IdeaStatus, ImportMcpServersInput, ImportMcpServersResult, LlmPriority, LlmQueueEndpointView, LlmQueueSnapshot, McpServersSnapshot,
   McpServerView, Message, MilestoneStatus, ProviderPreset, QuietDigestBotSummary, QuietDigestFlushResponse, QuietDigestSummary, ResolveRuleProposalResponse, RoutineAction, RuleDuration, RuleProposalStatus, RuleProposalView,
   ServerEvent, SettingsView, SetupInfo, SpaceGrant, SpaceItem, SpaceItemData, SpaceRole, SpacesSnapshot, SpaceView, TeamCharterView, TodoItem, TodoStatus, UpdateGoalPatch, UpdateMcpServerPatch, UpdateSpacePatch, UpdateVaultItemPatch,
@@ -17,6 +17,7 @@ export type {
   BackgroundTaskView,
   CreateMcpServerInput,
   CreateVaultItemInput,
+  DiagnosticsBundle,
   DispatchPlanActionResponse,
   DispatchPlanPayload,
   DispatchPlanStatus,
@@ -817,6 +818,7 @@ export async function fetchSetup(): Promise<SetupInfo | null> {
 export const saveSettings = (patch: Record<string, unknown>) => sendForm<SettingsView>('PUT', '/api/settings', patch)
 export const fetchSettings = () => getJson<SettingsView>('/api/settings')
 export const fetchAbout = () => getJson<AboutInfo>('/api/about')
+export const fetchDiagnostics = () => getApiJson<DiagnosticsBundle>('/api/diagnostics')
 
 /** 提前把同事用的浏览器下好；进度经 /ws 的 setup.browser 推过来 */
 export async function downloadBrowser(): Promise<BrowserStatus> {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
-  ApiError, FieldErrors, SignedOut, downloadBrowser, fetchAbout, fetchLlmQueue, fetchQuietDigest, fetchSettings, fetchSetup, flushQuietDigest, saveSettings,
+  ApiError, FieldErrors, SignedOut, downloadBrowser, fetchAbout, fetchDiagnostics, fetchLlmQueue, fetchQuietDigest, fetchSettings, fetchSetup, flushQuietDigest, saveSettings,
 } from '../api'
 import { desktopApi, type DesktopInfo } from '../desktop'
 import { useT, type MessageKey } from '../i18n'
@@ -23,6 +23,14 @@ function localLlmOptions(current: number): number[] {
   const set = new Set<number>(LOCAL_LLM_PRESETS)
   if (Number.isInteger(current) && current > 0) set.add(current)
   return [...[...set].sort((a, b) => a - b), 0]
+}
+
+function diagnosticsFilename(generatedAt?: string): string {
+  const parsed = generatedAt ? new Date(generatedAt) : new Date()
+  const d = Number.isNaN(parsed.getTime()) ? new Date() : parsed
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+  return `opensuperbot-diagnostics-${stamp}.json`
 }
 
 /** 一块设置：标题 + 内容 */
@@ -77,11 +85,15 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
   const [deliverError, setDeliverError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [downloading, setDownloading] = useState(false)
+  const [diagBusy, setDiagBusy] = useState<'copy' | 'download' | null>(null)
+  const [diagMessage, setDiagMessage] = useState<string | null>(null)
+  const [diagError, setDiagError] = useState<string | null>(null)
 
   const mountedRef = useRef(true)
   const digestReqSeqRef = useRef(0)
   const llmQueueReqSeqRef = useRef(0)
   const deliveringRef = useRef(false)
+  const diagBusyRef = useRef(false)
 
   useEffect(() => {
     mountedRef.current = true
@@ -246,6 +258,66 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
       setErrors([{ key: 'browser', code: message }])
     } finally {
       setDownloading(false)
+    }
+  }
+
+  const copyDiagnostics = async () => {
+    if (diagBusyRef.current) return
+    diagBusyRef.current = true
+    setDiagBusy('copy')
+    setDiagMessage(null)
+    setDiagError(null)
+    try {
+      const bundle = await fetchDiagnostics()
+      if (!mountedRef.current) return
+      const text = desktop
+        ? `Desktop: ${desktop.version} (Electron ${desktop.electron})\n${bundle.summaryText}`
+        : bundle.summaryText
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+      await navigator.clipboard.writeText(text)
+      if (!mountedRef.current) return
+      setDiagMessage(t('settings.diagnostics.copied'))
+    } catch (err: unknown) {
+      if (err instanceof SignedOut) { onSignedOut(); return }
+      if (mountedRef.current) setDiagError(t('settings.diagnostics.failed'))
+    } finally {
+      diagBusyRef.current = false
+      if (mountedRef.current) setDiagBusy(null)
+    }
+  }
+
+  const downloadDiagnostics = async () => {
+    if (diagBusyRef.current) return
+    diagBusyRef.current = true
+    setDiagBusy('download')
+    setDiagMessage(null)
+    setDiagError(null)
+    try {
+      const bundle = await fetchDiagnostics()
+      if (!mountedRef.current) return
+      const payload = desktop
+        ? { ...bundle, desktop: { version: desktop.version, electron: desktop.electron } }
+        : bundle
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      try {
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = diagnosticsFilename(bundle.generatedAt)
+        document.body.appendChild(anchor)
+        anchor.click()
+        anchor.remove()
+      } finally {
+        URL.revokeObjectURL(url)
+      }
+      if (!mountedRef.current) return
+      setDiagMessage(t('settings.diagnostics.downloaded'))
+    } catch (err: unknown) {
+      if (err instanceof SignedOut) { onSignedOut(); return }
+      if (mountedRef.current) setDiagError(t('settings.diagnostics.failed'))
+    } finally {
+      diagBusyRef.current = false
+      if (mountedRef.current) setDiagBusy(null)
     }
   }
 
@@ -604,6 +676,27 @@ export function SettingsDialog({ llms, providers, browser, language, onLanguage,
                   <dt>{t('settings.about.runtime')}</dt>
                   <dd>{`Node ${about.runtime.node} · ${about.runtime.platform}/${about.runtime.arch}`}</dd>
                 </dl>
+                <div className="settings-local-llm">
+                  <div className="settings-buttons">
+                    <button
+                      type="button"
+                      disabled={diagBusy !== null}
+                      onClick={() => void copyDiagnostics()}
+                    >
+                      {diagBusy === 'copy' ? t('settings.diagnostics.copying') : t('settings.diagnostics.copy')}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={diagBusy !== null}
+                      onClick={() => void downloadDiagnostics()}
+                    >
+                      {diagBusy === 'download' ? t('settings.diagnostics.downloading') : t('settings.diagnostics.download')}
+                    </button>
+                  </div>
+                  <p className="setup-hint">{t('settings.diagnostics.hint')}</p>
+                  {diagMessage ? <p className="settings-quiet-delivered" role="status">{diagMessage}</p> : null}
+                  {diagError ? <div className="form-error" role="alert">{diagError}</div> : null}
+                </div>
                 <div className="settings-about-credits">
                   <p>
                     {t('settings.about.creditsLead')}
