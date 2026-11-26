@@ -622,4 +622,28 @@ describe('Thread', () => {
     await user.click(screen.getByRole('button', { name: 'Cancel pipeline' }))
     expect(onCancel).toHaveBeenCalledWith('dp-abcd1234')
   })
+
+  it('shows role-specific starter chips per bot when empty and sends the clicked tip', async () => {
+    const user = userEvent.setup()
+    const onSend = vi.fn()
+    const ticker: Conversation = {
+      id: 'dm:market-watch', kind: 'dm', title: 'Ticker', emoji: '📈',
+      subtitle: 'Watches your list, digests and threshold alerts — read-only, never trades',
+      members: ['market-watch'], last_message: null, pending: 0,
+    }
+    const { rerender } = render(
+      <Thread conversation={ticker} roster={roster} messages={[]} thinking={false} onSend={onSend} onDecide={() => {}} />,
+    )
+    const tickerTip = screen.getByRole('button', { name: /Add NVDA, BTC, and USD\/CNY to my watchlist/ })
+    expect(tickerTip).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Hacker News/ })).toBeNull()
+    await user.click(tickerTip)
+    expect(onSend).toHaveBeenCalledWith(tickerTip.textContent)
+
+    rerender(
+      <Thread conversation={dm} roster={roster} messages={[]} thinking={false} onSend={onSend} onDecide={() => {}} />,
+    )
+    expect(screen.getByRole('button', { name: /Scan Hacker News/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Add NVDA, BTC/ })).toBeNull()
+  })
 })

@@ -138,6 +138,9 @@ describe('wiring the rules onto a page', () => {
     expect(f.redirect('file:///etc/passwd')).toHaveBeenCalled()
 
     expect(f.frameNavigate('http://127.0.0.1:4747/vnc/chief/view.html', false)).not.toHaveBeenCalled()
+    expect(f.frameNavigate('about:srcdoc', false)).not.toHaveBeenCalled()
     expect(f.frameNavigate('https://evil.example/embed', false)).toHaveBeenCalled()
+    expect(f.frameNavigate('file:///etc/passwd', false)).toHaveBeenCalled()
+    expect(f.frameNavigate('data:text/html,<script>alert(1)</script>', false)).toHaveBeenCalled()
   })
 })

@@ -1,12 +1,13 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { BUILTIN_SKILLS, findBuiltinSkill } from './builtin-skills.js'
 
 /**
- * 共享技能：操作者写在 <数据目录>/skills/*.md 里的做事手册，所有同事都能读，谁也不能改。
+ * 共享技能：操作者写在 <数据目录>/skills/*.md 里的做事手册，加上随网关内置的共享技能，所有同事都能读，谁也不能改。
  * 能力（技能、工具）全员共享，上下文（记忆、routine）各归各——和 Grok Bot 划的界一样。
  * 系统提示词里只列名字和一句话，正文用 read_skill 按需取，省得每个回合都背着全部手册。
  */
-export type Skill = { name: string; description: string }
+export type Skill = { name: string; description: string; builtin?: boolean }
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const MAX_SKILLS = 50
@@ -65,4 +66,26 @@ export async function readSkill(dir: string, name: string): Promise<string | nul
   } catch {
     return null
   }
+}
+
+/** 合并用户自定义技能与内置技能；同名时以操作者在 <dataDir>/skills/ 中写入的版本为准 */
+export async function listAllSkills(dir?: string): Promise<Skill[]> {
+  const userSkills = dir ? await listSkills(dir) : []
+  const byName = new Map<string, Skill>()
+  for (const b of BUILTIN_SKILLS) {
+    byName.set(b.name, { name: b.name, description: b.description, builtin: true })
+  }
+  for (const u of userSkills) {
+    byName.set(u.name, u)
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/** 按需读取技能正文：优先读操作者目录里的自定义版本，找不到再回落到内置技能 */
+export async function readAnySkill(dir: string | undefined, name: string): Promise<string | null> {
+  if (dir) {
+    const custom = await readSkill(dir, name)
+    if (custom !== null) return custom
+  }
+  return findBuiltinSkill(name)?.body ?? null
 }

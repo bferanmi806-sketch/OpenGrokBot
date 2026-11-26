@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { listMessages, openDb, SCHEMA_VERSION, schemaVersion } from '../src/db.js'
 import { createGoal, getGoalView } from '../src/goals/store.js'
@@ -6,6 +9,7 @@ import type { LLM } from '../src/llm.js'
 import { createApp } from '../src/server.js'
 import { MAX_ITEMS_PER_SPACE } from '../src/spaces/schema.js'
 import { getSpace, upsertSpaceItem } from '../src/spaces/store.js'
+import { runSpaceUpsertItemCall } from '../src/spaces/tools.js'
 import type { SpacesSnapshot, SpaceView } from '../src/spaces/types.js'
 
 const quietLlm: LLM = {
@@ -24,6 +28,40 @@ function seedDb() {
 }
 
 describe('spaces store & REST API (v17)', () => {
+  it('writes scoreboard records to both views and keeps team logos when a teammate updates just the scores', async () => {
+    const db = seedDb()
+    const hub = createHub()
+    const events: GatewayEvent[] = []
+    hub.add({ send: (raw) => events.push(JSON.parse(raw) as GatewayEvent) })
+    const gw = createApp({ db, llm: quietLlm, hub })
+    const created = await gw.app.request('/api/spaces', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Sample scoreboard', template: 'scoreboard', grants: [{ botId: 'scout', role: 'editor' }] }),
+    })
+    expect(created.status).toBe(201)
+    const { space } = await created.json() as { space: SpaceView }
+    const data = { awayTeam: 'Away', homeTeam: 'Home', awayLogo: 'https://league.example/away.svg', homeLogo: 'https://league.example/home.svg' }
+    const add = await gw.app.request(`/api/spaces/${space.id}/items`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ blockId: 'games', title: 'Away at Home', status: 'scheduled', data }),
+    })
+    expect(add.status).toBe(201)
+    const { item } = await add.json() as { item: SpaceView['items'][number] }
+    const refresh = runSpaceUpsertItemCall({
+      db, hub, botId: 'scout', ruleBlock: null,
+      args: { space_id: space.id, block_id: 'games', item_id: item.id, title: item.title, status: 'live', data: { awayScore: 10, homeScore: 0 } },
+    })
+    expect(refresh.ok).toBe(true)
+    const { spaces } = await (await gw.app.request('/api/spaces')).json() as SpacesSnapshot
+    expect(spaces.find((view) => view.id === space.id)?.items).toEqual([
+      expect.objectContaining({ id: item.id, status: 'live', data: { ...data, awayScore: 10, homeScore: 0 } }),
+    ])
+    expect(events.filter((event) => event.type === 'spaces_changed')).toHaveLength(3)
+    db.close()
+  })
+
   it('migrates cleanly to v17 and rejects non-declarative space kinds', async () => {
     const db = seedDb()
     expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(17)
@@ -147,5 +185,56 @@ describe('spaces store & REST API (v17)', () => {
 
     const missingAction = await gw.app.request(`/api/spaces/${space.id}/actions/nonexistent`, { method: 'POST' })
     expect(missingAction.status).toBe(404)
+  })
+
+  it('stores validated space image assets, serves them with strict sandbox headers, rejects non-images, and removes them on space delete', async () => {
+    const db = seedDb()
+    const dataDir = mkdtempSync(join(tmpdir(), 'osb-space-assets-'))
+    try {
+      const gw = createApp({ db, llm: quietLlm, dataDir })
+      const createRes = await gw.app.request('/api/spaces', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ title: 'Visual Studio', template: 'html' }),
+      })
+      expect(createRes.status).toBe(201)
+      const { space } = (await createRes.json()) as { space: SpaceView }
+      expect(space.schema.blocks[0]?.type).toBe('html')
+
+      // Reject non-image payload (plain HTML disguised as upload)
+      const badUpload = await gw.app.request(`/api/spaces/${space.id}/assets`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'evil.png', data: Buffer.from('<script>alert(1)</script>').toString('base64') }),
+      })
+      expect(badUpload.status).toBe(400)
+
+      // Accept valid PNG magic bytes
+      const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d])
+      const okUpload = await gw.app.request(`/api/spaces/${space.id}/assets`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'cover.png', data: pngBytes.toString('base64') }),
+      })
+      expect(okUpload.status).toBe(201)
+      const asset = (await okUpload.json()) as { url: string; mime: string }
+      expect(asset.url).toMatch(new RegExp(`^/api/spaces/${space.id}/assets/[0-9a-f]{16}\\.png$`))
+      expect(asset.mime).toBe('image/png')
+
+      const fetched = await gw.app.request(asset.url)
+      expect(fetched.status).toBe(200)
+      expect(fetched.headers.get('content-type')).toBe('image/png')
+      expect(fetched.headers.get('x-content-type-options')).toBe('nosniff')
+      expect(fetched.headers.get('content-security-policy')).toBe("default-src 'none'; sandbox")
+
+      // Deleting the space removes its asset directory
+      const assetDir = join(dataDir, 'spaces', space.id)
+      expect(existsSync(assetDir)).toBe(true)
+      const del = await gw.app.request(`/api/spaces/${space.id}`, { method: 'DELETE' })
+      expect(del.status).toBe(200)
+      expect(existsSync(assetDir)).toBe(false)
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+    }
   })
 })

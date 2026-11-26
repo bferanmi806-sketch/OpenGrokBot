@@ -40,7 +40,7 @@ function mockGateway(opts: {
   /** /api/goals 的回答；不给 = 老网关 */
   goals?: unknown
   /** /api/spaces 的回答；不给 = 老网关 */
-  spaces?: unknown
+  spaces?: unknown | (() => unknown | Promise<unknown>)
   /** /api/bots 的回答 */
   bots?: unknown[]
   /** /api/wiki/* 的回答 */
@@ -104,7 +104,7 @@ function mockGateway(opts: {
     }
     if (url === '/api/feed' && opts.feed) return json(opts.feed)
     if (url === '/api/goals' && opts.goals) return json(opts.goals)
-    if (url === '/api/spaces' && opts.spaces) return json(opts.spaces)
+    if (url === '/api/spaces' && opts.spaces) return json(typeof opts.spaces === 'function' ? await opts.spaces() : opts.spaces)
     if (url.endsWith('/mcp') && init?.method === 'PUT') {
       const sent = JSON.parse(String(init.body)) as { serverIds: string[] }
       const botId = decodeURIComponent(url.split('/')[3] ?? '')
@@ -774,6 +774,40 @@ describe('App', () => {
       window.dispatchEvent(new HashChangeEvent('hashchange'))
     })
     expect(await screen.findByText('Custom Feed')).toBeInTheDocument()
+    window.history.replaceState(null, '', window.location.pathname)
+  })
+
+  it('refreshes open Space records on WebSocket updates and ignores an older snapshot', async () => {
+    window.history.replaceState(null, '', '#space=space-aaaaaaaa')
+    const snapshot = (title: string) => ({
+      spaces: [{
+        id: 'space-aaaaaaaa', slug: 'radar', title: 'Radar', description: '', icon: '🔎', kind: 'declarative',
+        goalId: null, goalTitle: null, grants: [], createdAt: 1, updatedAt: 1,
+        schema: { blocks: [{ id: 'competitors', type: 'cards', title: 'Radar records' }] },
+        items: [{
+          id: 'item-11111111', spaceId: 'space-aaaaaaaa', blockId: 'competitors', title,
+          status: '', data: {}, sortOrder: 0, tainted: false, updatedBy: 'operator', createdAt: 1, updatedAt: 1,
+        }],
+      }],
+      templates: [],
+    })
+    let fetchSnapshot = (): unknown | Promise<unknown> => snapshot('Original competitor')
+    mockGateway({
+      feed: { needsYou: [], items: [], ideas: [], unreadCount: 0 },
+      spaces: () => fetchSnapshot(),
+    })
+    render(<App />)
+    const socket = await ready()
+    expect(await screen.findByText('Original competitor')).toBeVisible()
+    let resolveOld!: (value: unknown) => void
+    fetchSnapshot = () => new Promise((resolve) => { resolveOld = resolve })
+    await act(async () => { socket.emit({ type: 'spaces_changed' }) })
+    fetchSnapshot = () => snapshot('Updated competitor')
+    await act(async () => { socket.emit({ type: 'spaces_changed' }) })
+    expect(await screen.findByText('Updated competitor')).toBeVisible()
+    await act(async () => { resolveOld(snapshot('Stale competitor')) })
+    expect(screen.getByText('Updated competitor')).toBeVisible()
+    expect(screen.queryByText('Stale competitor')).toBeNull()
     window.history.replaceState(null, '', window.location.pathname)
   })
 

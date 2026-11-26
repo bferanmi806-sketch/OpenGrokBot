@@ -76,7 +76,7 @@ import {
 } from './proactive/rule-proposals.js'
 import { screenPagePath, screencastPath } from './screen.js'
 import { saveScreenshot, screenshotFilePath } from './screenshots.js'
-import { listSkills, readSkill, skillsDir } from './skills.js'
+import { listAllSkills, readAnySkill, skillsDir } from './skills.js'
 import type { Scheduler } from './scheduler.js'
 import { readBodyUpTo } from './body.js'
 import { mountConnections } from './connections-api.js'
@@ -977,6 +977,7 @@ export function createApp(deps: AppDeps): GatewayApp {
     db,
     hub,
     chiefId,
+    ...(dataDir ? { dataDir } : {}),
     now: () => now().getTime(),
     startSpaceAction: (bot, space, action) => {
       const threadId = ensureDmThread(db, bot.id)
@@ -1223,7 +1224,7 @@ export function createApp(deps: AppDeps): GatewayApp {
       fields: v.fields.map((f) => f.key),
       approvalMode: v.approvalMode,
     }))
-    const skills = dataDir ? await listSkills(skillsDir(dataDir)) : []
+    const skills = await listAllSkills(dataDir ? skillsDir(dataDir) : undefined)
     // 这位同事此刻用的模型：回合开始时定下，回合中途改了设置从下一回合起生效
     const own = deps.llmFor?.(bot.id)
     const vision = own ? own.vision : (typeof deps.vision === 'function' ? deps.vision() : deps.vision) === true
@@ -1491,7 +1492,7 @@ export function createApp(deps: AppDeps): GatewayApp {
           })
         },
       } : {}),
-      ...(skills.length ? { skills, onReadSkill: (name: string) => readSkill(skillsDir(dataDir), name) } : {}),
+      ...(skills.length ? { skills, onReadSkill: (name: string) => readAnySkill(dataDir ? skillsDir(dataDir) : undefined, name) } : {}),
       checkBudget: () => budgetNote(bot),
       language: uiLanguage(),
       onMessageBot: ({ to, content, tainted }) => relay(bot, to, content, params.hop ?? 0, tainted),
@@ -3259,7 +3260,7 @@ Complete your step and post a concise summary of your findings or output in this
     const usage = { today: usageSince(db, botId, startOfLocalDay(now(), deps.timeZone)), budget: deps.dailyTokens ?? 0 }
     const rules = listActiveRules(db, botId, now().getTime()).map(ruleView)
     const memory = dataDir ? await listMemoryRules(dataDir, botId) : []
-    const skills = dataDir ? await listSkills(skillsDir(dataDir)) : []
+    const skills = await listAllSkills(dataDir ? skillsDir(dataDir) : undefined)
     const actions = listActions(db, botId, 30)
     const botGrantSet = new Set(listBotConnectorIds(db, botId))
     const connectors = listConnectorAccounts(db).map((a) => ({

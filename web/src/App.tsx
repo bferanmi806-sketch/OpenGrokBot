@@ -450,10 +450,18 @@ function Workspace({
     }
   }, [])
 
+  const spacesFetchSeqRef = useRef(0)
+  const applySpacesSnapshot = useCallback((snapshot: SpacesSnapshot | null) => {
+    spacesFetchSeqRef.current += 1
+    setSpaces(snapshot)
+  }, [])
+
   /** 声明式空间快照；老网关没有这个路由就返回 null */
   const loadSpaces = useCallback(async () => {
+    const seq = ++spacesFetchSeqRef.current
     try {
-      setSpaces(await fetchSpaces())
+      const snapshot = await fetchSpaces()
+      if (seq === spacesFetchSeqRef.current) setSpaces(snapshot)
     } catch (err) {
       if (err instanceof SignedOut) throw err
     }
@@ -1051,7 +1059,7 @@ function Workspace({
   })
   const onSetSpaceRole = (spaceId: string, role: SpaceRole | null) => panelAction(async (botId) => {
     const res = await setBotSpaceRole(botId, spaceId, role)
-    setSpaces(res.snapshot)
+    applySpacesSnapshot(res.snapshot)
   })
 
   const hire = async (name: string, role: string) => {
@@ -1253,9 +1261,19 @@ function Workspace({
           onGoalsChange={setGoals}
           onRefreshGoals={loadGoals}
           spaces={spaces}
-          onSpacesChange={setSpaces}
+          onSpacesChange={applySpacesSnapshot}
           selectedSpaceId={selectedSpaceId}
           onSelectSpace={selectSpace}
+          onDesignSpaceWithBot={async (botId, prompt) => {
+            const threadId = `dm:${botId}`
+            selectConversation(threadId)
+            try {
+              await sendMessage(threadId, prompt)
+            } catch (err) {
+              guard(err)
+              throw err
+            }
+          }}
           onChange={setFeed}
           onOpenThread={selectConversation}
           onOpenComputer={openBotComputer}

@@ -13,24 +13,56 @@ export const SPACE_BLOCK_TYPES = [
   'chart',
   'markdown',
   'action_bar',
+  'cards',
+  'html',
 ] as const
 export type SpaceBlockType = (typeof SPACE_BLOCK_TYPES)[number]
 
-export const SPACE_TEMPLATE_IDS = ['tracker', 'kanban', 'dashboard', 'blank'] as const
+export const SPACE_TEMPLATE_IDS = ['radar', 'scoreboard', 'tracker', 'kanban', 'dashboard', 'cards', 'html', 'blank'] as const
 export type SpaceTemplateId = (typeof SPACE_TEMPLATE_IDS)[number]
+
+export const CARDS_ASPECTS = ['wide', 'square', 'compact'] as const
+export type CardsAspect = (typeof CARDS_ASPECTS)[number]
+export const CARD_VARIANTS = ['competitor', 'matchup'] as const
+export type CardVariant = (typeof CARD_VARIANTS)[number]
+
+export const SPACE_ACCENTS = ['slate', 'blue', 'indigo', 'emerald', 'amber', 'rose'] as const
+export type SpaceAccent = (typeof SPACE_ACCENTS)[number]
+
+export const SPACE_HEADER_STYLES = ['editorial', 'minimal'] as const
+export type SpaceHeaderStyle = (typeof SPACE_HEADER_STYLES)[number]
+
+export const SPACE_BLOCK_SPANS = ['full', 'wide', 'half', 'narrow'] as const
+export type SpaceBlockSpan = (typeof SPACE_BLOCK_SPANS)[number]
+
+export const METRIC_TONES = ['neutral', 'accent', 'positive', 'warning', 'danger'] as const
+export type MetricTone = (typeof METRIC_TONES)[number]
+
+export const CHART_MODES = ['bar', 'horizontal', 'donut', 'area'] as const
+export type ChartMode = (typeof CHART_MODES)[number]
+
+export const MARKDOWN_VARIANTS = ['default', 'callout'] as const
+export type MarkdownVariant = (typeof MARKDOWN_VARIANTS)[number]
+
+export type SpaceTheme = {
+  accent: SpaceAccent
+  style?: SpaceHeaderStyle
+}
 
 export type MetricCardDef = {
   label: string
   value?: string
   unit?: string
   trend?: string
+  tone?: MetricTone
+  target?: number
   blockId?: string
   agg?: 'count' | 'sum' | 'avg'
   itemField?: string
   filterStatus?: string
 }
 
-export type TableColumnKind = 'text' | 'number' | 'badge' | 'url' | 'date'
+export type TableColumnKind = 'text' | 'number' | 'badge' | 'url' | 'date' | 'image'
 export type TableColumnDef = {
   key: string
   label: string
@@ -40,6 +72,7 @@ export type TableColumnDef = {
 export type KanbanColumnDef = {
   key: string
   label: string
+  color?: SpaceAccent
 }
 
 export type SpaceActionDef = {
@@ -50,62 +83,69 @@ export type SpaceActionDef = {
   confirm?: boolean
 }
 
-export type MetricsBlock = {
+type BlockMeta = {
   id: string
-  type: 'metrics'
   title: string
+  subtitle?: string
+  span?: SpaceBlockSpan
+}
+
+export type MetricsBlock = BlockMeta & {
+  type: 'metrics'
   cards: MetricCardDef[]
 }
 
-export type TableBlock = {
-  id: string
+export type TableBlock = BlockMeta & {
   type: 'table'
-  title: string
   columns: TableColumnDef[]
 }
 
-export type KanbanBlock = {
-  id: string
+export type KanbanBlock = BlockMeta & {
   type: 'kanban'
-  title: string
   columns: KanbanColumnDef[]
 }
 
-export type ChecklistBlock = {
-  id: string
+export type ChecklistBlock = BlockMeta & {
   type: 'checklist'
-  title: string
 }
 
-export type TimelineBlock = {
-  id: string
+export type TimelineBlock = BlockMeta & {
   type: 'timeline'
-  title: string
 }
 
-export type ChartBlock = {
-  id: string
+export type ChartBlock = BlockMeta & {
   type: 'chart'
-  title: string
-  mode: 'bar' | 'horizontal'
+  mode: ChartMode
   labelField: string
   valueField: string
   unit?: string
   sourceBlockId?: string
 }
 
-export type MarkdownBlock = {
-  id: string
+export type MarkdownBlock = BlockMeta & {
   type: 'markdown'
-  title: string
   content: string
+  variant?: MarkdownVariant
 }
 
-export type ActionBarBlock = {
-  id: string
+export type ActionBarBlock = BlockMeta & {
   type: 'action_bar'
-  title: string
   actions: SpaceActionDef[]
+}
+
+export type CardsBlock = BlockMeta & {
+  type: 'cards'
+  columns?: 2 | 3
+  aspect?: CardsAspect
+  variant?: CardVariant
+}
+
+export type HtmlBlock = BlockMeta & {
+  type: 'html'
+  html: string
+  height?: number
+  frameless?: boolean
+  viewOf?: string[]
 }
 
 export type SpaceBlock =
@@ -117,8 +157,11 @@ export type SpaceBlock =
   | ChartBlock
   | MarkdownBlock
   | ActionBarBlock
+  | CardsBlock
+  | HtmlBlock
 
 export type SpaceSchema = {
+  theme?: SpaceTheme
   blocks: SpaceBlock[]
 }
 

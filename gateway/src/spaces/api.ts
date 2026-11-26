@@ -1,8 +1,12 @@
+import { randomBytes } from 'node:crypto'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { Hono } from 'hono'
+import { readBodyUpTo } from '../body.js'
 import type { BotRow, Db } from '../db.js'
 import { getGoal, isGoalId } from '../goals/store.js'
 import type { Hub } from '../hub.js'
-import { parseSpaceSchema, SpaceSchemaError } from './schema.js'
+import { parseSpaceSchema, parseSpaceTheme, SpaceSchemaError } from './schema.js'
 import {
   createSpace,
   deleteSpace,
@@ -33,16 +37,44 @@ import {
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
 
+const ASSET_FILE_RE = /^[0-9a-f]{16}\.(?:png|jpg|webp|gif)$/
+const MAX_SPACE_ASSET_BYTES = 6 * 1024 * 1024
+const MAX_SPACE_ASSET_REQUEST_BYTES = 9 * 1024 * 1024
+
+function detectImageType(buf: Buffer): { ext: 'png' | 'jpg' | 'webp' | 'gif'; mime: string } | null {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    return { ext: 'png', mime: 'image/png' }
+  }
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return { ext: 'jpg', mime: 'image/jpeg' }
+  }
+  if (buf.length >= 6 && (buf.subarray(0, 6).toString('ascii') === 'GIF87a' || buf.subarray(0, 6).toString('ascii') === 'GIF89a')) {
+    return { ext: 'gif', mime: 'image/gif' }
+  }
+  if (buf.length >= 12 && buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return { ext: 'webp', mime: 'image/webp' }
+  }
+  return null
+}
+
+function assetMimeByExt(file: string): string {
+  if (file.endsWith('.png')) return 'image/png'
+  if (file.endsWith('.jpg')) return 'image/jpeg'
+  if (file.endsWith('.webp')) return 'image/webp'
+  return 'image/gif'
+}
+
 export type SpacesApiDeps = {
   db: Db
   hub: Hub
   chiefId: string
+  dataDir?: string
   now?: () => number
   startSpaceAction: (bot: BotRow, space: SpaceView, action: SpaceActionDef) => { threadId: string }
 }
 
 export function mountSpaces(app: Hono, deps: SpacesApiDeps): { snapshot: () => SpacesSnapshot } {
-  const { db, hub, chiefId } = deps
+  const { db, hub, chiefId, dataDir } = deps
   const now = deps.now ?? (() => Date.now())
 
   const botById = (id: string): BotRow | undefined =>
@@ -133,9 +165,10 @@ export function mountSpaces(app: Hono, deps: SpacesApiDeps): { snapshot: () => S
 
     let schema
     try {
+      const themeOverride = body.theme !== undefined ? parseSpaceTheme(body.theme) : undefined
       schema = body.schema !== undefined
         ? parseSpaceSchema(body.schema)
-        : parseSpaceSchema(buildTemplateSchema(template, grants[0]?.botId ?? defaultBotId()))
+        : parseSpaceSchema(buildTemplateSchema(template, grants[0]?.botId ?? defaultBotId(), themeOverride))
     } catch (err) {
       return c.json({ error: err instanceof SpaceSchemaError ? err.message : 'invalid space schema' }, 400)
     }
@@ -214,14 +247,74 @@ export function mountSpaces(app: Hono, deps: SpacesApiDeps): { snapshot: () => S
     return c.json({ space: getSpaceView(db, updated.id)!, snapshot: snapshot() })
   })
 
-  app.delete('/api/spaces/:id', (c) => {
+  app.delete('/api/spaces/:id', async (c) => {
     const id = c.req.param('id')
     if (!isSpaceId(id)) return c.json({ error: 'invalid space id' }, 400)
     const hadGoal = getSpace(db, id)?.goalId
     if (!deleteSpace(db, id)) return c.json({ error: 'unknown space' }, 404)
+    if (dataDir) {
+      await rm(join(dataDir, 'spaces', id), { recursive: true, force: true }).catch(() => {})
+    }
     hub.broadcast({ type: 'spaces_changed' })
     if (hadGoal) hub.broadcast({ type: 'goals_changed' })
     return c.json({ ok: true, snapshot: snapshot() })
+  })
+
+  app.post('/api/spaces/:id/assets', async (c) => {
+    const id = c.req.param('id')
+    if (!isSpaceId(id)) return c.json({ error: 'invalid space id' }, 400)
+    if (!getSpace(db, id)) return c.json({ error: 'unknown space' }, 404)
+    if (!dataDir) return c.json({ error: 'space assets need a data folder' }, 503)
+    const raw = await readBodyUpTo(c.req.raw.body, MAX_SPACE_ASSET_REQUEST_BYTES).catch(() => null)
+    if (raw === null) return c.json({ error: 'image exceeds 6 MB limit' }, 413)
+    let body: unknown
+    try {
+      body = JSON.parse(raw.toString('utf8'))
+    } catch {
+      return c.json({ error: 'JSON object body required' }, 400)
+    }
+    if (!isObject(body) || typeof body.data !== 'string') {
+      return c.json({ error: 'send { name, data } as JSON with base64 image data' }, 400)
+    }
+    const cleanB64 = body.data.trim().replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '')
+    const bytes = Buffer.from(cleanB64, 'base64')
+    if (!bytes.length || bytes.length > MAX_SPACE_ASSET_BYTES) {
+      return c.json({ error: 'image must be 1 byte to 6 MB' }, 400)
+    }
+    const detected = detectImageType(bytes)
+    if (!detected) {
+      return c.json({ error: 'only PNG, JPEG, WebP, and GIF images are supported' }, 400)
+    }
+    const file = `${randomBytes(8).toString('hex')}.${detected.ext}`
+    const dir = join(dataDir, 'spaces', id)
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, file), bytes)
+    const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 120) : file
+    return c.json({
+      url: `/api/spaces/${id}/assets/${file}`,
+      name,
+      mime: detected.mime,
+      size: bytes.length,
+    }, 201)
+  })
+
+  app.get('/api/spaces/:id/assets/:file', async (c) => {
+    const id = c.req.param('id')
+    const file = c.req.param('file')
+    if (!isSpaceId(id) || !ASSET_FILE_RE.test(file)) return c.json({ error: 'invalid asset' }, 400)
+    if (!dataDir) return c.json({ error: 'not found' }, 404)
+    try {
+      const bytes = await readFile(join(dataDir, 'spaces', id, file))
+      return c.body(new Uint8Array(bytes), 200, {
+        'Content-Type': assetMimeByExt(file),
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        'Content-Disposition': 'inline',
+        'Cache-Control': 'private, max-age=31536000, immutable',
+      })
+    } catch {
+      return c.json({ error: 'not found' }, 404)
+    }
   })
 
   app.put('/api/spaces/:id/grants', async (c) => {

@@ -101,6 +101,7 @@ export function FeedView({
   onSpacesChange,
   selectedSpaceId,
   onSelectSpace,
+  onDesignSpaceWithBot,
   onOpenGoals,
   onGoalCreated,
   onDecide,
@@ -125,6 +126,7 @@ export function FeedView({
   onSpacesChange?: (next: SpacesSnapshot) => void
   selectedSpaceId?: string | null
   onSelectSpace?: (id: string | null) => void
+  onDesignSpaceWithBot?: (botId: string, prompt: string) => Promise<void> | void
   onOpenGoals?: () => void
   onGoalCreated?: (next: GoalsSnapshot) => void
   onDecide: (
@@ -554,6 +556,7 @@ export function FeedView({
             onSelectSpace={onSelectSpace}
             onChange={onSpacesChange ?? (() => {})}
             onOpenThread={onOpenThread}
+            onDesignWithBot={onDesignSpaceWithBot}
             onOpenGoal={goals ? () => setTab('goals') : undefined}
             onSignedOut={onSignedOut}
           />

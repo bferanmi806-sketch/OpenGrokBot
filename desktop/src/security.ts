@@ -129,7 +129,7 @@ export function secureContents(contents: ContentsLike, opts: {
     else opts.log?.(`blocked redirect to ${url.slice(0, 200)}`)
   })
   contents.on('will-frame-navigate', (e) => {
-    if (e.isMainFrame || isGateway(e.url, opts.gatewayOrigin())) return
+    if (e.isMainFrame || e.url === 'about:srcdoc' || isGateway(e.url, opts.gatewayOrigin())) return
     e.preventDefault()
     opts.log?.(`blocked subframe navigation to ${e.url.slice(0, 200)}`)
   })

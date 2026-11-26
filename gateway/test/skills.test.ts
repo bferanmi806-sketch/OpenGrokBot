@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { listSkills, readSkill, skillsDir } from '../src/skills.js'
+import { listAllSkills, listSkills, readAnySkill, readSkill, skillsDir } from '../src/skills.js'
 
 function withSkills(files: Record<string, string>): string {
   const dir = skillsDir(mkdtempSync(join(tmpdir(), 'osb-skills-')))
@@ -36,5 +36,22 @@ describe('shared skills', () => {
     expect(await readSkill(dir, 'triage.md')).toBe('# Triage\n\nBody.')
     expect(await readSkill(dir, '../secret')).toBeNull()
     expect(await readSkill(dir, 'missing')).toBeNull()
+  })
+
+  it('merges built-in skills (like space-design) and lets operator files override them by name', async () => {
+    const emptyDir = join(tmpdir(), 'osb-no-such-folder-builtin', 'skills')
+    const merged = await listAllSkills(emptyDir)
+    expect(merged.some((s) => s.name === 'space-design' && s.builtin === true)).toBe(true)
+    const builtinBody = await readAnySkill(emptyDir, 'space-design')
+    expect(builtinBody).toContain('Declarative Space Design Playbook')
+    expect(builtinBody).toContain('Bento')
+
+    const overrideDir = withSkills({
+      'space-design.md': '---\ndescription: Custom brand space guide\n---\n# Custom Space Guide\n\nAlways use emerald.',
+    })
+    const overriddenList = await listAllSkills(overrideDir)
+    const entry = overriddenList.find((s) => s.name === 'space-design')
+    expect(entry).toEqual({ name: 'space-design', description: 'Custom brand space guide' })
+    expect(await readAnySkill(overrideDir, 'space-design')).toBe('# Custom Space Guide\n\nAlways use emerald.')
   })
 })

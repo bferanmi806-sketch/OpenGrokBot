@@ -7,6 +7,40 @@ names.
 
 ## [Unreleased]
 
+### Added
+
+- **Built-in `space-design` shared skill & built-in skill merger.** Gateway now ships a built-in `space-design` playbook
+  (`gateway/src/builtin-skills.ts`) merged with operator-authored `<data>/skills/*.md` files (operator files override
+  built-ins of the same name) and surfaced via `read_skill` when designing or polishing Spaces.
+- **Rich visual cards (`cards`), full sandboxed HTML (`html`), Bento grid & Space image assets.**
+  - Extended `SpaceSchema` with space-level `theme` (`accent` + `editorial`/`minimal` header style), 12-column Bento
+    block `span` (`full`/`wide`/`half`/`narrow`), `subtitle`, KPI metric `tone` & `target` progress bars, colored Kanban
+    columns, `callout` Markdown variant, 4 native SVG chart modes (`horizontal`, `bar`, `donut`, `area`), table `image`
+    columns, `cards` blocks (cover images, eyebrow, semantic badges, metrics, tags, specs, links), and full `html` blocks.
+  - Added permanent per-Space image storage (`POST`/`GET /api/spaces/:id/assets`, magic-byte verified PNG/JPEG/WebP/GIF,
+    `nosniff` + `CSP: default-src 'none'; sandbox`, auto-cleaned on Space delete).
+  - Upgraded **Spaces** UI with an editorial hero header, inline theme swatches, visual Bento template gallery (including
+    **Rich card gallery** and **Custom HTML canvas** with live radar/scoreboard starter canvases), **Design with AI** /
+    **Polish layout with AI** flows, inline HTML editor with image upload, and stale-snapshot WebSocket protection.
+- **Role-tailored bot starter tips.** Empty DM conversations now recommend 3 distinct starter prompts tailored to each
+  built-in teammate (`Chief`, `Sorter`, `Ticker`, `Scout`) and dynamically classified custom teammate roles (both English
+  and Chinese).
+- **Local iMessage & WhatsApp Channels design spec.** Recorded the local-first architecture, `outside-data` taint and OTP
+  redaction safeguards, and 3-phase rollout in
+  `docs/superpowers/specs/2026-11-26-imessage-whatsapp-channels-design.md`.
+
+### Changed
+
+- Fixed missing `--surface`, `--surface-2`, and `--muted` CSS theme aliases across dark and light themes so Goals and
+  Spaces cards inherit consistent surface elevation and typography contrast.
+
+### Security
+
+- **Null-origin sandbox for Space HTML blocks.** `html` blocks render exclusively inside `<iframe sandbox="allow-scripts">`
+  (without `allow-same-origin`, `allow-top-navigation`, or `allow-forms`) with an injected `connect-src 'none'` CSP,
+  `<base>` / `meta refresh` stripping, host-side local image inlining, safe `postMessage` resize/link bridge, and
+  `about:srcdoc` subframe allowlisting in Electron (`desktop/src/security.ts`, `docs/security.md`).
+
 ## [0.8.2] - 2026-11-26
 
 Midnight Indigo dark mode palette refresh, refined workspace UI polish, recorded browser workflow management in the

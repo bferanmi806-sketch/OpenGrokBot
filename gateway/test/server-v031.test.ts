@@ -182,22 +182,27 @@ describe('shared skills', () => {
     expect(String(seen[0]!.messages[0]!.content)).toContain('- weekly-report — How the Friday report is laid out')
     expect(names(seen[0]!.tools)).toContain('read_skill')
     expect(String(seen[1]!.messages.find((m) => m.role === 'tool')!.content)).toBe('Three sections: wins, risks, asks.')
-    const panel = (await (await app.request('/api/bots/researcher/computer')).json()) as { skills: unknown[] }
-    expect(panel.skills).toEqual([{ name: 'weekly-report', description: 'How the Friday report is laid out' }])
+    const panel = (await (await app.request('/api/bots/researcher/computer')).json()) as { skills: { name: string; description: string; builtin?: boolean }[] }
+    expect(panel.skills).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'space-design', builtin: true }),
+      { name: 'weekly-report', description: 'How the Friday report is laid out' },
+    ]))
   })
 
-  it('names the real skills when asked for one that does not exist, and offers no tool when there are none', async () => {
+  it('names the real skills (including built-ins) when asked for one that does not exist, and exposes built-in space-design even with an empty user skills dir', async () => {
     const { app, db, dataDir, seen } = setup((messages) =>
       last(messages).role === 'tool' ? text('Ok.') : tool('read_skill', { name: '../../auth-token' }))
     withSkills(dataDir)
     await send(app, 'POST', `/api/threads/${DM}/messages`, { text: 'go' })
     await vi.waitFor(() => expect(lastReply(db)).toBe('Ok.'))
-    expect(String(seen[1]!.messages.find((m) => m.role === 'tool')!.content)).toBe('No skill called "../../auth-token". The shared skills are: weekly-report.')
+    expect(String(seen[1]!.messages.find((m) => m.role === 'tool')!.content)).toBe('No skill called "../../auth-token". The shared skills are: space-design, weekly-report.')
 
-    const bare = setup(() => text('hi'))
-    await send(bare.app, 'POST', `/api/threads/${DM}/messages`, { text: 'hi' })
-    await vi.waitFor(() => expect(bare.seen).toHaveLength(1))
-    expect(names(bare.seen[0]!.tools)).not.toContain('read_skill')
+    const bare = setup((messages) =>
+      last(messages).role === 'tool' ? text('Ready to design.') : tool('read_skill', { name: 'space-design' }))
+    await send(bare.app, 'POST', `/api/threads/${DM}/messages`, { text: 'design a space' })
+    await vi.waitFor(() => expect(lastReply(bare.db)).toBe('Ready to design.'))
+    expect(names(bare.seen[0]!.tools)).toContain('read_skill')
+    expect(String(bare.seen[1]!.messages.find((m) => m.role === 'tool')!.content)).toContain('Declarative Space Design Playbook')
   })
 })
 
