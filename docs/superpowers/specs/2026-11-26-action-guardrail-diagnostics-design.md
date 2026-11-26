@@ -1,7 +1,7 @@
 # Phase 12 设计规格：高危 Shell / 浏览器确定性护栏与统一脱敏一键诊断包
 
 **日期：** 2026-11-26  
-**状态：** 待审阅  
+**状态：** 已批准  
 **分支：** `feat/action-guardrail-diagnostics`（基于 `feat/flashback`）  
 **范围：** 包含两个正交的安全与可观测性加固模块：（1）**高危动作确定性护栏**（`gateway/src/action-guardrail.ts`），在 `shell`、`browser_click`、`browser_type(submit: true)` 与 `browser_press` 触达底层沙箱/浏览器前执行确定性高危规则拦截，通过 `approvals.execution_json`（`kind: 'computer_guardrail'`）挂起为不可记常驻规则的冻结审批卡（支持操作者内联审阅与修改参数，浏览器动作绑定 `expectedOrigin` 防 TOCTOU 漂移），批准时由网关单次直执并唤醒后续回合；（2）**统一密钥脱敏器与一键诊断包**（升级 `desktop/src/diagnostics.ts`、新增 `gateway/src/diagnostics.ts` + `GET /api/diagnostics` 及设置页一键复制摘要 / 下载 `.json` 诊断包）。
 
