@@ -63,15 +63,15 @@ export const pageLang = (locale: string): PageLang => (locale.toLowerCase().star
 const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!)
 
 const STYLE = `
-:root { color-scheme: dark light; --bg: #0b0c0f; --card: #161920; --text: #f0f2f5; --dim: #9aa1ae; --border: rgba(255, 255, 255, 0.11); --red: #ec5b53; }
-@media (prefers-color-scheme: light) { :root { --bg: #f6f7f9; --card: #fff; --text: #14161a; --dim: #5c6270; --border: #dfe2e8; --red: #c93a33; } }
+:root { color-scheme: dark light; --bg: #0c0f19; --card: #1e2233; --text: #ffffff; --dim: #aeb4c9; --border: rgba(122, 127, 147, 0.24); --red: #f06c6c; --glow: rgba(71, 81, 122, 0.22); --card-top: rgba(255, 255, 255, 0.065); --shadow: rgba(3, 5, 11, 0.56); }
+@media (prefers-color-scheme: light) { :root { --bg: #f6f7f9; --card: #fff; --text: #14161a; --dim: #5c6270; --border: #dfe2e8; --red: #c93a33; --glow: transparent; --card-top: rgba(255, 255, 255, 0.8); --shadow: rgba(15, 23, 42, 0.12); } }
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 48px 24px 24px;
-  background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC', sans-serif;
+  background: radial-gradient(ellipse 72% 44% at 50% -10%, var(--glow), transparent 72%), var(--bg); color: var(--text); font: 14px/1.6 -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC', sans-serif;
   -webkit-font-smoothing: antialiased; }
 .drag { position: fixed; top: 0; left: 0; right: 0; height: 44px; -webkit-app-region: drag; }
 .card { width: min(620px, 100%); background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 24px 26px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 22px 54px rgba(0, 0, 0, 0.42); }
+  box-shadow: inset 0 1px 0 var(--card-top), 0 22px 54px var(--shadow); }
 h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 8px; }
 p { margin: 0 0 10px; color: var(--dim); }
 .why { color: var(--red); }
@@ -118,11 +118,11 @@ document.getElementById('copy').addEventListener('click', function () {
 }
 
 const ABOUT_STYLE = `
-:root { color-scheme: dark light; --bg: #0b0c0f; --text: #f0f2f5; --dim: #9aa1ae; --faint: #6f7785; --border: rgba(255, 255, 255, 0.11); --link: #58a6ff; }
-@media (prefers-color-scheme: light) { :root { --bg: #f6f7f9; --text: #14161a; --dim: #5c6270; --faint: #7d8594; --border: #dfe2e8; --link: #0969da; } }
+:root { color-scheme: dark light; --bg: #0c0f19; --text: #ffffff; --dim: #aeb4c9; --faint: #7a7f93; --border: rgba(122, 127, 147, 0.22); --link: #8c9ee8; --glow: rgba(71, 81, 122, 0.22); }
+@media (prefers-color-scheme: light) { :root { --bg: #f6f7f9; --text: #14161a; --dim: #5c6270; --faint: #7d8594; --border: #dfe2e8; --link: #0969da; --glow: transparent; } }
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
-  padding: 36px 28px 24px; background: var(--bg); color: var(--text);
+  padding: 36px 28px 24px; background: radial-gradient(ellipse 80% 48% at 50% -10%, var(--glow), transparent 72%), var(--bg); color: var(--text);
   font: 13px/1.6 -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC', sans-serif;
   -webkit-font-smoothing: antialiased; user-select: none; }
 .drag { position: fixed; top: 0; left: 0; right: 0; height: 36px; -webkit-app-region: drag; }

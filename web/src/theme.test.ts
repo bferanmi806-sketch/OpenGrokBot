@@ -26,9 +26,18 @@ describe('theme helpers', () => {
     expect(resolveTheme('system', 'light')).toBe('light')
     expect(resolveTheme('system', 'dark')).toBe('dark')
 
-    applyTheme('light')
-    expect(document.documentElement.dataset.theme).toBe('light')
-    applyTheme('dark')
-    expect(document.documentElement.dataset.theme).toBe('dark')
+    const meta = document.createElement('meta')
+    meta.setAttribute('name', 'theme-color')
+    document.head.appendChild(meta)
+    try {
+      applyTheme('light')
+      expect(document.documentElement.dataset.theme).toBe('light')
+      expect(meta.getAttribute('content')).toBe('#f6f7f9')
+      applyTheme('dark')
+      expect(document.documentElement.dataset.theme).toBe('dark')
+      expect(meta.getAttribute('content')).toBe('#0c0f19')
+    } finally {
+      meta.remove()
+    }
   })
 })

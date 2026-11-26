@@ -9,6 +9,11 @@ names.
 
 ### Changed
 
+- **Midnight Indigo dark mode palette.** Refined the dark theme across the web workspace (`Today`, conversations,
+  computer panel, dialogs, and setup), Electron window backgrounds and startup/error/about pages, avatar ink, and VNC
+  viewer onto a cohesive midnight-indigo palette (`#0C0F19` canvas, `#121625` sidebars, `#1E2233` cards/modals,
+  `#47517A` active/glow accents, `#7A7F93` muted typography, `#FFFFFF` primary contrast) while keeping light mode
+  unchanged and syncing `<meta name="theme-color">` with the active theme.
 - Refined the Today workspace, conversations, and computer panel with lighter borders, clearer typography, and more
   distinct primary and secondary actions in both themes. Subscription cards now fit narrow screens.
 - Redesigned conversation cards in both themes with scannable report lists, amber approval headers, clearer question

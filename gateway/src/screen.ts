@@ -27,9 +27,9 @@ const VIEWER = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Screen</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  html, body { margin: 0; height: 100%; background: #080a12; overflow: hidden; }
   #screen { width: 100%; height: 100%; }
-  #status { position: fixed; left: 8px; bottom: 6px; font: 12px -apple-system, BlinkMacSystemFont, sans-serif; color: #8f8f8f; pointer-events: none; }
+  #status { position: fixed; left: 8px; bottom: 6px; font: 12px -apple-system, BlinkMacSystemFont, sans-serif; color: #7a7f93; pointer-events: none; }
 </style>
 </head>
 <body>
