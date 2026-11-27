@@ -10,7 +10,8 @@ import { findBrowser } from '../src/browsers.js'
 import { parseWorkflowBindings, runWorkflow } from '../src/workflow-runner.js'
 import { parseWorkflowTrace } from '../src/workflows.js'
 
-describe('workflow runner in Chromium', () => {
+// Windows CI runners cold-launching real Chrome + settle windows can exceed the 15s default under load.
+describe('workflow runner in Chromium', { timeout: 45_000 }, () => {
   it('replays a form through the existing page and checks the resulting URL', async (context) => {
     const dataDir = await mkdtemp(join(tmpdir(), 'osb-workflow-runner-chromium-'))
     const server = createServer((_request, response) => {

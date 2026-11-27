@@ -103,8 +103,8 @@ Every line below is implemented and covered by tests — nothing here is a roadm
     To-dos, and multi-step Goals/milestones with fuzzy deduplication, taint preservation, and one-click links back to
     the source thread — unified alongside Needs You approvals/questions/logins and tracking routines in **Tracking &
     Goals**.
-  - *Declarative Live Spaces:* Zero-JS structured boards (`metric`, `table`, `kanban`, `timeline`, `chart`, `markdown`,
-    `actions`) with per-teammate `viewer` / `editor` grants and live thread updates.
+  - *Declarative Live Spaces:* Bento-grid boards (`metric`, `table`, `kanban`, `timeline`, `chart`, `markdown`, `cards`,
+    sandboxed `html`, and `actions`) with per-teammate `viewer` / `editor` grants, Space image assets, and live thread updates.
 - **Local Credential Vault.** Store API tokens, site logins, and TOTP (2FA) seeds locally in `<data>/vault-secrets.json`
   (`0600`, never in SQLite, containers, or model prompts) with strict HTTPS domain allowlists, zero-default per-teammate
   grants, `${vault:<slug>.<field>}` references in MCP configs, approval/taint-gated `vault_fill`, and automatic output
@@ -137,10 +137,11 @@ Every line below is implemented and covered by tests — nothing here is a roadm
   invalidating KV-cache prefixes) — plus one-click redacted diagnostics copy/JSON export in **Settings → About**.
 - **Dark & Light themes + one-click default model.** Switch Dark, Light, or System appearance from the sidebar or
   Settings, and promote any connection in **AI models** to default in one click.
-- **Recorded workflow traces and replay.** API controls record typed browser steps on a teammate's existing page
-  (redacting password, one-time-code and sensitive fields automatically) and replay saved traces deterministically
-  with optional placeholder inputs and approval steps. Local-computer recordings survive window relaunches; UI
-  controls and routine scheduling are tracked separately. See [docs/workflows.md](docs/workflows.md).
+- **Recorded workflow traces and replay.** Computer-panel and API controls record typed browser steps on a teammate's
+  existing page (redacting password, one-time-code and sensitive fields automatically), review/edit drafts (placeholders,
+  step drops, approval annotations), and replay saved traces deterministically with Vault/placeholder bindings and
+  approval gates. Local-computer recordings survive window relaunches; agent drift fallback and routine triggers are
+  tracked separately. See [docs/workflows.md](docs/workflows.md).
 - **Hand it a file.** Attach images, PDFs, text or Markdown files to a message: paperclip, paste or drag. The file
   lands in the teammate's own folder where it can open it, a model that sees images gets the picture, and a PDF
   arrives with its text extracted so it can be read. See [docs/attachments.md](docs/attachments.md).
@@ -323,10 +324,11 @@ someone else's infrastructure, exposed to prompt injection. The self-hosted answ
   commands are off unless you turn them on, but nothing caps its memory or CPU, and commands it runs can reach your
   network. [docs/security.md](docs/security.md#local-computers) spells out the difference.
 - **Rules change only through the memory chip.** A bot cannot quietly rewrite what you told it.
-- **Outward actions are held for your approval.** App connector writes, MCP write tools and recorded workflow
-  approval steps are enforced in gateway code — their arguments are frozen and executed only after you click
-  Approve. General browser clicks and shell commands remain a prompt convention, so give bots their own browser
-  accounts rather than yours.
+- **Outward and high-risk actions are held for your approval.** App connector writes, MCP write tools, Vault autofill,
+  recorded workflow approval steps, and high-risk `shell` commands / irreversible browser submits caught by the
+  deterministic action guardrail are enforced in gateway code — their arguments are frozen and executed only after you
+  click Approve. Arbitrary low-risk browser clicks and reads remain unheld, so give bots their own browser accounts
+  rather than yours.
 - **Bot-to-bot messaging is off** until you allowlist a direction.
 
 [docs/security.md](docs/security.md) lists exactly what is enforced, what is a convention, and what is still
@@ -356,8 +358,8 @@ official xAI product. [Download the latest release](https://github.com/wolfqing/
 ## Roadmap
 
 - [ ] **teach-mode** — record a browser demonstration once and keep it as a workflow the teammate can run again,
-      by hand or from a routine. Typed browser recording and deterministic replay ([docs/workflows.md](docs/workflows.md))
-      are in; UI controls and routine integration are tracked in [#1](../../issues/1)
+      by hand or from a routine. Typed browser recording, deterministic replay, and computer-panel UI controls
+      ([docs/workflows.md](docs/workflows.md)) are in; agent drift fallback and routine integration are tracked in [#1](../../issues/1)
 - [x] **Computers without Docker** on macOS and Linux — a browser profile and a folder per teammate, commands
       off by default and sandboxed when on (v0.4.0); on Windows, the browser and the folder
 - [x] **Desktop app with a first-run wizard** on macOS and Linux — no Docker, Node or terminal needed, menu bar /

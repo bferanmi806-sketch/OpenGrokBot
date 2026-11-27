@@ -8,7 +8,8 @@ import { chromium } from 'playwright-core'
 import { findBrowser } from '../src/browsers.js'
 import { createWorkflowRecorder } from '../src/workflow-recorder.js'
 
-describe('workflow recorder in Chromium', () => {
+// Windows CI runners cold-launching real Chrome can exceed the 15s default under load.
+describe('workflow recorder in Chromium', { timeout: 45_000 }, () => {
   it('captures real DOM actions without double clicks, iframe reloads, or secret values', async (context) => {
     const dataDir = await mkdtemp(join(tmpdir(), 'osb-workflow-chromium-'))
     const html = `<!doctype html><html><body>

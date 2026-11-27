@@ -1,8 +1,8 @@
 # Recorded workflow traces
 
-Recorded workflows can be replayed deterministically through the teammate's existing browser. This slice exposes API
-controls only; it adds no start/stop buttons or workflow editor to the product UI. Replay does not schedule a workflow
-or hand changed pages to the agent.
+Recorded workflows can be recorded, reviewed, edited, saved, deleted, and replayed deterministically from each
+teammate's computer panel or through the gateway HTTP API. Replay does not yet trigger from a routine schedule or hand
+drifted pages to the agent.
 
 Recordings attach to the page already owned by the teammate's shared `BrowserSession`. They do not launch a second
 browser or replace its logged-in context. In local-computer mode, `showWindow()` and `hideWindow()` relaunch

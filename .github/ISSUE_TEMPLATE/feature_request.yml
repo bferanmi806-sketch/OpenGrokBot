@@ -1,0 +1,23 @@
+name: Feature request
+description: Propose a capability, connector, or UX improvement
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What workflow or problem are you trying to solve?
+      description: Concrete example of what you want a teammate or the workbench to do.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: How should it work from the operator's perspective, and how does it interact with approvals, taint, or teammate isolation?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds today (optional)

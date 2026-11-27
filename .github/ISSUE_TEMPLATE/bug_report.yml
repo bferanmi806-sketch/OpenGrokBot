@@ -1,0 +1,50 @@
+name: Bug report
+description: Report something broken or behaving unexpectedly in OpenSuperBot
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue! For security vulnerabilities, please follow **[SECURITY.md](../../blob/main/SECURITY.md)** instead of opening a public issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Clear description of what went wrong vs. what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. See error ...
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How are you running OpenSuperBot?
+      options:
+        - Desktop app (.dmg / .deb / .AppImage)
+        - Source (pnpm dev / pnpm start)
+        - Docker / VPS
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Version & OS
+      description: Paste output from Settings → About → Copy diagnostics (already redacted), or state version + OS + computer mode (local / Docker).
+      placeholder: "OpenSuperBot 0.8.2 · macOS 15 arm64 · local computer"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines (optional)
+      description: Please strip any personal URLs or private filenames if pasting raw terminal output.
+      render: shell

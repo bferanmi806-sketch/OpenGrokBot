@@ -9,9 +9,27 @@ names.
 
 ### Added
 
-- **Built-in `space-design` shared skill & built-in skill merger.** Gateway now ships a built-in `space-design` playbook
-  (`gateway/src/builtin-skills.ts`) merged with operator-authored `<data>/skills/*.md` files (operator files override
-  built-ins of the same name) and surfaced via `read_skill` when designing or polishing Spaces.
+- **Six built-in starter playbooks & shared skill merger.** Gateway ships six read-only starter playbooks out of the box
+  (`gateway/skills/*.md`: `meeting-minutes`, `research-brief`, `spreadsheet-analysis`, `doc-drafting`, `slide-outline`,
+  and `careful-browsing`, verified in `desktop/scripts/stage.mjs`) alongside the embedded `space-design` playbook
+  (`gateway/src/builtin-skills.ts`). Operator-authored `<data>/skills/*.md` files take precedence and cleanly override
+  any same-named built-in across upgrades (`lstat` + `O_NOFOLLOW`, 256 KB cap).
+- **Team Wiki section patching, dual-list search & idle chat auto-sync.** Added validated section/bullet updates via
+  `wiki_patch` (preserving untouched bullets and `[#msg:<id>]` citations with deterministic `## Change Log` entries),
+  dual-list `wiki_search` returning both ranked Wiki pages and bot-accessible original chat messages via RRF × recency,
+  and background `P3` auto-sync (plus manual **Sync from chats**) distilling idle conversations into `<data>/wiki/`.
+- **Conversational dreaming & 3D proactive delivery pacing.** Two-stage clue accumulation on repeated operator feedback
+  after proactive notifications (or explicit standing preferences) proposes editable **Rule proposal** cards without
+  silently mutating `MEMORY.md`, preserving amber taint warnings whenever external data was in context. Delivery pacing
+  coalesces webhook bursts over 60s, defers non-urgent updates for 3 minutes during active chats, and overflows beyond
+  5 non-urgent notifications/day into Today Feed & Morning Digest while urgent alerts, approvals, questions, and manual
+  runs break through immediately.
+- **Associative Flashback recall.** Zero-LLM pre-turn associative recall (`gateway/src/flashback.ts`) surfaces untainted
+  Wiki pages and out-of-window past decisions in a trailing read-only fence with 15-minute / 4-turn and 24-hour dual
+  cooldowns without invalidating KV-cache prefixes.
+- **Redacted diagnostics bundle.** One-click copy or JSON download in **Settings → About** (`gateway/src/diagnostics.ts`,
+  `desktop/src/diagnostics.ts`) redacts API keys, tokens, `?key=` query strings, and OS usernames while collecting zero
+  chat or document content.
 - **Rich visual cards (`cards`), full sandboxed HTML (`html`), Bento grid & Space image assets.**
   - Extended `SpaceSchema` with space-level `theme` (`accent` + `editorial`/`minimal` header style), 12-column Bento
     block `span` (`full`/`wide`/`half`/`narrow`), `subtitle`, KPI metric `tone` & `target` progress bars, colored Kanban
@@ -36,6 +54,11 @@ names.
 
 ### Security
 
+- **Deterministic computer action guardrail.** High-risk `shell` commands (destructive deletes, credential-path reads,
+  outbound uploads/pipes, force-pushes, privilege/system mutations) and irreversible browser submits (checkout/pay,
+  permanent delete, outbound send/publish) are intercepted deterministically in gateway code (`gateway/src/action-guardrail.ts`),
+  frozen into `approvals.execution_json` (binding browser submits to `expectedOrigin` against cross-site drift), and
+  editable inline before one-shot execution.
 - **Null-origin sandbox for Space HTML blocks.** `html` blocks render exclusively inside `<iframe sandbox="allow-scripts">`
   (without `allow-same-origin`, `allow-top-navigation`, or `allow-forms`) with an injected `connect-src 'none'` CSP,
   `<base>` / `meta refresh` stripping, host-side local image inlining, safe `postMessage` resize/link bridge, and
