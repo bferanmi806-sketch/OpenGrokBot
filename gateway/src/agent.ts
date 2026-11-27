@@ -216,6 +216,8 @@ export type AgentDeps = {
   priority?: LlmPriority
   /** 回合起点已带入外部不受信任载荷（如 MCP 写操作返回正文）：本回合直接标记 outside-data */
   tainted?: boolean
+  /** `false` additionally blocks standing rules without changing the caller's turn origin. */
+  allowStandingRules?: boolean
   /** 本回合已带入或读到外部不受信任数据时通知调用方（如群聊轮次将 speaker 的 taint 传给 Chief） */
   onTainted?: () => void
   /** 操作者发来的文件：传进历史里的附件消息，回一份怎么给模型看的说明。不传 = 只报文件名 */
@@ -600,10 +602,12 @@ export async function runTurn(
       (m) => m.kind === 'webhook' || (m.kind === 'bot_ref' && (m.payload as { tainted?: unknown } | null)?.tainted === true),
     )
     let taintedByOutsideData = deps.tainted === true || deps.origin === 'webhook'
-    const computeRuleBlock = (): RuleBlock | null =>
-      deps.origin !== 'operator'
+    const computeRuleBlock = (): RuleBlock | null => {
+      const block = deps.origin !== 'operator'
         ? (deps.origin ?? 'unknown')
         : (hasOutsideDataHistory || taintedByOutsideData) ? 'outside-data' : null
+      return block ?? (deps.allowStandingRules === false ? 'outside-data' : null)
+    }
     const initiallyTainted = hasOutsideDataHistory || taintedByOutsideData
     const activeTools = [...tools]
     const activeMcpReadToolNames = new Set(deps.mcpReadToolNames ?? [])

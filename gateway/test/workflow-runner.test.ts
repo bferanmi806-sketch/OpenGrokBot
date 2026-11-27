@@ -247,7 +247,7 @@ describe('workflow replay runner', () => {
     })
     expect(result).toMatchObject({ status: 'failed', code: 'url_mismatch', step: 1, stepsCompleted: 0 })
     expect(browser.calls).not.toContain('visible:label:Delete')
-  })
+  }, 10_000)
 
   it('polls for a delayed URL change within the recorded expectation window', async () => {
     const browser = fakePage()

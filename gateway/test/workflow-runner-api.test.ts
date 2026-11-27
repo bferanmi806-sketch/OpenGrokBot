@@ -15,23 +15,34 @@ import { saveWorkflowTrace } from '../src/workflows.js'
 
 const bot = { id: 'researcher', name: 'Scout', role: 'research', emoji: '🔎', soul_path: '' }
 
-function setup(options: { click?: (label: string) => Promise<void>; hub?: Hub } = {}) {
+function setup(options: {
+  click?: (label: string) => Promise<void>
+  missingTarget?: string
+  pageUrl?: string
+  pageText?: string
+  chat?: LLM['chat']
+  hub?: Hub
+} = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'osb-workflow-runner-'))
   const db = openDb(':memory:')
   upsertBot(db, bot)
   ensureDmThread(db, bot.id)
   const calls: string[] = []
+  let pageUrl = options.pageUrl ?? 'https://example.test/'
   const page = {
-    async goto(url: string) { calls.push(`goto:${url}`) },
-    url: () => 'https://example.test/',
+    async goto(url: string) { pageUrl = url; calls.push(`goto:${url}`) },
+    url: () => pageUrl,
     async title() { return 'Example' },
-    async innerText() { return '' },
+    async innerText() { return options.pageText ?? 'pinned page body' },
     async screenshot() { return Buffer.alloc(0) },
     async click() {},
     viewportSize: () => ({ width: 800, height: 600 }),
     getByLabel(label: string) {
       return { first: () => ({
-        async waitFor() { calls.push(`visible:${label}`) },
+        async waitFor() {
+          calls.push(`visible:${label}`)
+          if (label === options.missingTarget) throw new Error('target is not visible')
+        },
         async fill(value: string) { calls.push(`fill:${label}:${value}`) },
         async click() { calls.push(`click:${label}`); await options.click?.(label) },
         async selectOption(value: string) { calls.push(`select:${label}:${value}`) },
@@ -43,9 +54,9 @@ function setup(options: { click?: (label: string) => Promise<void>; hub?: Hub } 
     on() {},
     off() {},
   } as unknown as PageLike
-  const computer = createFakeComputer({ workflowPage: async () => page })
+  const computer = createFakeComputer({ workflowPage: async () => page, pageText: 'regular tab body' })
   const pool = createPool({ dataDir, makeComputer: async () => computer })
-  const chat = vi.fn(async () => ({ content: 'ok', toolCalls: [], raw: { role: 'assistant' as const, content: 'ok' } }))
+  const chat = vi.fn(options.chat ?? (async () => ({ content: 'ok', toolCalls: [], raw: { role: 'assistant' as const, content: 'ok' } })))
   const llm: LLM = { chat }
   const app = createApp({ db, llm, pool, ...(options.hub ? { hub: options.hub } : {}) })
   return { dataDir, db, pool, app, calls, chat, llm }
@@ -68,6 +79,127 @@ const send = (app: ReturnType<typeof createApp>['app'], method: string, path: st
 describe('workflow replay API', () => {
   const cleanups: (() => Promise<void>)[] = []
   afterEach(async () => { await Promise.all(cleanups.splice(0).map((cleanup) => cleanup())) })
+
+  it('hands target drift to the agent without exposing bindings or bypassing the run rule limit', async () => {
+    let chatCount = 0
+    const state = setup({
+      missingTarget: 'Save',
+      chat: async () => {
+        chatCount += 1
+        return chatCount === 1
+          ? {
+              content: '',
+              toolCalls: [{
+                id: 'approval-1',
+                name: 'hold_for_approval',
+                args: { action: 'Send the order', detail: 'Send the prepared order.', kind: 'email', target: 'recipient@example.test' },
+              }],
+              raw: { role: 'assistant' as const, content: '' },
+            }
+          : { content: 'I held the action for approval.', toolCalls: [], raw: { role: 'assistant' as const, content: 'I held the action for approval.' } }
+      },
+    })
+    cleanups.push(async () => {
+      state.app.stopAll()
+      await state.pool.disposeAll()
+      state.db.close()
+      await rm(state.dataDir, { recursive: true, force: true })
+    })
+    createRule(state.db, { botId: bot.id, kind: 'email', target: 'recipient@example.test', duration: 'always', now: Date.now() })
+    const runtimeValue = 'runtime-private@example.test'
+    const saved = saveWorkflowTrace(state.db, bot.id, {
+      format: 'opensuperbot.workflow', version: 1, title: 'Submit order', intent: 'Submit the operator-approved order', steps: [
+        { type: 'fill', target: { candidates: [{ label: 'Recipient' }] }, value: { kind: 'placeholder', key: 'recipient' } },
+        { type: 'click', intent: 'Click Save after reviewing the order', target: { candidates: [{ label: 'Save' }] } },
+      ],
+    })
+
+    const started = await send(state.app.app, 'POST', `/api/bots/${bot.id}/workflows/${saved.id}/run`, {
+      bindings: { recipient: runtimeValue },
+    })
+    expect(started.status).toBe(202)
+    await vi.waitFor(() => expect(state.db.prepare("SELECT count(*) AS n FROM approvals WHERE status = 'pending'").get()).toMatchObject({ n: 1 }))
+
+    const modelInput = JSON.stringify(state.chat.mock.calls.map(([messages]) => messages))
+    expect(state.chat).toHaveBeenCalled()
+    expect(modelInput).toContain('Submit the operator-approved order')
+    expect(modelInput).toContain('Click Save after reviewing the order')
+    expect(modelInput).toContain('target_not_found')
+    expect(modelInput).toContain('Save')
+    expect(modelInput).not.toContain(runtimeValue)
+    expect(state.db.prepare("SELECT count(*) AS n FROM approvals WHERE status = 'approved'").get()).toMatchObject({ n: 0 })
+  })
+
+  it('keeps fallback browser tools on the pinned workflow page and preserves action guardrails', async () => {
+    let chatCount = 0
+    const state = setup({
+      pageUrl: 'https://pinned.example.test/checkout?token=private-query-value#private-fragment',
+      pageText: 'Pinned workflow page content',
+      chat: async () => {
+        chatCount += 1
+        if (chatCount === 1) {
+          return { content: '', toolCalls: [{ id: 'read-1', name: 'browser_extract', args: {} }], raw: { role: 'assistant' as const, content: '' } }
+        }
+        if (chatCount === 2) {
+          return { content: '', toolCalls: [{ id: 'click-1', name: 'browser_click', args: { target: 'Pay now' } }], raw: { role: 'assistant' as const, content: '' } }
+        }
+        return { content: 'I stopped for operator approval.', toolCalls: [], raw: { role: 'assistant' as const, content: 'I stopped for operator approval.' } }
+      },
+    })
+    cleanups.push(async () => {
+      state.app.stopAll()
+      await state.pool.disposeAll()
+      state.db.close()
+      await rm(state.dataDir, { recursive: true, force: true })
+    })
+    const saved = saveWorkflowTrace(state.db, bot.id, {
+      format: 'opensuperbot.workflow', version: 1, title: 'Continue checkout', intent: 'Continue the checkout', steps: [
+        {
+          type: 'click', intent: 'Continue after checking the page',
+          target: { candidates: [{ label: 'Continue' }] },
+          expect: { url: 'https://pinned.example.test/next?session=expected-secret#expected-fragment' },
+        },
+      ],
+    })
+
+    const started = await send(state.app.app, 'POST', `/api/bots/${bot.id}/workflows/${saved.id}/run`)
+    expect(started.status).toBe(202)
+    await vi.waitFor(
+      () => expect(state.db.prepare("SELECT count(*) AS n FROM approvals WHERE status = 'pending'").get()).toMatchObject({ n: 1 }),
+      { timeout: 7_000, interval: 25 },
+    )
+
+    const sentMessages = state.chat.mock.calls.map(([messages]) => JSON.stringify(messages))
+    expect(sentMessages[0]).toContain('url_mismatch')
+    expect(sentMessages[0]).toContain('https://pinned.example.test/checkout?token=')
+    expect(sentMessages[0]).not.toContain('private-query-value')
+    expect(sentMessages[0]).not.toContain('private-fragment')
+    expect(sentMessages[0]).not.toContain('expected-secret')
+    expect(sentMessages[1]).toContain('Pinned workflow page content')
+    expect(sentMessages[1]).not.toContain('regular tab body')
+    const approval = state.db.prepare("SELECT execution_json FROM approvals WHERE status = 'pending'").get() as { execution_json: string }
+    expect(JSON.parse(approval.execution_json)).toMatchObject({ expectedOrigin: 'https://pinned.example.test' })
+  }, 10_000)
+
+  it('does not hand action failures to the agent', async () => {
+    const state = setup({ click: async () => { throw new Error('browser action failed') } })
+    cleanups.push(async () => {
+      state.app.stopAll()
+      await state.pool.disposeAll()
+      state.db.close()
+      await rm(state.dataDir, { recursive: true, force: true })
+    })
+    const saved = saveWorkflowTrace(state.db, bot.id, {
+      format: 'opensuperbot.workflow', version: 1, title: 'Fail closed', steps: [
+        { type: 'click', target: { candidates: [{ label: 'Continue' }] } },
+      ],
+    })
+
+    const started = await send(state.app.app, 'POST', `/api/bots/${bot.id}/workflows/${saved.id}/run`)
+    expect(started.status).toBe(202)
+    await vi.waitFor(() => expect(state.app.isBusy(bot.id)).toBe(false))
+    expect(state.chat).not.toHaveBeenCalled()
+  })
 
   it('resumes the approved action exactly once and keeps runtime values out of SQLite', async () => {
     const state = setup()
