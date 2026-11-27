@@ -655,6 +655,8 @@ describe('workflow replay API', () => {
     const promptContext = JSON.stringify(state.chat.mock.calls.map(([messages]) =>
       (messages ?? []).filter((message) => message.role !== 'system'),
     ))
+    const firstUserPrompt = (state.chat.mock.calls[0]?.[0] ?? []).find((message) => message.role === 'user')?.content ?? ''
+    expect(firstUserPrompt).toContain('"workflowTitle":"Continue [private workflow value]"')
     expect(promptContext).toContain('https://example.test/:redacted')
     expect(promptContext).not.toContain('https://example.test/checkout')
     expect(promptContext).not.toContain(runtimeValue)
